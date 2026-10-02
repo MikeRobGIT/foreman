@@ -62,5 +62,34 @@ class ParseTest(unittest.TestCase):
         self.assertEqual(backlog.serialise(backlog.parse(t)), t)
 
 
+class BuildTest(unittest.TestCase):
+    def test_escape_pipes_and_reject_newlines(self):
+        self.assertEqual(backlog.escape('a | b'), 'a \\| b')
+        self.assertEqual(backlog.escape('a \\| b'), 'a \\| b')
+        row, problems = backlog.make_row(['IB-9', 'T', 'low', 'ready', 'one\ntwo', 's'], 'IB')
+        self.assertIsNone(row)
+        self.assertIn('acceptance has a newline', problems)
+
+    def test_build_round_trips_through_parse(self):
+        cells = ['IB-9', 'Title `x`', 'medium', 'blocked — waits on a \\| b', 'Acc.', '#1']
+        line = backlog.build(cells)
+        self.assertEqual(line.count(' | '), 5)
+        self.assertEqual(backlog.parse(line).rows()[0].cells(), cells)
+
+    def test_validate_rules(self):
+        ok = ['IB-9', 'T', 'low', 'ready', 'A', 'S']
+        self.assertEqual(backlog.validate_cells(ok, 'IB'), [])
+        self.assertIn('risk must be low, medium or high', backlog.validate_cells(['IB-9', 'T', 'huge', 'ready', 'A', 'S'], 'IB'))
+        self.assertIn('unknown status "maybe"', backlog.validate_cells(['IB-9', 'T', 'low', 'maybe', 'A', 'S'], 'IB'))
+        self.assertIn('title is empty', backlog.validate_cells(['IB-9', ' ', 'low', 'ready', 'A', 'S'], 'IB'))
+        self.assertIn('bad id "X-1"', backlog.validate_cells(['X-1', 'T', 'low', 'ready', 'A', 'S'], 'IB'))
+        self.assertEqual(backlog.validate_cells(['NEW-1', 'T', 'low', 'ready', 'A', 'S'], 'IB'), [])
+
+    def test_line_problems(self):
+        self.assertEqual(backlog.line_problems('| IB-1 | a | b | c | d | e |'), [])
+        self.assertEqual(backlog.line_problems('| IB-1 | a | b |'), [('separators', 2)])
+        self.assertEqual(backlog.line_problems('| IB-1 | a\nb | c | d | e | f |'), [('newline',)])
+
+
 if __name__ == '__main__':
     unittest.main()

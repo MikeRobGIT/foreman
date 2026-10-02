@@ -81,3 +81,47 @@ def parse(text, prefix='IB'):
 
 def serialise(bl):
     return '\n'.join(l.raw if isinstance(l, Row) else str(l) for l in bl.lines)
+
+
+FIELD_NAMES = ('id', 'title', 'risk', 'status', 'acceptance', 'source')
+
+
+def escape(value):
+    return re.sub(r'(?<!\\)\|', r'\\|', value)
+
+
+def build(cells):
+    return '| ' + SEP.join(cells) + ' |'
+
+
+def line_problems(line):
+    """bk.py's two table rules for a whole row line."""
+    if '\n' in line:
+        return [('newline',)]
+    n = line.count(SEP)
+    return [] if n == 5 else [('separators', n)]
+
+
+def validate_cells(cells, prefix):
+    problems = []
+    for name, value in zip(FIELD_NAMES, cells):
+        if '\n' in value or '\r' in value:
+            problems.append(f'{name} has a newline')
+    id_, title, risk, status_text = cells[0], cells[1], cells[2], cells[3]
+    if not re.fullmatch(rf'{re.escape(prefix)}-\d+|NEW-\d+', id_):
+        problems.append(f'bad id "{id_}"')
+    if not title.strip():
+        problems.append('title is empty')
+    if risk not in RISKS:
+        problems.append('risk must be low, medium or high')
+    word = (re.match(r'[a-z-]+', status_text) or [''])[0]
+    if word not in STATUSES:
+        problems.append(f'unknown status "{word or status_text}"')
+    if not problems and build(cells).count(SEP) != 5:
+        problems.append('a cell contains an unescaped " | "')
+    return problems
+
+
+def make_row(cells, prefix):
+    problems = validate_cells(cells, prefix)
+    return (None, problems) if problems else (Row(build(cells), cells), [])
