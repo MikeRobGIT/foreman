@@ -21,6 +21,7 @@ Then, in a project: `/foreman init`, review the two files it writes, commit them
 | command | what it does |
 |---|---|
 | `/foreman init` | write `.claude/foreman.config.md` and the backlog from the templates, filled with what it can detect (gate command, merge tool, CI checks, PR bots, reviewer CLIs, env files, install command). Never overwrites. |
+| `/foreman ui` | start the backlog UI (see **Backlog UI**); `ui stop` stops it. |
 | `/foreman` | one pass on the topmost `ready` row; stops before merge |
 | `/foreman IB-12` | one pass on that row (the only way to run a `risk: high` row) |
 | `/foreman --auto-merge` (or `loop`) | keep going: merge each fully green pass, then take the next row |
@@ -32,6 +33,21 @@ Then, in a project: `/foreman init`, review the two files it writes, commit them
 can't start it on its own (the Skill tool refuses it). `pr-address-comments` stays model-invocable because
 foreman's step 8 invokes it. Bare `/foreman` works when no other command is named `foreman`; the full name
 is `/foreman:foreman`.
+
+## Backlog UI
+
+`/foreman ui` starts a local web UI for the backlog: the ready queue in pick order (drag to reorder), search and
+filters across every row, a one-row-at-a-time triage mode, progress charts, and a form to file or edit rows.
+It reads the backlog from `origin`'s default branch, never your working copy.
+
+- **Edits are pending until you publish.** They live in `~/.claude/foreman/<repo-key>/pending.json`.
+  **Publish** replays them onto a fresh branch (`backlog/ui-<date>-<n>`) in a temporary worktree, commits,
+  pushes and opens one PR with `gh`. A change whose row changed on main in the meantime is shown as a
+  conflict and kept pending, never applied to the new text silently.
+- **Security.** The server binds to `127.0.0.1` only, needs the session token from the printed URL (stored
+  as an `HttpOnly; SameSite=Strict` cookie), and refuses any `Host` other than `127.0.0.1`/`localhost`.
+- **Themes.** Auto follows your system light/dark setting; Light and Dark pin it (remembered per browser).
+- `/foreman ui stop` stops the server. Without `gh`, Publish can't open the PR and Progress shows counts only.
 
 ## Prerequisites (not bundled)
 

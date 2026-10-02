@@ -1,7 +1,7 @@
 ---
 name: foreman
 description: One improvement pass from the backlog — plan → PR → wait for bots + CI → address comments → browser-verify → stop for human merge. Manual by default; with `--auto-merge` (or `loop`) it self-drives the backlog, auto-merging each fully-green pass and moving to the next item (no `/loop` needed). With `parallel N` it runs N worktree-isolated workers on separate batches at once (many items per invocation) while merging stays one PR at a time. `init` scaffolds the config and backlog for a new project. Project-agnostic; reads .claude/foreman.config.md.
-argument-hint: "[init] [item-id] [tag:<x>] [loop|--auto-merge] [parallel N]"
+argument-hint: "[init|ui|ui stop] [item-id] [tag:<x>] [loop|--auto-merge] [parallel N]"
 disable-model-invocation: true
 ---
 
@@ -37,6 +37,7 @@ Tokens may be combined in any order (e.g. `IB-03 loop`; ids use the config's `id
 
 - `init` — **set up a project** (see **Init**): write `.claude/foreman.config.md` and the backlog from the
   plugin's templates, filled with what can be detected. Runs alone; other tokens are ignored.
+- `ui` — **open the backlog UI** (see **Backlog UI**); `ui stop` stops it.
 - (none) — pick the topmost `status: ready` item from the configured backlog.
 - `<item-id>` (e.g. `IB-07`) — run that specific item (the only way to start a `risk: high` item).
 - `tag:<x>` (e.g. `tag:e2e`) — only consider rows whose title contains `[x]`. Combines with
@@ -209,6 +210,23 @@ You run steps 2-8 on your batch in your own worktree, with these overrides:
   `bookkeeping_tool`: `{"done": [{"id", "note"}], "append": [{"id", "note"}], "new_rows": ["| <prefix>-NEW-a | title | risk | ready | acceptance | source |"],
   "rule_notes": [{"file", "old", "new"}]}` (`old` is the exact sentence, one match; a raw ` | ` in a note or a row
   shifts the table's columns: write `\|`; the orchestrator adds `pr` and numbers `<prefix>-NEW-*` from the real max id).
+
+## Backlog UI (`/foreman ui`)
+
+Start the local backlog UI for this repo and print its URL; do nothing else in this invocation.
+
+1. Check that the config's `backlog_path` (default `.claude/improvement-backlog.md`) exists on `origin`'s
+   default branch: `git cat-file -e origin/HEAD:<backlog_path>` after `git fetch -q origin`. If it doesn't,
+   say so and suggest `/foreman init`; don't start anything.
+2. Run it in the background, then print the URL it outputs (one line; the token is part of it):
+   ```bash
+   python3 "${CLAUDE_PLUGIN_ROOT}/scripts/ui.py" --repo "$PWD"
+   ```
+   A second `/foreman ui` reuses the running server. `/foreman ui stop` runs the same script with `--stop`.
+3. Tell the user, in two or three lines:
+   - Edits collect as pending changes on this machine.
+   - **Publish** opens one PR from a temporary worktree, so their checkout is never touched.
+   - The UI's PR is separate from the `/foreman` bookkeeping PR. When both change the same row, the UI shows the conflict before publishing.
 
 ## Init (`/foreman init`)
 

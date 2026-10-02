@@ -14,7 +14,7 @@ git() { /usr/bin/git -c user.name=t -c user.email=t@example.com "$@"; }
 
 echo "## syntax"
 for f in "$root"/scripts/*.sh "$root"/reviewers/*.sh; do check "bash -n ${f#$root/}" bash -n "$f"; done
-check "py_compile" python3 -m py_compile "$root/scripts/cfg.py" "$root/scripts/bk.py"
+check "py_compile" python3 -m py_compile "$root/scripts/cfg.py" "$root/scripts/bk.py" "$root/scripts/backlog.py" "$root/scripts/ui.py"
 
 echo "## cfg.py"
 cat >"$T/c.md" <<'EOF'
@@ -242,6 +242,12 @@ done
 for flag in --yolo --disable-approval --disable-sandbox; do
   check "muse never runs with $flag" bash -c "! grep -qx -- '$flag' '$MUSE_CALLED.args'"
 done
+
+echo "## backlog.py + ui.py"
+check "test_backlog.py" python3 "$root/tests/test_backlog.py"
+check "test_ui_api.py" python3 "$root/tests/test_ui_api.py"
+echo "## ui js"
+if command -v node >/dev/null; then check "test_ui_js.mjs" node --test "$root/tests/test_ui_js.mjs"; else echo "SKIP node not installed"; fi
 
 echo
 echo "passed $pass, failed $fail"
