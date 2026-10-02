@@ -13,6 +13,8 @@ claude plugin install foreman@foreman
 ```
 
 Then, in a project: `/foreman init`, review the two files it writes, commit them, and run `/foreman`.
+`.claude/` is a protected path, so Claude Code asks you to approve the two writes (in `-p` mode, use
+`--permission-mode auto`; plain `acceptEdits` denies them).
 
 ## Usage
 
