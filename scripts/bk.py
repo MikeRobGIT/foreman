@@ -34,6 +34,7 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import cfg  # noqa: E402
+import backlog  # noqa: E402
 
 
 def walk(value, fn):
@@ -57,7 +58,7 @@ def main():
     BACKLOG = cfg.get(repo, 'backlog_path', '.claude/improvement-backlog.md')
     P = cfg.get(repo, 'id_prefix', 'IB')
     E = re.escape(P)
-    ROW = re.compile(rf'^\| {E}-(\d+) \|')
+    ROW = backlog.row_pattern(P)
     NEW = re.compile(rf'{E}-NEW-[A-Za-z0-9]+')
 
     path = os.path.join(repo, BACKLOG)
@@ -143,10 +144,11 @@ def main():
             log.append(f'append {a["id"]}')
 
         for row in rep.get('new_rows', []):
-            if '\n' in row:
+            issue = (backlog.line_problems(row) or [None])[0]
+            if issue == ('newline',):
                 problems.append(f'{row[:12]}: new row has a newline')
-            elif row.count(' | ') != 5:
-                problems.append(f'{row[:12]}: {row.count(" | ")} " | " separators, want 5 (escape a pipe as \\|)')
+            elif issue:
+                problems.append(f'{row[:12]}: {issue[1]} " | " separators, want 5 (escape a pipe as \\|)')
             else:
                 new_rows.append(row)
                 log.append(f'new    {row[:60]}')
