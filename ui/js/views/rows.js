@@ -12,6 +12,8 @@ export function render(root) {
   const sel = byId(state.selectedId);
   const allTags = [...new Set(all.flatMap((r) => tags(r.title)))].sort();
   const unparsed = state.data.rows.filter((r) => r.unparsed);
+  const scrollWrapper = root.querySelector('div[style*="overflow:auto"]');
+  const scrollTop = scrollWrapper?.scrollTop ?? 0;
   root.innerHTML = `<div class="toolbar">
       <input type="search" id="q" placeholder="Search ids, titles, notes, file paths…" value="${esc(f.q)}" aria-label="Search">
       <div class="seg" role="group" aria-label="Status">${STATUSES.map((s) => `<button data-status="${s}" aria-pressed="${f.status === s}">${s[0].toUpperCase() + s.slice(1)} ${count(s)}</button>`).join('')}</div>
@@ -25,6 +27,9 @@ export function render(root) {
     </tbody></table>${list.length > 400 ? `<p class="hint wrap">Showing 400 of ${list.length}; narrow the search.</p>` : ''}</div>
     <aside class="drawer" id="drawer">${sel ? detailHtml(sel, sel.position ? `queue position ${sel.position}` : '') : '<p class="hint">Select a row to read it.</p>'}</aside></div>`;
   if (sel) bindDetail(root.querySelector('#drawer'), sel);
+  const newScrollWrapper = root.querySelector('div[style*="overflow:auto"]');
+  if (newScrollWrapper) newScrollWrapper.scrollTop = scrollTop;
+  root.querySelector('tr.sel')?.scrollIntoView({ block: 'nearest' });
   const q = root.querySelector('#q');
   q.oninput = () => { state.filters.q = q.value; renderKeepFocus(root, 'q'); };
   root.querySelector('#pr').oninput = (e) => { state.filters.pr = e.target.value.replace(/\D/g, ''); renderKeepFocus(root, 'pr'); };

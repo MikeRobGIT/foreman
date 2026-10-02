@@ -5,18 +5,19 @@ import { api } from '../api.js';
 let loading = false;
 
 export function render(root) {
-  if (!state.progress && !loading) {
+  if (!state.progress && !loading && !state.error) {
     loading = true;
     api.progress().then((p) => set({ progress: p })).catch((e) => set({ error: e.message })).finally(() => { loading = false; });
   }
   const p = state.progress;
+  const err = state.error;
   const ready = readyQueue();
   const byRisk = ['low', 'medium', 'high'].map((k) => [k, ready.filter((r) => r.risk === k).length]);
   const oldest = [...ready].sort((a, b) => (a.touched || 0) - (b.touched || 0)).slice(0, 8);
   root.innerHTML = `
     <div class="chart"><h3>Shipped vs filed, per day</h3>
       <p>Rows marked done (by their PR's merge date) and rows filed from that day's PRs. The backlog shrinks on days the first bar is taller.</p>
-      ${!p ? '<p class="hint">Loading merge dates…</p>' : !p.available ? `<p class="hint">${esc(p.message)}</p>` : bars(p.days)}
+      ${err ? `<p class="hint">Couldn't load merge dates: ${esc(err)}</p>` : !p ? '<p class="hint">Loading merge dates…</p>' : !p.available ? `<p class="hint">${esc(p.message)}</p>` : bars(p.days)}
       <div class="legend"><span><i style="background:var(--accent)"></i>Done</span><span><i style="background:var(--medink)"></i>Filed</span></div></div>
     <div class="split" style="grid-template-columns:1fr 1fr">
       <div class="chart"><h3>Ready by risk</h3><p>What the loop can pick (low, medium) versus what waits for you (high).</p>

@@ -14,7 +14,7 @@ export function render(root) {
       <span><b>${l.length ? i + 1 : 0}</b> of ${l.length}</span></div>
     <div class="meter"><i style="width:${l.length ? ((i + 1) / l.length) * 100 : 0}%"></i></div>
     ${r ? `<div class="card">
-      <div class="crumb">${esc(r.id)} · queue position ${r.position} · last touched ${ago(r.touched)} ago</div>
+      <div class="crumb">${esc(r.id)} · queue position ${r.position} · last touched ${['today', 'unknown'].includes(ago(r.touched)) ? ago(r.touched) : ago(r.touched) + ' ago'}</div>
       <h1>${inline(r.title)}</h1>
       <div class="chips"><span class="risk ${esc(r.risk)}">${esc(r.risk)}</span><span class="st ready">ready</span><span>· from ${inline(r.source)}</span></div>
       <div class="notes">${splitNotes(r.acceptance).map((b) => `<div class="block"><div class="lbl">${esc(b.label)}</div>${b.html}</div>`).join('')}</div>
@@ -28,6 +28,7 @@ export function render(root) {
 }
 
 async function decide(key) {
+  if (state.busy) return;
   const l = list();
   const r = l[Math.min(state.triage.index, l.length - 1)];
   if (!r) return;
@@ -35,10 +36,10 @@ async function decide(key) {
   if (key === 'k') return next();
   if (key === 'u') return A.undo();
   if (key === 'e') return set({ view: 'edit', editing: { mode: 'edit', id: r.id } });
-  if (key === 't') { await A.moveTop(r.id); return next(); }
-  if (key === 'ArrowDown') { await A.moveBottom(r.id); return next(); }
+  if (key === 't') { if (await A.moveTop(r.id)) return next(); return; }
+  if (key === 'ArrowDown') { if (await A.moveBottom(r.id)) return next(); return; }
   const to = { d: 'deferred', b: 'blocked', x: 'cancelled' }[key];
-  if (to && (await A.setStatus(r.id, to))) set({ triage: { ...state.triage } });
+  if (to && (await A.setStatus(r.id, to))) { set({ triage: { ...state.triage } }); return next(); }
 }
 
 export function onKey(e) {
