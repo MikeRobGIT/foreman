@@ -39,7 +39,7 @@ async function decide(key) {
   if (key === 't') { if (await A.moveTop(r.id)) return next(); return; }
   if (key === 'ArrowDown') { if (await A.moveBottom(r.id)) return next(); return; }
   const to = { d: 'deferred', b: 'blocked', x: 'cancelled' }[key];
-  if (to && (await A.setStatus(r.id, to))) { set({ triage: { ...state.triage } }); return next(); }
+  if (to && (await A.setStatus(r.id, to))) set({ triage: { ...state.triage } });
 }
 
 export function onKey(e) {

@@ -3,14 +3,15 @@ import { esc, inline, ago } from '../md.js';
 import { api } from '../api.js';
 
 let loading = false;
+let failed = '';
 
 export function render(root) {
-  if (!state.progress && !loading && !state.error) {
+  if (!state.progress && !loading && !failed) {
     loading = true;
-    api.progress().then((p) => set({ progress: p })).catch((e) => set({ error: e.message })).finally(() => { loading = false; });
+    api.progress().then((p) => set({ progress: p })).catch((e) => { failed = e.message; set({}); }).finally(() => { loading = false; });
   }
   const p = state.progress;
-  const err = state.error;
+  const err = failed;
   const ready = readyQueue();
   const byRisk = ['low', 'medium', 'high'].map((k) => [k, ready.filter((r) => r.risk === k).length]);
   const oldest = [...ready].sort((a, b) => (a.touched || 0) - (b.touched || 0)).slice(0, 8);
