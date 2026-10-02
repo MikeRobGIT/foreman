@@ -6,6 +6,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 import unittest
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -22,6 +23,7 @@ CONFIG = '---\nbacklog_path: .claude/improvement-backlog.md\nid_prefix: IB\n---\
 FAKE_GH = '''#!/bin/sh
 echo "$@" >> "$FAKE_GH_LOG"
 [ -n "$FAKE_GH_FAIL" ] && { echo "gh failed" >&2; exit 1; }
+[ -n "$FAKE_GH_BLOCK" ] && [ "$1 $2" = "pr create" ] && while [ ! -e "$FAKE_GH_BLOCK" ]; do sleep 0.05; done
 case "$1 $2" in
   "pr create") echo "https://github.com/acme/repo/pull/77" ;;
   "pr list") echo '[{"number":5,"mergedAt":"2026-10-01T10:00:00Z"},{"number":4,"mergedAt":"2026-09-30T10:00:00Z"}]' ;;
@@ -172,6 +174,7 @@ class PublishTest(unittest.TestCase):
     def tearDown(self):
         self.f.close()
         os.environ.pop('FAKE_GH_FAIL', None)
+        os.environ.pop('FAKE_GH_BLOCK', None)
 
     def remote_branches(self):
         return [l.split('refs/heads/')[1] for l in git(self.f.work, 'ls-remote', '--heads', 'origin').splitlines()]
@@ -217,6 +220,49 @@ class PublishTest(unittest.TestCase):
         self.assertEqual(len(data['ops']), 1)
         self.assertEqual(data['results'][0]['result'], 'conflict')
         self.assertIn('done (#9)', data['results'][0]['reason'])
+
+    def test_publish_of_noop_changes_clears_them(self):
+        self.f.request('POST', '/api/ops', {'op': 'status', 'id': 'IB-1', 'to': 'deferred', 'reason': ''})
+        self.f.request('POST', '/api/ops', {'op': 'move', 'id': 'IB-2', 'to': 'top'})
+        other = os.path.join(self.f.tmp, 'other')
+        git(self.f.tmp, 'clone', '-q', self.f.origin, other)
+        p = os.path.join(other, '.claude/improvement-backlog.md')
+        text = open(p).read().replace('| IB-1 | One | low | ready | A | s |', '| IB-1 | One | low | done (#9) | A | s |')
+        write(p, text)
+        git(other, 'commit', '-qam', 'bookkeeping')
+        git(other, 'push', '-q')
+        status, res, _ = self.f.request('POST', '/api/publish')
+        self.assertEqual(status, 200, res)
+        self.assertEqual((res['applied'], res['conflicts'], res['pr_url']), (0, 1, None))
+        self.assertIn('already match main', res['message'])
+        self.assertEqual([b for b in self.remote_branches() if b.startswith('backlog/ui-')], [])
+        self.assertFalse(os.path.exists(self.f.gh_log) and 'pr create' in open(self.f.gh_log).read())
+        ops = self.f.server.repo.load_ops()
+        self.assertEqual([(o['op'], o['id']) for o in ops], [('status', 'IB-1')])
+        status, res, _ = self.f.request('POST', '/api/publish')
+        self.assertEqual(status, 200, res)
+
+    def test_edits_made_during_publish_survive(self):
+        repo = self.f.server.repo
+        self.f.request('POST', '/api/ops', {'op': 'set', 'id': 'IB-2', 'field': 'title', 'value': 'Two!'})
+        block = os.path.join(self.f.tmp, 'release-gh')
+        os.environ['FAKE_GH_BLOCK'] = block
+        result = {}
+        t = threading.Thread(target=lambda: result.update(res=self.f.request('POST', '/api/publish')))
+        t.start()
+        try:
+            for _ in range(200):
+                if os.path.exists(self.f.gh_log) and 'pr create' in open(self.f.gh_log).read():
+                    break
+                time.sleep(0.05)
+            self.assertTrue(repo.publishing.locked())
+            repo.add_op({'op': 'status', 'id': 'IB-1', 'to': 'deferred', 'reason': ''})
+        finally:
+            write(block, '')
+            t.join(30)
+        status, res, _ = result['res']
+        self.assertEqual((status, res['applied']), (200, 1), res)
+        self.assertEqual([(o['op'], o['id']) for o in repo.load_ops()], [('status', 'IB-1')])
 
     def test_publish_leaves_checkout_untouched(self):
         p = os.path.join(self.f.work, '.claude/improvement-backlog.md')

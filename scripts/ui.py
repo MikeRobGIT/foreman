@@ -281,6 +281,10 @@ class Repo:
                 f.write(backlog.serialise(bl))
             title = self.title_for(applied)
             self.git('add', self.backlog_path, cwd=wt)
+            if subprocess.run(['git', 'diff', '--cached', '--quiet'], cwd=wt).returncode == 0:
+                self.settle(applied)
+                return {'pr_url': None, 'applied': 0, 'conflicts': len(conflicts), 'branch': None,
+                        'message': 'nothing to publish: the pending changes already match main'}
             self.git('commit', '-q', '-m', title, cwd=wt)
             self.git('push', '-q', '-u', 'origin', 'HEAD', cwd=wt)
             pushed = True
@@ -294,8 +298,7 @@ class Repo:
             if p.returncode:
                 raise PublishError(f'gh pr create: {p.stderr.strip() or p.stdout.strip()}')
             url = (p.stdout.strip().splitlines() or [''])[-1]
-            with self.ops_lock:
-                self.save_ops(conflicts)
+            self.settle(applied)
             pushed = False  # success: the remote branch stays for the PR
             return {'pr_url': url, 'applied': len(applied), 'conflicts': len(conflicts), 'branch': branch, 'message': ''}
         except FileNotFoundError as e:
@@ -308,6 +311,15 @@ class Repo:
             if branch:
                 self.git('branch', '-D', branch, check=False)
             self.publishing.release()
+
+    def settle(self, applied):
+        # Edits made while the publish ran are in pending.json now; remove only the ops that were handled.
+        with self.ops_lock:
+            ops = self.load_ops()
+            for o in applied:
+                if o in ops:
+                    ops.remove(o)
+            self.save_ops(ops)
 
     @staticmethod
     def title_for(applied):
