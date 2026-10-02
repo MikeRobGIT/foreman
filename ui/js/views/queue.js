@@ -54,7 +54,8 @@ export function render(root) {
     el.ondragstart = (e) => { e.dataTransfer.setData('text/plain', el.dataset.id); };
     el.ondragover = (e) => {
       e.preventDefault();
-      const after = e.offsetY > el.offsetHeight / 2;
+      const r = el.getBoundingClientRect();
+      const after = e.clientY > r.top + r.height / 2;
       el.classList.toggle('drop-after', after);
       el.classList.toggle('drop-before', !after);
     };
@@ -66,6 +67,7 @@ export function render(root) {
       el.classList.remove('drop-after', 'drop-before');
       if (id && id !== el.dataset.id) A.moveRel(id, after ? 'after' : 'before', el.dataset.id);
     };
+    el.ondragend = () => list.querySelectorAll('.drop-after, .drop-before').forEach((row) => row.classList.remove('drop-after', 'drop-before'));
   });
   list.querySelector('.row.sel')?.scrollIntoView({ block: 'nearest' });
 }
