@@ -1,0 +1,12 @@
+{
+  "name": "foreman",
+  "description": "The foreman plugin: a backlog-driven PR loop for Claude Code.",
+  "owner": { "name": "Michael Robateau" },
+  "plugins": [
+    {
+      "name": "foreman",
+      "source": "./",
+      "description": "Backlog-driven improvement loop with a configurable cross-model reviewer chain."
+    }
+  ]
+}

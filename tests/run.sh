@@ -42,6 +42,17 @@ check "default" test "$(c nope fallback)" = fallback
 printf -- '---\nextra_reviewers:\n  - codex review --base main\n---\n' >"$T/legacy.md"
 check "legacy extra_reviewers -> custom" test "$(FOREMAN_CONFIG=$T/legacy.md python3 "$root/scripts/cfg.py" "$T" chain | tr '\t' '|')" = "custom|codex review --base main|"
 
+echo "## templates"
+tc() { FOREMAN_CONFIG=$root/templates/foreman.config.md python3 "$root/scripts/cfg.py" "$T" "$@"; }
+check "template: gate" test "$(tc gate)" = "npm test"
+check "template: commented-out reviewers = empty chain" test -z "$(tc chain)"
+check "template: timeout" test "$(tc reviewer_timeout_seconds)" = 900
+check "template: empty list" test -z "$(tc required_ci)"
+mkdir -p "$T/tpl/.claude" && cp "$root/templates/improvement-backlog.md" "$T/tpl/.claude/" && printf -- '---\n---\n' >"$T/tpl/.claude/foreman.config.md"
+echo '{"pr": 1, "done": [{"id": "IB-1", "note": "x"}], "new_rows": ["| IB-NEW-a | t | low | ready | a | s |"]}' >"$T/tpl.json"
+python3 "$root/scripts/bk.py" "$T/tpl" --dry-run "$T/tpl.json" >"$T/tpl.out" 2>&1
+check "bk.py parses the template backlog" grep -q "dry run: ok, 1 new rows from IB-2" "$T/tpl.out"
+
 echo "## bk.py with a non-default prefix"
 mkdir -p "$T/bk/.claude/rules"
 cat >"$T/bk/.claude/backlog.md" <<'EOF'
