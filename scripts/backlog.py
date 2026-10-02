@@ -125,3 +125,117 @@ def validate_cells(cells, prefix):
 def make_row(cells, prefix):
     problems = validate_cells(cells, prefix)
     return (None, problems) if problems else (Row(build(cells), cells), [])
+
+
+def check_op_shape(op):
+    kind = op.get('op')
+    if kind == 'set':
+        if op.get('field') not in SETTABLE or not isinstance(op.get('value'), str) or not op.get('id'):
+            raise ValueError('set needs id, a field in title/risk/acceptance/source, and a string value')
+    elif kind == 'status':
+        if op.get('to') not in SET_STATUSES or not op.get('id'):
+            raise ValueError('status needs id and to in ready/deferred/blocked/cancelled')
+    elif kind == 'move':
+        to = op.get('to')
+        ok = to in ('top', 'bottom') or (isinstance(to, dict) and len(to) == 1 and set(to) <= {'before', 'after'})
+        if not ok or not op.get('id'):
+            raise ValueError('move needs id and to: top, bottom, {before: id} or {after: id}')
+    elif kind == 'add':
+        if op.get('insert') not in ('top', 'bottom') or not isinstance(op.get('title'), str):
+            raise ValueError('add needs title and insert top or bottom')
+    else:
+        raise ValueError(f'unknown op "{kind}"')
+
+
+def _status_text(to, reason):
+    reason = (reason or '').strip()
+    return f'{to} — {escape(reason)}' if reason else to
+
+
+def _insert_at(bl, where, fallback):
+    ready = bl.ready_indexes()
+    if where == 'top':
+        return ready[0] if ready else fallback
+    return ready[-1] + 1 if ready else fallback
+
+
+def _apply_one(bl, op):
+    kind = op['op']
+    if kind == 'add':
+        if op.get('status') in NEEDS_REASON and not (op.get('reason') or '').strip():
+            return {'result': 'invalid', 'reason': f'{op["status"]} needs a reason'}
+        cells = [op['tmp'], escape(op['title']), op['risk'], _status_text(op['status'], op.get('reason')),
+                 escape(op.get('acceptance', '')), escape(op.get('source', ''))]
+        row, problems = make_row(cells, bl.prefix)
+        if problems:
+            return {'result': 'invalid', 'reason': '; '.join(problems)}
+        rows = [i for i, l in enumerate(bl.lines) if isinstance(l, Row)]
+        bl.lines.insert(_insert_at(bl, op['insert'], (rows[-1] + 1) if rows else len(bl.lines)), row)
+        return {'result': 'applied', 'reason': ''}
+    i = bl.find(op['id'])
+    if i is None:
+        return {'result': 'conflict', 'reason': f'{op["id"]} is no longer in the backlog'}
+    row = bl.lines[i]
+    if row.raw != op.get('base'):
+        return {'result': 'conflict', 'reason': f'changed on main since you edited it; now "{row.status_text}"'}
+    if kind == 'move':
+        bl.lines.pop(i)
+        to = op['to']
+        if isinstance(to, dict):
+            where, anchor = next(iter(to.items()))
+            k = bl.find(anchor)
+            if k is None:
+                bl.lines.insert(i, row)
+                return {'result': 'conflict', 'reason': f'{anchor} is no longer in the backlog'}
+            bl.lines.insert(k if where == 'before' else k + 1, row)
+        else:
+            bl.lines.insert(_insert_at(bl, to, i), row)
+        return {'result': 'applied', 'reason': ''}
+    cells = row.cells()
+    if kind == 'set':
+        idx = {'title': 1, 'risk': 2, 'acceptance': 4, 'source': 5}[op['field']]
+        cells[idx] = op['value'] if op['field'] == 'risk' else escape(op['value'])
+    else:
+        if op['to'] in NEEDS_REASON and not (op.get('reason') or '').strip():
+            return {'result': 'invalid', 'reason': f'{op["to"]} needs a reason'}
+        cells[3] = _status_text(op['to'], op.get('reason'))
+    new, problems = make_row(cells, bl.prefix)
+    if problems:
+        return {'result': 'invalid', 'reason': '; '.join(problems)}
+    bl.lines[i] = new
+    return {'result': 'applied', 'reason': ''}
+
+
+def apply(bl, ops):
+    return [_apply_one(bl, op) for op in ops]
+
+
+def assign_ids(bl, tmp_ids):
+    pat = row_pattern(bl.prefix)
+    raws = [l.raw if isinstance(l, Row) else str(l) for l in bl.lines]  # malformed rows still hold their id
+    top = max([int(m.group(1)) for r in raws for m in [pat.match(r)] if m] or [0])
+    mapping = {}
+    for tmp in tmp_ids:
+        top += 1
+        mapping[tmp] = f'{bl.prefix}-{top}'
+    for i, l in enumerate(bl.lines):
+        if isinstance(l, Row) and l.id in mapping:
+            cells = l.cells()
+            cells[0] = mapping[l.id]
+            bl.lines[i] = Row(build(cells), cells)
+    return mapping
+
+
+def describe(op, mapping=None):
+    mapping = mapping or {}
+    kind = op['op']
+    if kind == 'add':
+        return f'new row {mapping.get(op["tmp"], op["tmp"])}: {op["title"]}'
+    if kind == 'set':
+        return f'{op["id"]}: {op["field"]} edited'
+    if kind == 'status':
+        reason = (op.get('reason') or '').strip()
+        return f'{op["id"]}: status → {op["to"]}' + (f' ({reason})' if reason else '')
+    to = op['to']
+    where = to if isinstance(to, str) else f'{next(iter(to))} {next(iter(to.values()))}'
+    return f'{op["id"]}: moved to {where}'

@@ -91,5 +91,93 @@ class BuildTest(unittest.TestCase):
         self.assertEqual(backlog.line_problems('| IB-1 | a\nb | c | d | e | f |'), [('newline',)])
 
 
+def ops_fixture():
+    return backlog.parse(FIXTURE)
+
+
+def base_of(bl, id_):
+    return bl.lines[bl.find(id_)].raw
+
+
+class OpsTest(unittest.TestCase):
+    def test_set_changes_only_that_line(self):
+        bl = ops_fixture()
+        r = backlog.apply(bl, [{'op': 'set', 'id': 'IB-5', 'field': 'title', 'value': 'New | title', 'base': base_of(bl, 'IB-5')}])
+        self.assertEqual(r[0]['result'], 'applied')
+        before, after = FIXTURE.split('\n'), backlog.serialise(bl).split('\n')
+        changed = [i for i, (a, b) in enumerate(zip(before, after)) if a != b]
+        self.assertEqual(len(changed), 1)
+        self.assertIn('| New \\| title |', after[changed[0]])
+
+    def test_status_needs_reason_for_blocked(self):
+        bl = ops_fixture()
+        r = backlog.apply(bl, [{'op': 'status', 'id': 'IB-1', 'to': 'blocked', 'reason': '', 'base': base_of(bl, 'IB-1')}])
+        self.assertEqual(r[0]['result'], 'invalid')
+        r = backlog.apply(bl, [{'op': 'status', 'id': 'IB-1', 'to': 'blocked', 'reason': 'waits on #20', 'base': base_of(bl, 'IB-1')}])
+        self.assertEqual(r[0]['result'], 'applied')
+        self.assertEqual(bl.lines[bl.find('IB-1')].status_text, 'blocked — waits on #20')
+
+    def test_move_top_bottom_before_after(self):
+        bl = ops_fixture()
+        backlog.apply(bl, [{'op': 'move', 'id': 'IB-5', 'to': 'top', 'base': base_of(bl, 'IB-5')}])
+        self.assertEqual([bl.lines[i].id for i in bl.ready_indexes()], ['IB-5', 'IB-1'])
+        backlog.apply(bl, [{'op': 'move', 'id': 'IB-5', 'to': 'bottom', 'base': base_of(bl, 'IB-5')}])
+        self.assertEqual([bl.lines[i].id for i in bl.ready_indexes()], ['IB-1', 'IB-5'])
+        backlog.apply(bl, [{'op': 'move', 'id': 'IB-1', 'to': {'after': 'IB-5'}, 'base': base_of(bl, 'IB-1')}])
+        self.assertEqual([bl.lines[i].id for i in bl.ready_indexes()], ['IB-5', 'IB-1'])
+        backlog.apply(bl, [{'op': 'move', 'id': 'IB-1', 'to': {'before': 'IB-5'}, 'base': base_of(bl, 'IB-1')}])
+        self.assertEqual([bl.lines[i].id for i in bl.ready_indexes()], ['IB-1', 'IB-5'])
+
+    def test_conflict_on_changed_base(self):
+        bl = ops_fixture()
+        r = backlog.apply(bl, [{'op': 'status', 'id': 'IB-5', 'to': 'deferred', 'reason': '', 'base': '| IB-5 | Fifth | low | ready | OLD | #13 |'}])
+        self.assertEqual(r[0]['result'], 'conflict')
+        self.assertIn('now "ready"', r[0]['reason'])
+        self.assertEqual(backlog.serialise(bl), FIXTURE)
+
+    def test_conflict_on_missing_row_and_anchor(self):
+        bl = ops_fixture()
+        r = backlog.apply(bl, [{'op': 'set', 'id': 'IB-99', 'field': 'title', 'value': 'x', 'base': 'x'},
+                               {'op': 'move', 'id': 'IB-5', 'to': {'before': 'IB-77'}, 'base': base_of(bl, 'IB-5')}])
+        self.assertEqual([x['result'] for x in r], ['conflict', 'conflict'])
+        self.assertEqual(backlog.serialise(bl), FIXTURE)
+
+    def test_chained_ops_follow_each_other(self):
+        bl = ops_fixture()
+        b1 = base_of(bl, 'IB-5')
+        backlog.apply(bl, [{'op': 'set', 'id': 'IB-5', 'field': 'risk', 'value': 'medium', 'base': b1}])
+        b2 = base_of(bl, 'IB-5')
+        fresh = ops_fixture()
+        r = backlog.apply(fresh, [{'op': 'set', 'id': 'IB-5', 'field': 'risk', 'value': 'medium', 'base': b1},
+                                  {'op': 'status', 'id': 'IB-5', 'to': 'deferred', 'reason': '', 'base': b2}])
+        self.assertEqual([x['result'] for x in r], ['applied', 'applied'])
+
+    def test_add_and_assign_ids(self):
+        bl = ops_fixture()
+        r = backlog.apply(bl, [
+            {'op': 'add', 'tmp': 'NEW-1', 'title': 'A | b', 'risk': 'low', 'status': 'ready', 'reason': '', 'acceptance': 'X', 'source': 'ui', 'insert': 'top'},
+            {'op': 'add', 'tmp': 'NEW-2', 'title': 'C', 'risk': 'low', 'status': 'ready', 'reason': '', 'acceptance': 'Y', 'source': 'ui', 'insert': 'bottom'},
+        ])
+        self.assertEqual([x['result'] for x in r], ['applied', 'applied'])
+        self.assertEqual([bl.lines[i].id for i in bl.ready_indexes()], ['NEW-1', 'IB-1', 'IB-5', 'NEW-2'])
+        mapping = backlog.assign_ids(bl, ['NEW-1', 'NEW-2'])
+        self.assertEqual(mapping, {'NEW-1': 'IB-6', 'NEW-2': 'IB-7'})
+        self.assertEqual([bl.lines[i].id for i in bl.ready_indexes()], ['IB-6', 'IB-1', 'IB-5', 'IB-7'])
+        self.assertIn('| IB-6 | A \\| b | low | ready | X | ui |', backlog.serialise(bl))
+
+    def test_invalid_value_changes_nothing(self):
+        bl = ops_fixture()
+        r = backlog.apply(bl, [{'op': 'set', 'id': 'IB-5', 'field': 'risk', 'value': 'huge', 'base': base_of(bl, 'IB-5')}])
+        self.assertEqual(r[0]['result'], 'invalid')
+        self.assertEqual(backlog.serialise(bl), FIXTURE)
+
+    def test_check_op_shape(self):
+        with self.assertRaises(ValueError):
+            backlog.check_op_shape({'op': 'set', 'id': 'IB-1', 'field': 'id', 'value': 'x'})
+        with self.assertRaises(ValueError):
+            backlog.check_op_shape({'op': 'explode'})
+        backlog.check_op_shape({'op': 'move', 'id': 'IB-1', 'to': {'after': 'IB-2'}})
+
+
 if __name__ == '__main__':
     unittest.main()
