@@ -1,13 +1,15 @@
 ---
+name: foreman
 description: One improvement pass from the backlog — plan → PR → wait for bots + CI → address comments → browser-verify → stop for human merge. Manual by default; with `--auto-merge` (or `loop`) it self-drives the backlog, auto-merging each fully-green pass and moving to the next item (no `/loop` needed). With `parallel N` it runs N worktree-isolated workers on separate batches at once (many items per invocation) while merging stays one PR at a time. `init` scaffolds the config and backlog for a new project. Project-agnostic; reads .claude/foreman.config.md.
 argument-hint: "[init] [item-id] [tag:<x>] [loop|--auto-merge] [parallel N]"
+disable-model-invocation: true
 ---
 
 # Foreman
 
 **Plugin scripts** live in `${CLAUDE_PLUGIN_ROOT}/scripts` and the reviewer adapters in
 `${CLAUDE_PLUGIN_ROOT}/reviewers` (Claude Code substitutes the absolute path in this text when it loads the
-command; it is NOT set in the Bash tool's environment). Below, `$FOREMAN` means that `scripts` path: write
+skill; it is NOT set in the Bash tool's environment). Below, `$FOREMAN` means that `scripts` path: write
 the resolved absolute path into every command you run and into every worker briefing, because subagents get
 no substitution.
 
@@ -28,6 +30,8 @@ per-project config — see **Step 0.5**. With no config it falls back to sensibl
 writes one.
 
 ## Arguments
+
+This run's arguments: `$ARGUMENTS` (empty means none).
 
 Tokens may be combined in any order (e.g. `IB-03 loop`; ids use the config's `id_prefix`, default `IB`):
 
