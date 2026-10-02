@@ -14,6 +14,8 @@ import http.cookies
 import http.server
 import json
 import os
+import re
+import shutil
 import signal
 import secrets
 import subprocess
@@ -23,6 +25,8 @@ import threading
 import time
 import urllib.parse
 import webbrowser
+from collections import Counter
+from datetime import datetime
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
@@ -61,6 +65,7 @@ class Repo:
         os.makedirs(self.state, exist_ok=True)
         self.branch = self.default_branch()
         self.lock = threading.Lock()
+        self.ops_lock = threading.Lock()
         self.publishing = threading.Lock()
         self.notice = ''
         self._fetched = None
@@ -121,46 +126,50 @@ class Repo:
         return bl, results
 
     def add_op(self, op):
-        ops = self.load_ops()
-        if op.get('op') == 'add':
-            n = 1 + max([int(o['tmp'].split('-')[1]) for o in ops if o.get('op') == 'add'] or [0])
-            op = {**op, 'tmp': f'NEW-{n}'}
-        backlog.check_op_shape(op)
-        bl, _ = self.replay(ops)
-        if op['op'] != 'add':
-            i = bl.find(op['id'])
-            if i is None:
-                raise ValueError(f'{op["id"]} is not in the backlog')
-            op = {**op, 'base': bl.lines[i].raw}
-        _, results = self.replay(ops + [op])
-        if results[-1]['result'] == 'invalid':
-            raise ValueError(results[-1]['reason'])
-        ops.append(op)
-        self.save_ops(ops)
-
-    def undo(self):
-        ops = self.load_ops()
-        if ops:
-            ops.pop()
+        with self.ops_lock:
+            ops = self.load_ops()
+            if op.get('op') == 'add':
+                n = 1 + max([int(o['tmp'].split('-')[1]) for o in ops if o.get('op') == 'add'] or [0])
+                op = {**op, 'tmp': f'NEW-{n}'}
+            backlog.check_op_shape(op)
+            bl, _ = self.replay(ops)
+            if op['op'] != 'add':
+                i = bl.find(op['id'])
+                if i is None:
+                    raise ValueError(f'{op["id"]} is not in the backlog')
+                op = {**op, 'base': bl.lines[i].raw}
+            _, results = self.replay(ops + [op])
+            if results[-1]['result'] == 'invalid':
+                raise ValueError(results[-1]['reason'])
+            ops.append(op)
             self.save_ops(ops)
 
+    def undo(self):
+        with self.ops_lock:
+            ops = self.load_ops()
+            if ops:
+                ops.pop()
+                self.save_ops(ops)
+
     def drop(self, i):
-        ops = self.load_ops()
-        if not 0 <= i < len(ops):
-            raise ValueError(f'no pending change #{i}')
-        ops.pop(i)
-        self.save_ops(ops)
+        with self.ops_lock:
+            ops = self.load_ops()
+            if not 0 <= i < len(ops):
+                raise ValueError(f'no pending change #{i}')
+            ops.pop(i)
+            self.save_ops(ops)
 
     def rebase(self, i):
-        ops = self.load_ops()
-        if not 0 <= i < len(ops) or ops[i]['op'] == 'add':
-            raise ValueError(f'change #{i} cannot be re-applied')
-        bl, _ = self.replay(ops, upto=i)
-        k = bl.find(ops[i]['id'])
-        if k is None:
-            raise ValueError(f'{ops[i]["id"]} is no longer in the backlog; drop this change')
-        ops[i] = {**ops[i], 'base': bl.lines[k].raw}
-        self.save_ops(ops)
+        with self.ops_lock:
+            ops = self.load_ops()
+            if not 0 <= i < len(ops) or ops[i]['op'] == 'add':
+                raise ValueError(f'change #{i} cannot be re-applied')
+            bl, _ = self.replay(ops, upto=i)
+            k = bl.find(ops[i]['id'])
+            if k is None:
+                raise ValueError(f'{ops[i]["id"]} is no longer in the backlog; drop this change')
+            ops[i] = {**ops[i], 'base': bl.lines[k].raw}
+            self.save_ops(ops)
 
     # ---- the view the page renders ---------------------------------------------------------------
     def blame(self, sha):
@@ -200,11 +209,112 @@ class Repo:
         return {'sha': sha, 'branch': self.branch, 'fetched_at': at, 'prefix': self.prefix,
                 'rows': rows, 'ops': ops, 'results': results, 'notice': notice}
 
+    def merged_prs(self):
+        at, val = self._prs
+        if val is not None and time.time() - at < 600:
+            return val
+        if not shutil.which('gh'):
+            return None
+        p = subprocess.run(['gh', 'pr', 'list', '--state', 'merged', '--limit', '500', '--json', 'number,mergedAt'],
+                           cwd=self.path, capture_output=True, text=True)
+        if p.returncode:
+            return None
+        val = {str(x['number']): (x.get('mergedAt') or '')[:10] for x in json.loads(p.stdout or '[]')}
+        self._prs = (time.time(), val)
+        return val
+
     def progress(self):
-        raise NotImplementedError
+        _, text, _ = self.fetch()
+        prs = self.merged_prs()
+        if prs is None:
+            return {'available': False, 'days': [], 'message': 'gh is not available, so merge dates are unknown'}
+        done, filed = Counter(), Counter()
+        for r in backlog.parse(text, self.prefix).rows():
+            m = re.match(r'done \(#(\d+)\)', r.status_text)
+            if m and prs.get(m.group(1)):
+                done[prs[m.group(1)]] += 1
+            m = re.search(r'#(\d+)', r.source)
+            if m and prs.get(m.group(1)):
+                filed[prs[m.group(1)]] += 1
+        days = sorted(set(done) | set(filed))[-30:]
+        return {'available': True, 'days': [{'day': d, 'done': done[d], 'filed': filed[d]} for d in days], 'message': ''}
+
+    def next_branch(self):
+        stem = f'backlog/ui-{datetime.now().strftime("%Y%m%d")}-'
+        local = self.git('branch', '--list', f'{stem}*').split()
+        remote = [l.split('refs/heads/')[1] for l in self.git('ls-remote', '--heads', 'origin', f'refs/heads/{stem}*', check=False).splitlines() if 'refs/heads/' in l]
+        taken = set(local) | set(remote)
+        n = 1
+        while f'{stem}{n}' in taken:
+            n += 1
+        return f'{stem}{n}'
 
     def publish(self):
-        raise NotImplementedError
+        if not self.publishing.acquire(blocking=False):
+            raise Busy()
+        wt = branch = None
+        pushed = False
+        try:
+            ops = self.load_ops()
+            if not ops:
+                return {'pr_url': None, 'applied': 0, 'conflicts': 0, 'branch': None, 'message': 'nothing pending'}
+            self.git('fetch', '-q', 'origin', self.branch)
+            base_sha = self.git('rev-parse', f'origin/{self.branch}').strip()
+            branch = self.next_branch()
+            wt = tempfile.mkdtemp(prefix='foreman-ui-')
+            os.rmdir(wt)
+            self.git('worktree', 'add', '-q', '-b', branch, wt, base_sha)
+            path = os.path.join(wt, self.backlog_path)
+            with open(path, encoding='utf-8') as f:
+                bl = backlog.parse(f.read(), self.prefix)
+            results = backlog.apply(bl, ops)
+            bad = [f'{backlog.describe(o)}: {r["reason"]}' for o, r in zip(ops, results) if r['result'] == 'invalid']
+            if bad:
+                raise PublishError('; '.join(bad))
+            applied = [o for o, r in zip(ops, results) if r['result'] == 'applied']
+            conflicts = [o for o, r in zip(ops, results) if r['result'] == 'conflict']
+            if not applied:
+                return {'pr_url': None, 'applied': 0, 'conflicts': len(conflicts), 'branch': None,
+                        'message': 'nothing to publish: every change conflicts with main'}
+            mapping = backlog.assign_ids(bl, [o['tmp'] for o in applied if o['op'] == 'add'])
+            with open(path, 'w', encoding='utf-8') as f:
+                f.write(backlog.serialise(bl))
+            title = self.title_for(applied)
+            self.git('add', self.backlog_path, cwd=wt)
+            self.git('commit', '-q', '-m', title, cwd=wt)
+            self.git('push', '-q', '-u', 'origin', 'HEAD', cwd=wt)
+            pushed = True
+            body = '\n'.join(['Backlog edits made in the foreman UI, replayed onto '
+                              f'`{self.branch}` at `{base_sha[:9]}`.', '']
+                             + [f'- {backlog.describe(o, mapping)}' for o in applied]
+                             + ([f'\nNot included ({len(conflicts)} changed on main since they were made; still pending in the UI):']
+                                + [f'- {backlog.describe(o)}' for o in conflicts] if conflicts else []))
+            p = subprocess.run(['gh', 'pr', 'create', '--base', self.branch, '--head', branch, '--title', title, '--body', body],
+                               cwd=wt, capture_output=True, text=True)
+            if p.returncode:
+                raise PublishError(f'gh pr create: {p.stderr.strip() or p.stdout.strip()}')
+            url = (p.stdout.strip().splitlines() or [''])[-1]
+            with self.ops_lock:
+                self.save_ops(conflicts)
+            pushed = False  # success: the remote branch stays for the PR
+            return {'pr_url': url, 'applied': len(applied), 'conflicts': len(conflicts), 'branch': branch, 'message': ''}
+        except FileNotFoundError as e:
+            raise PublishError(str(e))
+        finally:
+            if pushed:
+                self.git('push', '-q', 'origin', '--delete', branch, check=False)
+            if wt and os.path.exists(wt):
+                self.git('worktree', 'remove', '--force', wt, check=False)
+            if branch:
+                self.git('branch', '-D', branch, check=False)
+            self.publishing.release()
+
+    @staticmethod
+    def title_for(applied):
+        ids = {o['id'] for o in applied if o['op'] != 'add'}
+        adds = sum(1 for o in applied if o['op'] == 'add')
+        parts = ([f'triage {len(ids)} row{"s" if len(ids) != 1 else ""}'] if ids else []) + ([f'add {adds}'] if adds else [])
+        return 'docs(backlog): ' + ', '.join(parts)
 
 
 class Handler(http.server.BaseHTTPRequestHandler):
@@ -253,9 +363,20 @@ class Handler(http.server.BaseHTTPRequestHandler):
     def do_DELETE(self):
         self.route('DELETE')
 
+    def origin_ok(self):
+        p = self.server.server_port
+        origin = self.headers.get('Origin')
+        return origin is None or origin in (f'http://127.0.0.1:{p}', f'http://localhost:{p}')
+
     def route(self, method):
         if not self.host_ok():
             return self.send(403, {'error': 'this server only answers on 127.0.0.1 / localhost'})
+        if method != 'GET':
+            if not self.origin_ok():
+                return self.send(403, {'error': 'cross-origin request refused'})
+            has_body = int(self.headers.get('Content-Length') or 0) > 0
+            if has_body and self.headers.get('Content-Type', '').split(';')[0].strip().lower() != 'application/json':
+                return self.send(415, {'error': 'request body must be application/json'})
         u = urllib.parse.urlsplit(self.path)
         q = urllib.parse.parse_qs(u.query)
         if method == 'GET' and u.path == '/':

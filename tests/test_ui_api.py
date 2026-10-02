@@ -69,13 +69,15 @@ class Fixture:
         threading.Thread(target=self.server.serve_forever, daemon=True).start()
         self.port = self.server.server_port
 
-    def request(self, method, path, body=None, token=True, host=None):
+    def request(self, method, path, body=None, token=True, host=None, headers=None):
+        extra = headers
         c = http.client.HTTPConnection('127.0.0.1', self.port, timeout=30)
         headers = {'Host': host or f'127.0.0.1:{self.port}'}
         if token:
             headers['X-Foreman-Token'] = self.server.token
         if body is not None:
             headers['Content-Type'] = 'application/json'
+        headers.update(extra or {})
         c.request(method, path, json.dumps(body) if body is not None else None, headers)
         r = c.getresponse()
         data = r.read()
@@ -139,10 +141,128 @@ class ServerTest(unittest.TestCase):
         self.assertEqual(status, 400)
         self.assertIn('add needs risk', data['error'])
 
+    def test_cross_origin_post_is_refused(self):
+        status, data, _ = self.f.request('POST', '/api/ops', {'op': 'move', 'id': 'IB-2', 'to': 'top'},
+                                         headers={'Origin': 'http://127.0.0.1:1'})
+        self.assertEqual(status, 403)
+        self.assertIn('cross-origin', data['error'])
+        status, data, _ = self.f.request('GET', '/api/backlog')
+        self.assertEqual(data['ops'], [])
+
+    def test_own_origin_post_succeeds(self):
+        status, _, _ = self.f.request('POST', '/api/ops', {'op': 'move', 'id': 'IB-2', 'to': 'top'},
+                                      headers={'Origin': f'http://localhost:{self.f.port}'})
+        self.assertEqual(status, 200)
+
+    def test_post_body_must_be_json(self):
+        status, _, _ = self.f.request('POST', '/api/ops', {'op': 'move', 'id': 'IB-2', 'to': 'top'},
+                                      headers={'Content-Type': 'text/plain'})
+        self.assertEqual(status, 415)
+
     def test_bad_op_is_400(self):
         status, data, _ = self.f.request('POST', '/api/ops', {'op': 'set', 'id': 'IB-1', 'field': 'id', 'value': 'x'})
         self.assertEqual(status, 400)
         self.assertIn('set needs', data['error'])
+
+
+class PublishTest(unittest.TestCase):
+    def setUp(self):
+        self.f = Fixture()
+
+    def tearDown(self):
+        self.f.close()
+        os.environ.pop('FAKE_GH_FAIL', None)
+
+    def remote_branches(self):
+        return [l.split('refs/heads/')[1] for l in git(self.f.work, 'ls-remote', '--heads', 'origin').splitlines()]
+
+    def test_publish_creates_branch_with_only_those_lines(self):
+        self.f.request('POST', '/api/ops', {'op': 'status', 'id': 'IB-2', 'to': 'deferred', 'reason': 'later'})
+        self.f.request('POST', '/api/ops', {'op': 'add', 'title': 'New one', 'risk': 'low', 'status': 'ready', 'reason': '', 'acceptance': 'Acc', 'source': 'ui', 'insert': 'bottom'})
+        status, res, _ = self.f.request('POST', '/api/publish')
+        self.assertEqual(status, 200, res)
+        self.assertEqual((res['applied'], res['conflicts']), (2, 0))
+        self.assertEqual(res['pr_url'], 'https://github.com/acme/repo/pull/77')
+        branch = res['branch']
+        self.assertIn(branch, self.remote_branches())
+        git(self.f.work, 'fetch', '-q', 'origin')
+        diff = git(self.f.work, 'diff', 'origin/main', f'origin/{branch}', '--', '.claude/improvement-backlog.md')
+        changed = [l for l in diff.splitlines() if l.startswith(('+|', '-|'))]
+        self.assertEqual(sorted(changed), sorted([
+            '-| IB-2 | Two | medium | ready | B | s |',
+            '+| IB-2 | Two | medium | deferred \u2014 later | B | s |',
+            '+| IB-4 | New one | low | ready | Acc | ui |',
+        ]))
+        msg = git(self.f.work, 'log', '-1', '--format=%B', f'origin/{branch}')
+        self.assertNotIn('Co-Authored-By', msg)
+        gh = open(self.f.gh_log).read()
+        self.assertIn('pr create --base main --head ' + branch, gh)
+        status, data, _ = self.f.request('GET', '/api/backlog')
+        self.assertEqual(data['ops'], [])
+        self.assertEqual(len(git(self.f.work, 'worktree', 'list').splitlines()), 1)
+
+    def test_publish_keeps_conflicts(self):
+        self.f.request('POST', '/api/ops', {'op': 'status', 'id': 'IB-1', 'to': 'deferred', 'reason': ''})
+        self.f.request('POST', '/api/ops', {'op': 'set', 'id': 'IB-2', 'field': 'title', 'value': 'Two!'})
+        other = os.path.join(self.f.tmp, 'other')
+        git(self.f.tmp, 'clone', '-q', self.f.origin, other)
+        p = os.path.join(other, '.claude/improvement-backlog.md')
+        text = open(p).read().replace('| IB-1 | One | low | ready | A | s |', '| IB-1 | One | low | done (#9) | A | s |')
+        write(p, text)
+        git(other, 'commit', '-qam', 'bookkeeping')
+        git(other, 'push', '-q')
+        status, res, _ = self.f.request('POST', '/api/publish')
+        self.assertEqual((res['applied'], res['conflicts']), (1, 1))
+        status, data, _ = self.f.request('GET', '/api/backlog?refresh=1')
+        self.assertEqual(len(data['ops']), 1)
+        self.assertEqual(data['results'][0]['result'], 'conflict')
+        self.assertIn('done (#9)', data['results'][0]['reason'])
+
+    def test_publish_leaves_checkout_untouched(self):
+        p = os.path.join(self.f.work, '.claude/improvement-backlog.md')
+        open(p, 'a').write('local edit\n')
+        git(self.f.work, 'checkout', '-q', '-b', 'my-feature')
+        before = (open(p).read(), git(self.f.work, 'status', '--porcelain'), git(self.f.work, 'branch', '--show-current'))
+        self.f.request('POST', '/api/ops', {'op': 'move', 'id': 'IB-2', 'to': 'top'})
+        status, res, _ = self.f.request('POST', '/api/publish')
+        self.assertEqual(status, 200)
+        after = (open(p).read(), git(self.f.work, 'status', '--porcelain'), git(self.f.work, 'branch', '--show-current'))
+        self.assertEqual(before, after)
+
+    def test_publish_failure_cleans_up(self):
+        self.f.request('POST', '/api/ops', {'op': 'move', 'id': 'IB-2', 'to': 'top'})
+        os.environ['FAKE_GH_FAIL'] = '1'
+        status, res, _ = self.f.request('POST', '/api/publish')
+        self.assertEqual(status, 502)
+        self.assertIn('gh pr create', res['error'])
+        self.assertEqual([b for b in self.remote_branches() if b.startswith('backlog/ui-')], [])
+        self.assertNotIn('backlog/ui-', git(self.f.work, 'branch', '--list'))
+        self.assertEqual(len(git(self.f.work, 'worktree', 'list').splitlines()), 1)
+        status, data, _ = self.f.request('GET', '/api/backlog')
+        self.assertEqual(len(data['ops']), 1)
+
+    def test_concurrent_publish_is_409(self):
+        self.f.server.repo.publishing.acquire()
+        try:
+            status, _, _ = self.f.request('POST', '/api/publish')
+            self.assertEqual(status, 409)
+        finally:
+            self.f.server.repo.publishing.release()
+
+    def test_all_conflicts_publishes_nothing(self):
+        self.f.request('POST', '/api/ops', {'op': 'move', 'id': 'IB-2', 'to': 'top'})
+        ops = self.f.server.repo.load_ops()
+        ops[0]['base'] = 'stale'
+        self.f.server.repo.save_ops(ops)
+        status, res, _ = self.f.request('POST', '/api/publish')
+        self.assertEqual((res['applied'], res['pr_url']), (0, None))
+        self.assertIn('nothing to publish', res['message'])
+
+    def test_progress_uses_gh(self):
+        status, res, _ = self.f.request('GET', '/api/progress')
+        self.assertTrue(res['available'])
+        self.assertEqual(res['days'], [{'day': '2026-09-30', 'done': 0, 'filed': 1},
+                                       {'day': '2026-10-01', 'done': 1, 'filed': 0}])
 
 
 if __name__ == '__main__':
