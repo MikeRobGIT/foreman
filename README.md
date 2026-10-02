@@ -28,12 +28,18 @@ Then, in a project: `/foreman init`, review the two files it writes, commit them
 | `/foreman tag:e2e` | only rows whose title contains `[e2e]` |
 | `/foreman:pr-address-comments [pr]` | triage and fix a PR's review comments (step 8 calls it) |
 
-Bare `/foreman` works when no other command is named `foreman`; the full name is `/foreman:foreman`.
+`foreman` is a skill with `disable-model-invocation: true`: it runs only when you type `/foreman`; Claude
+can't start it on its own (the Skill tool refuses it). `pr-address-comments` stays model-invocable because
+foreman's step 8 invokes it. Bare `/foreman` works when no other command is named `foreman`; the full name
+is `/foreman:foreman`.
 
 ## Prerequisites (not bundled)
 
-- The **superpowers** plugin (`brainstorming`, `writing-plans`, `test-driven-development`,
-  `requesting-code-review`). Without it the command still runs and skips those skills.
+- The **superpowers** plugin (`superpowers@claude-plugins-official`), declared as a dependency. Installing
+  foreman installs it when the `claude-plugins-official` marketplace is added
+  (`claude plugin marketplace add anthropics/claude-plugins-official`). Without that marketplace the install
+  succeeds with a warning and foreman does not load until superpowers is installed; adding the marketplace
+  afterwards installs it automatically.
 - `git`, `gh` (signed in), `python3` 3.8+, `perl`.
 - At least one reviewer CLI from the table below, signed in, for the cross-model review.
 - For browser verification: the Claude in Chrome extension.
@@ -79,7 +85,7 @@ fell through. **Every provider in the chain may receive your diff.**
 | `codex` | `codex -m M -c model_reasoning_effort=E --sandbox read-only review --base B` | sandbox | verified (CLI 0.160.0, gpt-6.1-sol) |
 | `opencode` | `opencode run --pure --format json -m M --variant E` | `OPENCODE_PERMISSION` denies edit/web/task, bash only `git diff/log/show/status` | verified (zai-coding-plan/glm-5.3) |
 | `claude` | `claude -p --permission-mode plan --permission-prompts none --allowedTools Read,Grep,Glob,Bash(git diff/log/show:*)` | plan mode, allowlist | verified (haiku) |
-| `muse` | `muse exec --approval-mode never --disable-write --disable-shell --disable-web-tools --prompt-file …` | writes and shell disabled, diff in prompt | verified (muse-spark-1.3-contributor) |
+| `muse` | `muse exec --approval-mode never --disable-write --disable-shell --disable-web-tools --prompt-file …` | only the three `--disable-*` flags: `--approval-mode never` auto-allows every tool call (a probe without them ran a shell command and wrote a file); tests fail if one is dropped | verified (muse-spark-1.3-contributor) |
 | `prime-agent` | `prime-agent -p --no-tools --no-session --offline -nc` (prompt + diff on stdin) | no tools | verified (default model) |
 | `agy` | `agy -p … --mode plan --sandbox --output-format json` | diff in prompt, plan mode | unverified (not signed in) |
 | `pi` | `pi -p --no-session --tools read,grep,find,ls` | tool allowlist | unverified (not installed) |

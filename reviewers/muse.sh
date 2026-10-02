@@ -1,7 +1,10 @@
 #!/bin/bash
-# Meta Muse Code. Diff in the prompt file; writes, shell and web tools disabled; no session log.
-# All options go AFTER `exec`. `--approval-mode never` = never prompt (headless); with writes and shell
-# disabled nothing it could approve can change the repo. Not --yolo / --disable-approval / --disable-sandbox.
+# Meta Muse Code. Diff in the prompt file; no session log. All options go AFTER `exec`.
+# `--approval-mode never` AUTO-ALLOWS every tool call (Muse docs: "nothing stops for approval. The sandbox
+# alone contains what runs"; confirmed by a probe: without the --disable-* flags it ran `touch` and wrote
+# a file). So the read-only guarantee rests ENTIRELY on --disable-write --disable-shell --disable-web-tools
+# (with them the same probe got "tool policy denied shell execution" / "...filesystem write").
+# tests/run.sh fails if any of the three is dropped. Never add --yolo, --disable-approval or --disable-sandbox.
 . "$(dirname "$0")/_lib.sh"
 with_diff
 args=(exec --json --approval-mode never --approval-judge off --user-input-auto-resolve --disable-write

@@ -205,6 +205,7 @@ exit 0
 EOF
 cat >"$F/muse" <<'EOF'
 #!/bin/bash
+printf '%s\n' "$@" >"$MUSE_CALLED.args"
 touch "$MUSE_CALLED"; echo '{"payload":{"kind":"run_terminal","terminal":"completed","text":"review"}}'
 EOF
 chmod +x "$F"/*
@@ -234,6 +235,13 @@ check "diff over reviewer_max_diff_kb skips a diff-in-prompt adapter" grep -q 'm
 check "...without calling the CLI" test ! -e "$MUSE_CALLED"
 chain 60 30 200 muse >"$T/chain.md"; PATH=$F:$PATH rv
 check "same adapter under the cap calls the CLI and lands" test -e "$MUSE_CALLED"
+# --approval-mode never auto-allows tool calls, so these flags are muse's only read-only guarantee.
+for flag in --disable-write --disable-shell --disable-web-tools; do
+  check "muse runs with $flag" grep -qx -- "$flag" "$MUSE_CALLED.args"
+done
+for flag in --yolo --disable-approval --disable-sandbox; do
+  check "muse never runs with $flag" bash -c "! grep -qx -- '$flag' '$MUSE_CALLED.args'"
+done
 
 echo
 echo "passed $pass, failed $fail"
