@@ -101,7 +101,7 @@ dialog::backdrop{background:rgb(0 0 0 / .35)}
 dialog h2{margin:0 0 12px;font-family:var(--display);font-size:18px}
 dialog input{width:100%;font:14px var(--body);padding:9px 11px;border:1px solid var(--line);border-radius:var(--r);background:var(--field);color:var(--ink)}
 .palette ul{list-style:none;margin:10px 0 0;padding:0;max-height:300px;overflow:auto}.palette li{padding:6px 4px;color:var(--muted)}.palette li code{color:var(--ink)}
-.dlg-actions{display:flex;flex-direction:row-reverse;justify-content:flex-end;gap:8px;margin-top:14px}
+.dlg-actions{display:flex;flex-direction:row-reverse;justify-content:flex-start;gap:8px;margin-top:14px}
 .dlg-actions button{padding:6px 12px;border-radius:var(--r);border:1px solid var(--line);background:var(--btn);cursor:pointer}
 .keys-help{display:grid;grid-template-columns:auto 1fr;gap:6px 16px;font-size:13px}.keys-help dt{font-family:var(--mono)}
 @media (max-width:900px){.main,.split{grid-template-columns:1fr}.queue{border-right:0;max-height:none}.detail,.drawer{max-height:none}.cmd{min-width:0;flex:1}.keygrid,.form .three{grid-template-columns:repeat(2,1fr)}}
