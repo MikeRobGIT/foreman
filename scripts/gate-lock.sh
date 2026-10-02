@@ -59,7 +59,7 @@ done
 [ -n "$slot" ] || { echo "gate-lock: no free slot in $root after $tries tries" >&2; exit 3; }
 
 echo "$owner $(date '+%Y-%m-%d %H:%M:%S')" > "$root/$slot/owner"
-( while sleep 60; do touch "$root/$slot/owner" 2>/dev/null || exit; done ) &
+( while sleep "${FOREMAN_LOCK_BEAT:-60}"; do kill -0 $$ 2>/dev/null && touch "$root/$slot/owner" 2>/dev/null || exit; done ) &
 beat=$!
 release() { kill "$beat" 2>/dev/null; rm -f "$root/$slot/owner"; rmdir "$root/$slot" 2>/dev/null; }
 trap release EXIT

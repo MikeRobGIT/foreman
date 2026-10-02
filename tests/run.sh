@@ -137,6 +137,13 @@ check "fresh owner still there" grep -q alive "$L/slot-1/owner"
 rm -rf "$L/slot-1"
 FOREMAN_CONFIG=$T/one.md "$root/scripts/gate-lock.sh" --name db-test w -- 'test -d "$FOREMAN_LOCK_ROOT/repo/db-test"' 2>/dev/null
 check "--name holds a named lock" test $? = 0
+FOREMAN_CONFIG=$T/one.md FOREMAN_LOCK_BEAT=1 "$root/scripts/gate-lock.sh" hb -- 'sleep 29' 2>/dev/null &
+holder=$!; sleep 2
+beat=$(for c in $(pgrep -P "$holder"); do ps -o command= -p "$c" | grep -q gate-lock.sh && echo "$c"; done)
+check "heartbeat found while the holder lives" test -n "$beat"
+kill -9 "$holder"; sleep 3
+check "heartbeat exits after the holder is SIGKILLed (slot can go stale)" bash -c "! kill -0 $beat 2>/dev/null"
+pkill -f '^sleep 29$'; kill $beat 2>/dev/null; rm -rf "$L/slot-1"
 unset FOREMAN_LOCK_ROOT FOREMAN_LOCK_POLL
 
 echo "## review.sh with fake adapters and fake CLIs"
@@ -205,6 +212,22 @@ cp "$root"/reviewers/*.sh "$A/"
 chain 60 30 200 opencode good >"$T/chain.md"; PATH=$F:$PATH rv
 check "opencode exit-0-with-error JSON falls through" grep -q 'opencode.*exit 10' "$T/out/review.log.attempts"
 check "...and the next reviewer lands" grep -q '^good' "$T/out/review.log.reviewer"
+cat >"$F/codex" <<'EOF'
+#!/bin/bash
+echo 'ERROR: login failed for user bob (from the test suite codex ran)' >&2
+echo 'ERROR: rate limit exceeded in api/limits.test.ts' >&2
+echo '- [P2] app/auth.ts:3 the review itself'
+EOF
+chmod +x "$F/codex"
+chain 60 30 200 codex >"$T/chain.md"; PATH=$F:$PATH rv
+check "codex: ERROR lines from the transcript do not fall through" grep -q '^codex' "$T/out/review.log.reviewer"
+cat >"$F/codex" <<'EOF'
+#!/bin/bash
+echo 'ERROR: {"type":"error","status":400,"error":{"message":"The model is not supported when using Codex with a ChatGPT account."}}' >&2
+exit 1
+EOF
+chain 60 30 200 codex good >"$T/chain.md"; PATH=$F:$PATH rv
+check "codex: its JSON error line falls through" grep -q 'codex.*exit 10' "$T/out/review.log.attempts"
 export MUSE_CALLED=$T/muse.called
 chain 60 30 1 muse good >"$T/chain.md"; PATH=$F:$PATH rv
 check "diff over reviewer_max_diff_kb skips a diff-in-prompt adapter" grep -q 'muse.*exit 10' "$T/out/review.log.attempts"
