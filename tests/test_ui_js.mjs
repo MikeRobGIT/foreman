@@ -41,6 +41,13 @@ test('filterRows by text, status, risk, tag and PR', () => {
   assert.deepEqual(f({ pr: '10' }), ['IB-1', 'IB-3']);
 });
 
+test('filterRows PR filter rejects invalid input', () => {
+  const f = (patch) => filterRows(ROWS, { q: '', status: 'all', risk: 'any', tag: '', pr: '', ...patch }).map((r) => r.id);
+  assert.doesNotThrow(() => f({ pr: '(' }));
+  assert.deepEqual(f({ pr: '(' }), []);
+  assert.deepEqual(f({ pr: '1.' }), []);
+});
+
 test('triageList: ready rows untouched for N days, oldest first', () => {
   const now = 2_000_100_000 * 1000;
   assert.deepEqual(triageList(ROWS, 14, now).map((r) => r.id), ['IB-1']);

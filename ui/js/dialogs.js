@@ -9,6 +9,7 @@ export function ask(title, placeholder) {
   const input = d.querySelector('input');
   input.value = '';
   input.placeholder = placeholder;
+  d.returnValue = '';
   d.showModal();
   input.focus();
   return new Promise((resolve) => {
@@ -48,6 +49,7 @@ export function openPalette() {
   input.value = '';
   input.oninput = draw;
   draw();
+  d.returnValue = '';
   d.showModal();
   input.focus();
   d.onclose = () => { if (d.returnValue === 'ok') runCommand(input.value.trim(), prefix); };

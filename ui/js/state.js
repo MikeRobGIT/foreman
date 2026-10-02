@@ -19,11 +19,12 @@ export const byId = (id) => rows().find((r) => r.id === id);
 
 export function filterRows(list, f) {
   const q = f.q.trim().toLowerCase();
+  const prValid = !f.pr || /^\d+$/.test(f.pr);
   return list.filter((r) =>
     (f.status === 'all' || (f.status === 'other' ? !['ready', 'deferred', 'blocked', 'done', 'cancelled'].includes(r.status) : r.status === f.status)) &&
     (f.risk === 'any' || r.risk === f.risk) &&
     (!f.tag || (r.title.match(/\[([a-z0-9-]+)\]/gi) || []).map((t) => t.slice(1, -1).toLowerCase()).includes(f.tag.toLowerCase())) &&
-    (!f.pr || new RegExp(`#${f.pr}\\b`).test(`${r.status_text} ${r.source}`)) &&
+    (prValid && (!f.pr || new RegExp(`#${f.pr}\\b`).test(`${r.status_text} ${r.source}`))) &&
     (!q || `${r.id} ${r.title} ${r.acceptance} ${r.source}`.toLowerCase().includes(q)));
 }
 
