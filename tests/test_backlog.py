@@ -178,6 +178,35 @@ class OpsTest(unittest.TestCase):
             backlog.check_op_shape({'op': 'explode'})
         backlog.check_op_shape({'op': 'move', 'id': 'IB-1', 'to': {'after': 'IB-2'}})
 
+    def test_check_op_shape_add_validation(self):
+        # add missing risk
+        with self.assertRaises(ValueError):
+            backlog.check_op_shape({'op': 'add', 'tmp': 'NEW-1', 'title': 'T', 'status': 'ready', 'reason': '', 'acceptance': 'A', 'source': 's', 'insert': 'top'})
+        # add with bad tmp (not NEW-n)
+        with self.assertRaises(ValueError):
+            backlog.check_op_shape({'op': 'add', 'tmp': 'IB-1', 'title': 'T', 'risk': 'low', 'status': 'ready', 'reason': '', 'acceptance': 'A', 'source': 's', 'insert': 'top'})
+        # add with invalid status 'done'
+        with self.assertRaises(ValueError):
+            backlog.check_op_shape({'op': 'add', 'tmp': 'NEW-1', 'title': 'T', 'risk': 'low', 'status': 'done', 'reason': '', 'acceptance': 'A', 'source': 's', 'insert': 'top'})
+        # add with non-str acceptance
+        with self.assertRaises(ValueError):
+            backlog.check_op_shape({'op': 'add', 'tmp': 'NEW-1', 'title': 'T', 'risk': 'low', 'status': 'ready', 'reason': '', 'acceptance': 123, 'source': 's', 'insert': 'top'})
+        # valid add should not raise
+        backlog.check_op_shape({'op': 'add', 'tmp': 'NEW-1', 'title': 'T', 'risk': 'low', 'status': 'ready', 'reason': '', 'acceptance': 'A', 'source': 's', 'insert': 'top'})
+
+    def test_add_with_duplicate_tmp_is_invalid(self):
+        bl = ops_fixture()
+        r = backlog.apply(bl, [
+            {'op': 'add', 'tmp': 'NEW-1', 'title': 'First', 'risk': 'low', 'status': 'ready', 'reason': '', 'acceptance': 'X', 'source': 'ui', 'insert': 'top'},
+            {'op': 'add', 'tmp': 'NEW-1', 'title': 'Duplicate', 'risk': 'low', 'status': 'ready', 'reason': '', 'acceptance': 'Y', 'source': 'ui', 'insert': 'bottom'},
+        ])
+        self.assertEqual(r[0]['result'], 'applied')
+        self.assertEqual(r[1]['result'], 'invalid')
+        self.assertIn('already in the backlog', r[1]['reason'])
+        # verify second add didn't mutate backlog
+        ready_ids = [bl.lines[i].id for i in bl.ready_indexes()]
+        self.assertEqual(ready_ids, ['NEW-1', 'IB-1', 'IB-5'])
+
 
 if __name__ == '__main__':
     unittest.main()

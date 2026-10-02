@@ -143,6 +143,16 @@ def check_op_shape(op):
     elif kind == 'add':
         if op.get('insert') not in ('top', 'bottom') or not isinstance(op.get('title'), str):
             raise ValueError('add needs title and insert top or bottom')
+        if not re.match(r'^NEW-\d+$', op.get('tmp', '')):
+            raise ValueError('add needs tmp matching NEW-\\d+')
+        if op.get('risk') not in RISKS:
+            raise ValueError('add needs risk in low/medium/high')
+        if op.get('status') not in SET_STATUSES:
+            raise ValueError('add needs status in ready/deferred/blocked/cancelled')
+        for field in ('acceptance', 'source', 'reason'):
+            val = op.get(field, '')
+            if not isinstance(val, str):
+                raise ValueError(f'add {field} must be a string if present')
     else:
         raise ValueError(f'unknown op "{kind}"')
 
@@ -162,6 +172,8 @@ def _insert_at(bl, where, fallback):
 def _apply_one(bl, op):
     kind = op['op']
     if kind == 'add':
+        if bl.find(op['tmp']) is not None:
+            return {'result': 'invalid', 'reason': f'{op["tmp"]} already in the backlog'}
         if op.get('status') in NEEDS_REASON and not (op.get('reason') or '').strip():
             return {'result': 'invalid', 'reason': f'{op["status"]} needs a reason'}
         cells = [op['tmp'], escape(op['title']), op['risk'], _status_text(op['status'], op.get('reason')),
