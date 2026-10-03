@@ -592,6 +592,67 @@ class ResolveAgentTest(InProcess):
         self.assertIsNone(self.resolve(sid='../S1'))
         self.assertFalse(os.path.exists(os.path.join(self.fx.state, 'batches')))
 
+    def raw(self, lines, agent='a1'):
+        path = os.path.join(self.session, 'subagents', f'agent-{agent}.jsonl')
+        write(path, '\n'.join(lines) + '\n')
+        return path
+
+    TAGGED = json.dumps({'type': 'user', 'message': {'role': 'user', 'content': 'foreman-worker: w1a'}})
+
+    def test_only_the_first_user_entry_counts(self):
+        # a first user entry with no text block must not hand the tag to a later one (a tool result, say)
+        path = self.raw([json.dumps({'type': 'user', 'timestamp': self.WHEN, 'message': {'content': [{'type': 'image'}]}}),
+                         self.TAGGED])
+        self.assertEqual(hooks.transcript_head(path)[0], None)
+        self.assertIsNone(self.resolve())
+        self.assertFalse(os.path.exists(os.path.join(self.fx.state, 'batches')))
+
+    def test_a_malformed_transcript_resolves_to_nothing_and_never_raises(self):
+        user = lambda **kw: json.dumps(dict({'type': 'user'}, **kw))   # noqa: E731
+        for lines in (['{"type":"queue-operation"', self.TAGGED],       # a torn line before the first user entry
+                      ['5', self.TAGGED], ['[]', self.TAGGED], ['null', self.TAGGED],
+                      [user(message='foreman-worker: w1a')],               # message not an object
+                      [user(message=None), self.TAGGED], [user(message=[]), self.TAGGED],
+                      [user(message={'content': 7}), self.TAGGED], [user(message={'content': [None, 5]}), self.TAGGED],
+                      [user(message={'content': [{'type': 'text', 'text': 5}]}), self.TAGGED]):
+            path = self.raw(lines)
+            self.assertEqual(hooks.transcript_head(path)[0], None, lines)
+            self.assertIsNone(self.resolve(), lines)
+        self.assertFalse(os.path.exists(os.path.join(self.fx.state, 'batches')))
+
+    def test_blank_lines_are_not_malformed(self):
+        self.raw(['', json.dumps({'type': 'queue-operation', 'timestamp': self.WHEN}), '  ', self.TAGGED])
+        self.assertEqual(self.resolve()['batch'], 'w1a')
+
+
+class PretoolTest(InProcess):
+    """The dispatcher with a fake edit piece registered, as Tasks 5-10 register theirs."""
+
+    def run_pretool(self):
+        def piece(h, repo, path):
+            h.touch.add(repo)
+            h.deny('piece says no')
+        payload = self.fx.payload('Edit', {'file_path': os.path.join(self.fx.work, 'app.py')})
+        out, err = io.StringIO(), io.StringIO()
+        with mock.patch.dict(hooks.EDIT_PIECES, {99: piece}), mock.patch.object(sys, 'stdin', io.StringIO(json.dumps(payload))), \
+                contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            hooks.main(['hooks.py', 'pretool'])
+        return out.getvalue(), err.getvalue()
+
+    def test_a_deny_touches_the_marker(self):
+        path = self.put_marker('S1', age=60)
+        out, err = self.run_pretool()
+        self.assertEqual(json.loads(out)['hookSpecificOutput']['permissionDecisionReason'], 'foreman: piece says no')
+        self.assertEqual(err, '')
+        self.assertGreater(state.read_json(path)['touched'], time.time() - 30)
+
+    def test_a_failed_touch_does_not_drop_the_denies(self):
+        self.put_marker('S1')
+        with mock.patch.object(state, 'write_json', side_effect=OSError('read-only')):
+            out, err = self.run_pretool()
+        self.assertEqual(json.loads(out)['hookSpecificOutput']['permissionDecisionReason'], 'foreman: piece says no')
+        self.assertIn('foreman hook error: OSError: read-only', err)
+
 
 if __name__ == '__main__':
     unittest.main()

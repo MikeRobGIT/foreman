@@ -399,25 +399,29 @@ def worker_tag(text):
 
 
 def transcript_head(path):
-    """(first user message text, first entry's epoch time) of a JSONL transcript; Nones when unreadable."""
+    """(text of the first user entry, epoch time of the first entry with one) of a JSONL transcript.
+    Only the FIRST user entry counts: with no text block, or after a line that isn't a JSON object (we can't
+    tell which entry is first), the text is None, never a later entry's."""
     text, born = None, None
     try:
         with open(path, encoding='utf-8', errors='replace') as f:
             for line in f:
+                if not line.strip():
+                    continue
                 try:
                     e = json.loads(line)
                 except ValueError:
-                    continue
+                    break
                 if not isinstance(e, dict):
-                    continue
+                    break
                 if born is None and isinstance(e.get('timestamp'), str):
                     born = iso_time(e['timestamp'])
-                if text is None and e.get('type') == 'user':
-                    c = (e.get('message') or {}).get('content')
+                if e.get('type') == 'user':
+                    msg = e.get('message')
+                    c = msg.get('content') if isinstance(msg, dict) else None
                     if isinstance(c, list):
                         c = next((b.get('text') for b in c if isinstance(b, dict) and b.get('type') == 'text'), None)
                     text = c if isinstance(c, str) else None
-                if text is not None and born is not None:
                     break
     except (OSError, TypeError):
         pass
@@ -474,12 +478,12 @@ def pretool(h):
             repo = repo_at(path)
             for k in sorted(EDIT_PIECES):
                 EDIT_PIECES[k](h, repo, path)
-    for r in h.touch:
-        touch_marker(r, h.sid)
-    if h.denies:
+    if h.denies:   # printed before the touches: a failed touch (stderr, via main) can't drop a deny
         print(json.dumps({'hookSpecificOutput': {
             'hookEventName': 'PreToolUse', 'permissionDecision': 'deny',
-            'permissionDecisionReason': 'foreman: ' + '; '.join(dict.fromkeys(h.denies))}}))
+            'permissionDecisionReason': 'foreman: ' + '; '.join(dict.fromkeys(h.denies))}}), flush=True)
+    for r in h.touch:
+        touch_marker(r, h.sid)
 
 
 def pretool_bash(h, command):
