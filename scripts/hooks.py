@@ -58,7 +58,10 @@ def _load():
 # ---- repo context ---------------------------------------------------------------------------------
 
 def same_file(a, b):
-    return os.path.realpath(os.path.expanduser(a)) == os.path.realpath(b)
+    try:
+        return os.path.realpath(os.path.expanduser(a)) == os.path.realpath(b)
+    except ValueError:   # a NUL byte, from a word the scan blanked
+        return False
 
 
 def ls(d, pattern):
@@ -271,10 +274,12 @@ def control_words(w):
 
 
 def runs_control(sc, text, cwd):
-    """True when the scanned command runs `<path>/hooks.py <control verb>` as a command: a path ending in
-    hooks.py immediately followed by the verb, in a top-level segment or in the script a shell or eval is given.
-    A mention in a quoted string, a comment or a heredoc isn't a call. Text the scan couldn't read is judged
-    by its raw text. Not seen (accepted limit): a call built at run time, in a $(...) or fed to a shell's stdin."""
+    """True when the scanned command runs `<path>/hooks.py <control verb>` as a command: a word naming this
+    hooks.py (basename hooks.py, or the same realpath as control_call tests, so `hooks.py/`, `hooks.py/.` and a
+    symlink count) immediately followed by the verb, in a top-level segment or in the script a shell or eval is
+    given. A mention in a quoted string, a comment or a heredoc isn't a call. Text the scan couldn't read is
+    judged by its raw text. Not seen (accepted limit): a call built at run time, in a $(...) or fed to a shell's
+    stdin. It tests a path the way control_call does, so a deny sees every call that would be recorded."""
     if not sc.ok:
         return bool(CONTROL_TEXT.search(text.replace('\\\n', '')))
     for seg in sc.segs:
@@ -283,7 +288,8 @@ def runs_control(sc, text, cwd):
             if CONTROL_TEXT.search(text[seg.start:seg.end].replace('\\\n', '')):
                 return True
             continue
-        if any(os.path.basename(a) == 'hooks.py' and b in CONTROL for a, b in zip(w, w[1:])):
+        if any(b in CONTROL and (os.path.basename(a) == 'hooks.py' or same_file(a, os.path.join(HERE, 'hooks.py')))
+               for a, b in zip(w, w[1:])):
             return True
         if any(os.path.basename(a) in shellscan.SHELLS + ('eval',) for a in w):
             for script in (a for a in w if re.search(r'\s', a)):
@@ -482,7 +488,7 @@ def pretool_bash(h, command):
         h.deny('only the orchestrator ends a run or releases a spec — a worker never runs hooks.py')
         return
     call = control_call(command)
-    if call:
+    if call and not h.agent:   # a subagent's call is never recorded, whatever the deny above saw
         repo = repo_at(h.cwd)
         if repo:
             pretool_control(h, repo, *call)

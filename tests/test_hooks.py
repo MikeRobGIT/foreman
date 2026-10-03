@@ -314,6 +314,30 @@ class ControlTest(Case):
         self.assertIn('only the orchestrator', self.fx.bash(f"bash -c 'python3 {HOOKS} release w1a abc1234'", agent='a1'))
         self.assertFalse(os.path.exists(self.batches()))
 
+    def test_a_subagent_is_denied_for_every_spelling_the_acceptor_takes(self):
+        # control_call compares realpaths, so a trailing `/` or `/.` and a symlink all name this hooks.py
+        link = os.path.join(self.fx.tmp, 'git', 'h')   # 'git' in the text keeps the call past the fast path
+        os.makedirs(os.path.dirname(link))
+        os.symlink(HOOKS, link)
+        hooks._load()
+        self.fx.start_run()
+        for form in (HOOKS + '/', HOOKS + '/.', link, os.path.join(SCRIPTS, '..', 'scripts', 'hooks.py')):
+            for verb in ('release w1a abc1234', 'stopping w1b', 'forget w1c'):
+                command = f'python3 {form} {verb}'
+                self.assertIsNotNone(hooks.control_call(command), command)   # the main session's call is taken
+                self.assertIn('only the orchestrator', self.fx.bash(command, agent='a1') or '', command)
+                self.assertIn('only the orchestrator', self.fx.bash(f"bash -c '{command}'", agent='a1') or '', command)
+                self.assertIn('only the orchestrator', self.fx.bash(f'cd /tmp && {command}; git status', agent='a1') or '', command)
+        self.assertFalse(os.path.exists(self.batches()))
+
+    def test_a_word_the_scan_blanked_does_not_hide_a_later_call(self):
+        # an unquoted $(...) reaches the segment as a word holding NUL bytes; realpath raises on those
+        self.fx.start_run()
+        command = f'git status; python3 $(echo x) release w1a abc1234; python3 {HOOKS} release w1a abc1234'
+        out, err = self.fx.hook('pretool', self.fx.payload('Bash', {'command': command}, agent='a1'))
+        self.assertIn('only the orchestrator', out['hookSpecificOutput']['permissionDecisionReason'])
+        self.assertEqual(err, '')
+
     def test_a_subagent_is_denied_wherever_the_verb_follows_the_path_as_a_command(self):
         self.fx.start_run()
         for command in (f'cd /tmp && python3 {HOOKS} forget w1a', f'PYTHONPATH=x python3 {HOOKS} release w1a abc1234',
@@ -480,6 +504,21 @@ class MarkerTest(InProcess):
         self.assertTrue(os.path.exists(path))
         hooks.posttool(self.hook(**self.fx.payload('Bash', call, event='PostToolUse')))
         self.assertFalse(os.path.exists(path))
+
+
+class SubagentWriteTest(InProcess):
+    def test_a_subagent_call_is_never_recorded_even_when_the_deny_detector_misses_it(self):
+        self.put_marker('S1')
+        command = f'python3 {HOOKS} release w1a abc1234'
+        with mock.patch.object(hooks, 'runs_control', return_value=False):
+            sub = self.hook(**self.fx.payload('Bash', {'command': command}, agent='a1'))
+            hooks.pretool_bash(sub, command)
+        self.assertEqual(sub.denies, [])
+        self.assertFalse(os.path.exists(os.path.join(self.fx.state, 'batches')))
+        main = self.hook(**self.fx.payload('Bash', {'command': command}))   # control: the main session's call is recorded
+        hooks.pretool_bash(main, command)
+        self.assertEqual(main.denies, [])
+        self.assertTrue(os.path.exists(os.path.join(self.fx.state, 'batches', 'S1', 'w1a.released')))
 
 
 class ResolveAgentTest(InProcess):
