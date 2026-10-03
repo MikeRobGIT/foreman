@@ -308,6 +308,9 @@ sv "$fork" "$T/out/plain.log"
 check "plain call still works (exit 0)" test $? = 0
 check "plain call: FOREMAN_REVIEW_MODE=review" grep -qx 'mode=review' "$T/out/plain.log"
 check "plain call: the PR review template" grep -q 'You are reviewing a pull request' "$T/out/plain.log"
+printf 'KEEP {spec_path} END\n' >"$T/custom-tpl.md"
+FOREMAN_PROMPT_TEMPLATE=$T/custom-tpl.md sv "$fork" "$T/out/custom.log"
+check "review mode: a custom template keeps a literal {spec_path}" grep -qF 'KEEP {spec_path} END' "$T/out/custom.log"
 sv; check "no arguments: usage, exit 2" test $? = 2
 sv --spec; check "--spec without a value: exit 2" test $? = 2
 sv --bogus "$fork" "$T/out/x.log"; check "unknown option: exit 2" test $? = 2
@@ -316,6 +319,7 @@ sv --spec docs/nope.md "$fork" "$T/out/x.log"; check "missing spec file: exit 2"
 check "...naming the path" grep -q 'docs/nope.md' "$T/sv.err"
 check "...before any adapter ran" test ! -e "$T/out/x.log.attempts"
 sv "$fork" "$T/out/opt.log" --spec "docs/my specs/d.md"; check "an option after the positionals parses" grep -qx 'mode=spec' "$T/out/opt.log"
+sv --spec "docs/my specs/d.md" -- "$fork" "$T/out/dd.log"; check "-- ends options: the positionals after it land (exit 0)" test $? = 0
 # TERM mid-adapter: the adapter's group dies, review.sh exits 143, the next adapter never starts.
 export HANG_PIDFILE=$T/hang.pid; rm -f "$HANG_PIDFILE"
 chain 60 30 200 quota hang reader >"$T/chain.md"
@@ -332,7 +336,24 @@ check "TERM: the adapter's child (sleep 299) is gone" bash -c "! kill -0 $(cat "
 check "TERM: the next adapter never started" bash -c "grep -q quota '$T/out/term.log.attempts' && ! grep -q reader '$T/out/term.log.attempts'"
 check "TERM: no reviewer recorded" test ! -e "$T/out/term.log.reviewer"
 check "TERM: pid file removed" test ! -e "$T/out/term.log.pid"
-pkill -f '^sleep 299$' 2>/dev/null; unset HANG_PIDFILE
+# A group member that ignores TERM must be dead (KILL escalation) once review.sh exits 143, with the pid file gone.
+cat >"$A/stubborn.sh" <<'EOF'
+#!/bin/bash
+# foreman: reads-repo
+. "$(dirname "$0")/_lib.sh"
+sh -c 'trap "" TERM; while :; do sleep 1; done' stubborn-member & echo $! >"$STUB_PIDFILE"; wait
+EOF
+chmod +x "$A/stubborn.sh"
+export STUB_PIDFILE=$T/stub.pid; rm -f "$STUB_PIDFILE"
+chain 60 30 200 stubborn >"$T/chain.md"
+FOREMAN_REVIEWERS_DIR=$A FOREMAN_WATCH_POLL=1 FOREMAN_TOOL_POLL=1 FOREMAN_CONFIG=$T/chain.md \
+  "$root/scripts/review.sh" --spec "docs/my specs/d.md" "$fork" "$T/out/kill.log" 2>/dev/null &
+rvpid=$!
+for _ in $(seq 1 40); do [ -s "$STUB_PIDFILE" ] && [ -s "$T/out/kill.log.pid" ] && break; sleep 0.25; done
+kill -TERM "$(cat "$T/out/kill.log.pid")"; wait "$rvpid"; rc=$?
+sleep 1
+check "TERM: a member that ignores TERM is killed, and the pid file is gone" bash -c "[ $rc = 143 ] && [ -s '$STUB_PIDFILE' ] && ! kill -0 \$(cat '$STUB_PIDFILE') 2>/dev/null && [ ! -e '$T/out/kill.log.pid' ]"
+pkill -f '^sleep 299$' 2>/dev/null; pkill -9 -f stubborn-member 2>/dev/null; unset HANG_PIDFILE STUB_PIDFILE
 echo "## templates/spec-review-prompt.md"
 sp=$root/templates/spec-review-prompt.md
 while IFS= read -r s; do check "spec-review prompt has: $s" grep -qF -- "$s" "$sp"; done <<'EOF'
