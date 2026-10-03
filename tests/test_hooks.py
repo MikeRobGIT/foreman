@@ -1486,6 +1486,72 @@ class TrailerGuardTest(Case):
         self.assertNotIn('forbidden trailer', why)
         self.assertFalse(os.path.exists(self.fx.env['FAKE_GH_LOG']))
 
+    def test_a_heredoc_that_rewrites_the_message_file_is_checked_with_the_file(self):
+        msg = os.path.join(self.fx.tmp, 'scratch', 'commit_msg.txt')
+        write(msg, 'fix: first\n')   # a reused name: the clean copy of the last commit is still on disk
+        for op in ('>', '>>'):
+            dirty = f"cat {op} {msg} <<'EOF'\nfix: x\n\nCo-Authored-By: a\nEOF\ngit commit -F {msg}"
+            self.assertIn('Co-Authored-By', self.fx.bash(dirty), op)
+        clean = f"cat > {msg} <<'EOF'\nfix: x\nEOF\ngit commit -F {msg}"
+        self.assertIsNone(self.fx.bash(clean))
+        # both copies are read: the one that is on disk when the command starts, and the one the heredoc writes
+        write(msg, 'fix: first\n\nCo-Authored-By: old\n')
+        self.assertIn('Co-Authored-By', self.fx.bash(clean))
+
+    def test_an_unreadable_message_file_is_skipped_and_the_other_pieces_still_decide(self):
+        if os.geteuid() == 0:
+            self.skipTest('root reads a mode 0 file')
+        self.fx.start_run()
+        git(self.fx.work, 'switch', '-q', '-c', 'feat')
+        self.fx.commit('app.py', 'print(2)\n')
+        msg = os.path.join(self.fx.tmp, 'locked.txt')
+        write(msg, 'fix: x\n')
+        os.chmod(msg, 0)
+        out, err = self.fx.hook('pretool', self.fx.payload('Bash', {'command': f'git commit -F {msg} && git push -u origin HEAD'}))
+        self.assertIn('no passing gate for this tree', out['hookSpecificOutput']['permissionDecisionReason'])
+        self.assertIn('trailer guard skipped', err)
+        self.assertNotIn('foreman hook error', err)
+
+    def test_a_command_that_writes_no_message_spawns_no_git(self):
+        trace = os.path.join(self.fx.tmp, 'git-trace.txt')
+        self.fx.env['GIT_TRACE'] = trace
+        for command in ('git status', 'gh pr list', 'gh pr view 5', 'gt log', 'git log -1'):
+            self.assertIsNone(self.fx.bash(command), command)
+        self.assertFalse(os.path.exists(trace) and os.path.getsize(trace), 'the hook ran git')
+        self.assertIn('Co-Authored-By', self.fx.bash('git commit -m "x\nCo-Authored-By: a"'))   # the control: a message command does
+        self.assertTrue(os.path.getsize(trace))
+
+    def test_an_unscannable_gh_pr_text_command_is_checked_on_its_raw_text(self):
+        for sub in ('comment', 'edit', 'review'):
+            self.assertIn('Co-Authored-By', self.fx.bash(f'gh pr {sub} 5 --body "x\nCo-Authored-By: a'), sub)
+
+    def test_every_message_option_of_every_command_is_read(self):
+        trailer = 'Co-Authored-By: a'
+        msg = os.path.join(self.fx.tmp, 'opt-msg.txt')
+        write(msg, f'fix: x\n\n{trailer}\n')
+        text = {  # one command per MESSAGE_OPTS row and per option spelling
+            'git commit -m': f'git commit -m "x\n{trailer}"',
+            'git commit --message': f'git commit --message "x\n{trailer}"',
+            'git commit -F': f'git commit -F {msg}',
+            'git commit --file': f'git commit --file {msg}',
+            'gt create -m': f'gt create -m "x\n{trailer}"',
+            'gt create --message': f'gt create --message "x\n{trailer}"',
+            'gt modify -m': f'gt modify -m "x\n{trailer}"',
+            'gt submit -m': f'gt submit -m "x\n{trailer}"',
+        }
+        for sub in ('create', 'edit', 'comment', 'review', 'merge'):
+            num = '' if sub == 'create' else '5 '
+            text[f'gh pr {sub} -b'] = f'gh pr {sub} {num}-b "x\n{trailer}"'
+            text[f'gh pr {sub} --body'] = f'gh pr {sub} {num}--body "x\n{trailer}"'
+            text[f'gh pr {sub} -F'] = f'gh pr {sub} {num}-F {msg}'
+            text[f'gh pr {sub} --body-file'] = f'gh pr {sub} {num}--body-file {msg}'
+        text['gh pr create -t'] = f'gh pr create -t "{trailer}"'
+        text['gh pr create --title'] = f'gh pr create --title "{trailer}"'
+        text['gh pr edit --title'] = f'gh pr edit 5 --title "{trailer}"'
+        text['gh pr merge --subject'] = f'gh pr merge 5 --squash --subject "{trailer}" --body clean'
+        for name, command in text.items():
+            self.assertIn('Co-Authored-By', self.fx.bash(command) or '', name)
+
 
 class BacklogCheckTest(Case):
     def post(self, path, tool='Edit', **kw):
@@ -1547,6 +1613,18 @@ class BacklogCheckTest(Case):
               CONFIG.replace('---\n', '---\nhooks_disabled: [backlog_check]\n', 1))
         self.write_raw(BACKLOG + '| IB-3 | Broken | low |\n')
         self.assertIsNone(self.post(self.backlog_path()))
+
+    def test_only_an_edit_tool_is_checked(self):
+        self.write_raw(BACKLOG + '| IB-3 | Broken | low |\n')
+        for tool in ('Edit', 'Write', 'MultiEdit'):
+            self.assertIn('IB-3', self.post(self.backlog_path(), tool=tool), tool)
+        for tool in ('Read', 'Grep', 'NotebookEdit'):
+            self.assertIsNone(self.post(self.backlog_path(), tool=tool), tool)
+
+    def test_a_stray_byte_does_not_hide_the_problems(self):
+        with open(self.backlog_path(), 'wb') as f:
+            f.write(BACKLOG.encode() + b'| IB-3 | Caf\xe9 | low |\n')
+        self.assertIn('IB-3: 2 " | " separators, want 5', self.post(self.backlog_path()))
 
 
 if __name__ == '__main__':

@@ -829,15 +829,16 @@ def message_texts(c, sc, h):
             texts += piped_docs(sc, c)
             continue
         path = os.path.join(c.cwd or h.cwd, os.path.expanduser(f))
+        written = [d.body for d in sc.docs if d.target == os.path.normpath(path)]
+        texts += written   # a heredoc earlier in the call may rewrite or extend the file: read it and the copy on disk
         if os.path.isfile(path):
-            with open(path, encoding='utf-8', errors='replace') as fh:
-                texts.append(fh.read(1 << 20))
-        else:
-            doc = next((d for d in sc.docs if d.target == os.path.normpath(path)), None)
-            if doc:
-                texts.append(doc.body)
-            else:
-                print(f'foreman: trailer guard skipped {f} (it does not exist yet)', file=sys.stderr)
+            try:
+                with open(path, encoding='utf-8', errors='replace') as fh:
+                    texts.append(fh.read(1 << 20))
+            except OSError as e:   # unreadable: skip this file, not the whole call (main would fail open on every piece)
+                print(f'foreman: trailer guard skipped {f} ({e.strerror})', file=sys.stderr)
+        elif not written:
+            print(f'foreman: trailer guard skipped {f} (it does not exist yet)', file=sys.stderr)
     return texts
 
 
@@ -869,6 +870,8 @@ def merge_method(args):
 
 def trailer_guard(h, sc):
     for c in sc.cmds:
+        if MESSAGE_OPTS.get(c.prog, {}).get(c.sub) is None:   # before cmd_repo: it spawns git
+            continue
         repo = cmd_repo(c, h)
         if not h.active(repo, 'trailer_guard', run_only=False):
             continue
@@ -915,12 +918,14 @@ def backlog_problems(text, prefix):
 
 
 def backlog_check(h, ti):
+    if h.inp.get('tool_name') not in ('Edit', 'Write', 'MultiEdit'):
+        return
     path = ti.get('file_path')
     path = os.path.join(h.cwd, path) if path else None
     repo = repo_at(path) if path else None
     if not h.active(repo, 'backlog_check', run_only=False) or repo.rel(path) != os.path.normpath(repo.backlog):
         return
-    with open(path, encoding='utf-8', newline='') as f:
+    with open(path, encoding='utf-8', errors='replace', newline='') as f:
         rows, probs = backlog_problems(f.read(), str(repo.get('id_prefix', 'IB')))
     if probs:
         print(json.dumps({'hookSpecificOutput': {'hookEventName': 'PostToolUse', 'additionalContext':

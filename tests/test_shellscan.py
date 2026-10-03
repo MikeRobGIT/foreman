@@ -158,6 +158,13 @@ class DetectTest(unittest.TestCase):
         self.assertTrue(shellscan.is_rebase(c))
         self.assertEqual([c.sub for c in shellscan.scan('git pull "oops', '/r').cmds], ['pull'])
 
+    def test_gh_pr_text_commands_are_fallback_candidates(self):
+        # an unscannable `gh pr comment --body "x<newline>Co-Authored-By` must still reach the trailer guard
+        for sub in ('comment', 'edit', 'review'):
+            sc = shellscan.scan(f'gh pr {sub} 5 --body "x\nCo-Authored-By: a', '/r')
+            self.assertFalse(sc.ok, sub)
+            self.assertEqual([(c.prog, c.sub, c.args) for c in sc.cmds], [('gh', f'pr {sub}', None)], sub)
+
     def test_backslash_newline_is_a_line_continuation(self):
         gh = ("gh api \\\n --method PUT \\\n -H 'Accept: application/vnd.github+json' \\\n"
               " /repos/o/r/pulls/1/merge \\\n -f merge_method=squash")
