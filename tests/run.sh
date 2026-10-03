@@ -486,6 +486,19 @@ echo 'ERROR: {"type":"error","status":429,"error":{"message":"usage limit exceed
 exit 1
 EOF
 chmod +x "$F/codex"
+chain 60 30 200 codex >"$T/chain.md"; PATH=$F:$PATH sv --spec "docs/my specs/d.md" "$fork" "$T/out/cx5.log"
+check "codex spec mode: a usage-limit error falls through" grep -q 'codex.*exit 10' "$T/out/cx5.log.attempts"
+cat >"$F/codex" <<'EOF'
+#!/bin/bash
+printf '%s\n' "$@" >"$CODEX_ARGS"; cat >"$CODEX_ARGS.stdin"
+out=""; prev=""
+for a in "$@"; do [ "$prev" = -o ] && out=$a; prev=$a; done
+if [ -n "$out" ]; then : >"$out"; fi
+exit 0
+EOF
+chmod +x "$F/codex"
+chain 60 30 200 codex >"$T/chain.md"; PATH=$F:$PATH sv --spec "docs/my specs/d.md" "$fork" "$T/out/cx6.log"
+check "codex spec mode: empty -o file falls through" grep -q 'codex.*exit 10' "$T/out/cx6.log.attempts"
 cat >"$F/codex" <<'EOF'
 #!/bin/bash
 printf '%s\n' "$@" >"$CODEX_ARGS"; cat >"$CODEX_ARGS.stdin"
@@ -495,7 +508,7 @@ if [ -n "$out" ]; then echo '- [P2] `Change` misses a writer. Verdict: revise' >
 exit 0
 EOF
 chmod +x "$F/codex"
-chain 60 30 200 codex >"$T/chain.md"; PATH=$F:$PATH sv --spec "docs/my specs/d.md" "$fork" "$T/out/cx5.log"
+chain 60 30 200 codex >"$T/chain.md"; PATH=$F:$PATH sv --spec "docs/my specs/d.md" "$fork" "$T/out/cx7.log"
 check "codex: --color is followed by never" bash -c "grep -A1 -x -- --color '$CODEX_ARGS' | grep -qx never"
 unset CODEX_ARGS
 cd "$T"
