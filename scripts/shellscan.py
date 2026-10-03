@@ -21,17 +21,20 @@ PROGS = ('git', 'gh', 'gt')
 SHELLS = ('bash', 'sh', 'zsh')
 KEYWORDS = ('then', 'do', 'else', 'elif', 'if', 'while', 'until', '!', 'time', '{', '}')
 GT_ALIASES = {'s': 'submit', 'ss': 'submit', 'm': 'modify', 'c': 'create'}
+GT_GROUPS = ('stack', 'branch', 'upstack', 'downstack')
 GIT_VALUE_OPTS = ('-C', '-c', '--git-dir', '--work-tree', '--namespace', '--config-env', '--super-prefix',
                   '--attr-source')
 MAX_DEPTH = 8
 HEREDOC = re.compile(r'<<([-~]?)[ \t]*(?:\'([^\'\n]*)\'|"([^"\n]*)"|\\?([^\s;&|<>()\'"]+))')
 ASSIGN = re.compile(r'^[A-Za-z_][A-Za-z0-9_]*=')
+GITENV = re.compile(r'^(?:GIT_DIR|GIT_WORK_TREE)=')
 WORD = re.compile(r'[^ \t\n]+')
 REDIRECT = re.compile(r'^(?:\d*|&)(?:>>?|<<?|>&|<&|>\|)')
 FALLBACK = (
     ('git', 'push', r'\bgit\b[^\n]*\bpush\b'),
     ('git', 'commit', r'\bgit\b[^\n]*\bcommit\b'),
     ('git', 'rebase', r'\bgit\b[^\n]*\brebase\b'),
+    ('git', 'pull', r'\bgit\b[^\n]*\bpull\b'),
     ('gh', 'pr merge', r'\bgh\b[^\n]*\bmerge\b'),
     ('gh', 'pr create', r'\bgh\b[^\n]*\bcreate\b'),
     ('gh', 'api', r'\bgh\s+api\b'),
@@ -82,7 +85,7 @@ class Scan:
 
 class _Out:
     def __init__(self):
-        self.blank, self.subs, self.docs, self.comments, self.bare = [], [], [], [], []
+        self.blank, self.subs, self.docs, self.comments, self.bare, self.conts = [], [], [], [], [], []
 
 
 # ---- lexing ---------------------------------------------------------------------------------------
@@ -94,6 +97,8 @@ def _lex(t, i, closer, out):
     while i < n:
         c = t[i]
         if c == '\\':
+            if t.startswith('\n', i + 1):   # a line continuation: the shell removes the pair
+                out.conts.append((i, i + 2))
             out.blank.append((i, min(i + 2, n)))
             i += 2
         elif c == "'":
@@ -249,6 +254,13 @@ def _pieces(b):
     return out
 
 
+def _unfold(s, start, end, skip):
+    """s[start:end] without the characters at the positions in `skip` (the line continuations)."""
+    if not skip:
+        return s[start:end]
+    return ''.join(c for k, c in enumerate(s[start:end], start) if k not in skip)
+
+
 def _words(s):
     try:
         return shlex.split(s)
@@ -281,23 +293,33 @@ def _target(words):
 
 
 def _feeds_shell(words):
-    """True when the words run a shell whose script is the heredoc (`bash <<EOF`, `sh -s -e <<'EOF'`)."""
-    for k, w in enumerate(words):
-        if os.path.basename(w) in SHELLS:
-            rest = words[k + 1:]
-            return all(r.startswith('-') or r.startswith('<<') for r in rest)
-    return False
+    """True when a shell word comes before the heredoc operator and the shell has no -c script, so the heredoc
+    is its script: `bash <<EOF`, `bash << EOF`, `bash 2>&1 <<EOF`, `bash -s arg <<EOF`."""
+    h = next((k for k, w in enumerate(words) if w.startswith('<<') and not w.startswith('<<<')), len(words))
+    return any(os.path.basename(w) in SHELLS for w in words[:h]) and _shell_c(words) is None
 
 
 def _shell_c(words):
-    """The script string of `bash -c '...'` (any option cluster holding c: -c, -lc, -ec)."""
+    """The script string of `bash -c '...'` (any option cluster holding c: -c, -lc, -ec). Each o or O in a
+    cluster (-o, +o, -O, -euo) takes the next word as its value; a `--` may follow the c option."""
     for k, w in enumerate(words):
-        if os.path.basename(w) in SHELLS:
-            for j in range(k + 1, len(words)):
-                if re.match(r'^-[a-zA-Z]*c[a-zA-Z]*$', words[j]):
-                    return words[j + 1] if j + 1 < len(words) else None
-                if not words[j].startswith('-'):
-                    break
+        if os.path.basename(w) not in SHELLS:
+            continue
+        j = k + 1
+        while j < len(words):
+            m = re.match(r'^([-+])([a-zA-Z]+)$', words[j])
+            if words[j] in ('--rcfile', '--init-file'):
+                j += 2
+            elif m:
+                j += 1 + sum(ch in 'oO' for ch in m.group(2))
+                if m.group(1) == '-' and 'c' in m.group(2):
+                    if j < len(words) and words[j] == '--':
+                        j += 1
+                    return words[j] if j < len(words) else None
+            elif words[j].startswith('-') and words[j] != '--':
+                j += 1
+            else:
+                break
     return None
 
 
@@ -317,10 +339,11 @@ def _level(t, cwd, depth):
     for s, e in out.bare:   # an unquoted $(...) stays one word, scanned by its own level
         sh[s:e] = FILL * (e - s)
     shtext = ''.join(sh)
+    skip = {k for s, e in out.conts for k in range(s, e)}
 
     cmds, segs, docs, stack = [], [], [d for d in out.docs if d.direct], []
     for start, end, sep in _pieces(blanked):
-        words = _words(shtext[start:end])
+        words = _words(_unfold(shtext, start, end, skip))
         seg = Seg(start, end, words, sep, len(stack), cwd)
         segs.append(seg)
         own = []
@@ -331,6 +354,9 @@ def _level(t, cwd, depth):
                 prog = os.path.basename(m.group())
                 if FILL not in m.group() and prog in PROGS and prog not in matched:
                     own.append(_classify(Cmd(prog, None, None, cwd, t[start:end], start, end)))
+            first = WORD.search(blanked, start, end)
+            if first and first.group() in ('cd', 'pushd', 'popd'):
+                cwd = None
         elif words:
             for k, w in enumerate(words):
                 if os.path.basename(w) in PROGS:
@@ -349,6 +375,8 @@ def _level(t, cwd, depth):
                 own += _nested(' '.join(words[k + 1:]), cwd, depth, start, end, docs)
             if words[0] in ('cd', 'pushd', 'popd'):
                 cwd = _cd(cwd, words)
+            if any(GITENV.match(w) for w in words) and (words[0] == 'export' or all(ASSIGN.match(w) for w in words)):
+                cwd = None   # a GIT_DIR/GIT_WORK_TREE that outlives this segment: later commands run elsewhere
         for s, e in out.subs:
             if start <= s < end:
                 sub_cmds, _, sub_docs, _ = _level(t[s:e], seg.cwd, depth + 1)
@@ -381,6 +409,18 @@ def _nested(text, cwd, depth, start, end, docs):
     return cmds
 
 
+def _verb(w):
+    """A subcommand word up to its first redirect character: `push>/dev/null` is `push`."""
+    return re.match(r'[^<>&]*', w).group()
+
+
+def _redirect_skip(a, i):
+    """How many words the redirect at a[i] takes: 0 if it isn't one, 2 for a bare operator (`>`, `2>`, `&>`)
+    whose target is the next word."""
+    m = REDIRECT.match(a[i])
+    return 0 if not m else 2 if m.end() == len(a[i]) else 1
+
+
 def _classify(cmd):
     a = cmd.args
     cwd = None if any(n in ('GIT_DIR', 'GIT_WORK_TREE') for n in cmd.assigns) else cmd.cwd
@@ -389,8 +429,14 @@ def _classify(cmd):
         return cmd
     if cmd.prog == 'git':
         i = 0
-        while i < len(a) and a[i].startswith('-'):
+        while i < len(a):
             w = a[i]
+            skip = _redirect_skip(a, i)
+            if skip:
+                i += skip
+                continue
+            if not w.startswith('-'):
+                break
             if w in GIT_VALUE_OPTS:
                 if w == '-C':
                     cwd = _join(cwd, a[i + 1] if i + 1 < len(a) else None)
@@ -401,11 +447,15 @@ def _classify(cmd):
             if w.startswith(('--git-dir=', '--work-tree=')):
                 cwd = None
             i += 1
-        cmd.sub, cmd.args = (a[i] if i < len(a) else None), a[i + 1:]
+        cmd.sub, cmd.args = (_verb(a[i]) if i < len(a) else None), a[i + 1:]
     elif cmd.prog == 'gh':
         rest, i = [], 0
         while i < len(a):
             w = a[i]
+            skip = _redirect_skip(a, i) if len(rest) < 2 else 0
+            if skip:
+                i += skip
+                continue
             if w in ('-R', '--repo'):
                 cmd.ghrepo = a[i + 1] if i + 1 < len(a) else None
                 i += 2
@@ -416,24 +466,43 @@ def _classify(cmd):
                 continue
             rest.append(w)
             i += 1
-        if rest[:1] == ['pr'] and len(rest) > 1:
-            cmd.sub, cmd.args = 'pr ' + rest[1], rest[2:]
+        verb = _verb(rest[0]) if rest else None
+        if verb == 'pr' and len(rest) > 1:
+            cmd.sub, cmd.args = 'pr ' + _verb(rest[1]), rest[2:]
         else:
-            cmd.sub, cmd.args = (rest[0] if rest else None), rest[1:]
+            cmd.sub, cmd.args = verb, rest[1:]
     else:
         i = 0
-        while i < len(a) and a[i].startswith('-'):
+        while i < len(a):
+            w = a[i]
+            skip = _redirect_skip(a, i)
+            if skip:
+                i += skip
+                continue
+            if not w.startswith('-'):
+                break
+            if w == '--cwd':
+                cwd = _join(cwd, a[i + 1] if i + 1 < len(a) else None)
+                i += 2
+                continue
+            if w.startswith('--cwd='):
+                cwd = _join(cwd, w.split('=', 1)[1])
             i += 1
-        cmd.sub, cmd.args = (GT_ALIASES.get(a[i], a[i]) if i < len(a) else None), a[i + 1:]
+        verb = _verb(a[i]) if i < len(a) else None
+        if verb in GT_GROUPS and i + 1 < len(a):
+            nxt = _verb(a[i + 1])
+            if GT_ALIASES.get(nxt, nxt) in ('submit', 'merge'):
+                i, verb = i + 1, nxt
+        cmd.sub, cmd.args = GT_ALIASES.get(verb, verb), a[i + 1:]
     cmd.cwd = cwd
     return cmd
 
 
 def _fallback_cmds(text, start, end):
     """One candidate per FALLBACK regex that matches the raw `text`, with unknown arguments and directory."""
-    cmds = []
+    cmds, flat = [], text.replace('\\\n', '')
     for prog, sub, pat in FALLBACK:
-        if re.search(pat, text):
+        if re.search(pat, flat):
             c = Cmd(prog, None, None, None, text, start, end)
             c.sub = sub
             cmds.append(c)
@@ -506,19 +575,22 @@ def gh_api_merge(args, subagent):
             method = a.split('=', 1)[1].upper()
         elif a.startswith('-X') and len(a) > 2:
             method = a[2:].upper()
-        elif a in ('-f', '-F', '--field', '--raw-field') or a.startswith(('--field=', '--raw-field=')):
+        elif a in ('-f', '-F', '--field', '--raw-field') or a.startswith(('--field=', '--raw-field=')) \
+                or re.match(r'^-[fF].', a):
             body = True
-            val = a.split('=', 1)[1] if a.startswith('--') and '=' in a else nxt
+            glued = a not in ('-f', '-F', '--field', '--raw-field')
+            val = (a.split('=', 1)[1] if a.startswith('--') else a[2:]) if glued else nxt
             if val.startswith('query='):
                 q = val[len('query='):]
-                if a in ('-F', '--field') or a.startswith('--field='):
+                if a.startswith(('-F', '--field')):
                     from_file = from_file or q.startswith('@')
                 query += q
-            if '=' not in a:
+            if not glued:
                 i += 1
-        elif a == '--input':
+        elif a == '--input' or a.startswith('--input='):
             body = from_file = True
-            i += 1
+            if a == '--input':
+                i += 1
         elif a in ('-H', '--header', '-q', '--jq', '-t', '--template', '--cache', '-p', '--preview', '--hostname'):
             i += 1
         elif not a.startswith('-') and path is None:

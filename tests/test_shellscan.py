@@ -152,6 +152,78 @@ class DetectTest(unittest.TestCase):
         self.assertEqual([(c.prog, c.sub, c.args, c.cwd) for c in cmds('git status foo\\')],
                          [('git', None, None, None)])
 
+    def test_pull_is_a_fallback_candidate(self):
+        c = cmds('git pull -r foo\\')[0]
+        self.assertEqual((c.prog, c.sub, c.args), ('git', 'pull', None))
+        self.assertTrue(shellscan.is_rebase(c))
+        self.assertEqual([c.sub for c in shellscan.scan('git pull "oops', '/r').cmds], ['pull'])
+
+    def test_backslash_newline_is_a_line_continuation(self):
+        gh = ("gh api \\\n --method PUT \\\n -H 'Accept: application/vnd.github+json' \\\n"
+              " /repos/o/r/pulls/1/merge \\\n -f merge_method=squash")
+        c = cmds(gh)[0]
+        self.assertEqual(c.sub, 'api')
+        self.assertTrue(shellscan.gh_api_merge(c.args, True))
+        self.assertEqual([s.words for s in shellscan.scan('git \\\n push', '/r').segs if s.words], [['git', 'push']])
+        self.assertEqual(pairs('git \\\n push'), [('git', 'push')])
+        self.assertEqual(pairs('gh pr \\\n merge 1'), [('gh', 'pr merge')])
+        self.assertEqual(pairs("bash -c \\\n 'git push'"), [('git', 'push')])
+        sc = shellscan.scan('git \\\n push "oops', '/r')
+        self.assertFalse(sc.ok)
+        self.assertEqual([(c.prog, c.sub, c.args) for c in sc.cmds], [('git', 'push', None)])
+        # the shell removes the pair, so a word split by a continuation is one word
+        self.assertEqual(pairs('git pu\\\nsh'), [('git', 'push')])
+        # a continuation does not end a command
+        self.assertEqual(pairs('git push \\\n && git status'), [('git', 'push'), ('git', 'status')])
+        # but a backslash-newline inside single quotes is literal text
+        self.assertEqual(cmds("git commit -m 'a\\\nb'")[0].args, ['-m', 'a\\\nb'])
+
+    def test_a_heredoc_feeds_a_shell_whatever_sits_between_the_shell_and_the_operator(self):
+        for t in ("bash << EOF\ngit push\nEOF", "bash 2>&1 <<EOF\ngit push\nEOF",
+                  "bash > log <<EOF\ngit push\nEOF", "bash -s arg <<EOF\ngit push\nEOF"):
+            self.assertEqual(pairs(t), [('git', 'push')], t)
+        self.assertEqual(pairs('cat <<EOF\ngit push\nEOF'), [])
+        self.assertEqual(pairs('cat <<EOF >/tmp/bash\ngit push\nEOF'), [])
+        self.assertEqual(pairs("bash -c 'echo hi' <<EOF\ngit push\nEOF"), [])
+
+    def test_shell_c_skips_option_values_and_a_double_dash(self):
+        for t in ("bash -o pipefail -c 'git push'", "bash -euo pipefail -c 'git push'",
+                  "bash -O extglob -c 'git push'", "bash +o pipefail -c 'git push'",
+                  "bash +O extglob -c 'git push'", "bash -c -- 'git push'", "bash --rcfile x -c 'git push'"):
+            self.assertEqual(pairs(t), [('git', 'push')], t)
+        self.assertEqual(pairs("bash -o pipefail 'git push'"), [])
+
+    def test_a_redirect_glued_to_the_subcommand_is_cut_off(self):
+        self.assertEqual(pairs('git push>/dev/null'), [('git', 'push')])
+        self.assertEqual(pairs('git push&>log'), [('git', 'push')])
+        self.assertEqual(pairs('gt submit>log'), [('gt', 'submit')])
+        c = cmds('gh pr merge>log 12')[0]
+        self.assertEqual((c.sub, c.args), ('pr merge', ['12']))
+        self.assertEqual(cmds('git push>/dev/null origin :old')[0].args, ['origin', ':old'])
+
+    def test_a_redirect_before_the_subcommand_is_skipped(self):
+        for t in ('git >log push', 'git 2>&1 push', 'git > log push', 'git -C . 2>/dev/null push'):
+            self.assertEqual(pairs(t), [('git', 'push')], t)
+        self.assertEqual(pairs('gt 2>/dev/null ss'), [('gt', 'submit')])
+        self.assertEqual(pairs('gh 2>&1 pr merge 1'), [('gh', 'pr merge')])
+        self.assertEqual(cmds('git 2>&1 push origin main')[0].args, ['origin', 'main'])
+        self.assertEqual(cmds('gh pr merge 1 2>&1')[0].args, ['1', '2>&1'])
+
+    def test_an_unreadable_cd_makes_the_directory_unknown(self):
+        sc = shellscan.scan("cd $'my\\'wt' && git push", '/r')
+        self.assertTrue(sc.ok)
+        self.assertEqual([(c.sub, c.cwd) for c in sc.cmds], [('push', None)])
+
+    def test_a_git_dir_assignment_in_an_earlier_segment_makes_later_directories_unknown(self):
+        for t in ('export GIT_DIR=/x && git push', 'GIT_DIR=/x; git push', 'export GIT_WORK_TREE=/x; git push',
+                  'FOO=1 GIT_DIR=/x\ngit push'):
+            self.assertIsNone(cmds(t)[0].cwd, t)
+        a, b = cmds('GIT_DIR=/x git status; git push')
+        self.assertEqual((a.cwd, b.cwd), (None, '/r'))
+        self.assertEqual(cmds('export FOO=/x; git push')[0].cwd, '/r')
+        self.assertEqual(cmds('(export GIT_DIR=/x); git push')[0].cwd, '/r')
+        self.assertIsNone(cmds('export GIT_DIR=/x; echo $(git push)')[0].cwd)
+
 
 class ClassifyTest(unittest.TestCase):
     def test_gt_aliases(self):
@@ -190,6 +262,36 @@ class ClassifyTest(unittest.TestCase):
             return shellscan.push_info(cmds(t)[0].args, 'main')
         self.assertEqual(info('git push main'), (False, False, False))
         self.assertEqual(info('git push 2>&1 main'), (False, False, False))
+
+    def test_gt_global_cwd_and_stack_prefixes(self):
+        for t in ('gt --cwd /x submit', 'gt --cwd=/x submit', 'gt --no-interactive --cwd /x s'):
+            c = cmds(t)[0]
+            self.assertEqual((c.sub, c.cwd), ('submit', '/x'), t)
+        c = cmds('gt --cwd sub ss')[0]
+        self.assertEqual((c.sub, c.cwd), ('submit', '/r/sub'))
+        for t, sub in (('gt stack submit', 'submit'), ('gt stack s', 'submit'), ('gt branch submit', 'submit'),
+                       ('gt upstack submit', 'submit'), ('gt downstack merge', 'merge'),
+                       ('gt stack submit --draft', 'submit')):
+            self.assertEqual(pairs(t), [('gt', sub)], t)
+        self.assertEqual(pairs('gt stack restack'), [('gt', 'stack')])
+        self.assertEqual(pairs('gt stack'), [('gt', 'stack')])
+
+    def test_gh_api_merge_glued_spellings(self):
+        def merge(t, subagent=False):
+            return shellscan.gh_api_merge(cmds(t)[0].args, subagent)
+        self.assertTrue(merge('gh api --method=PUT repos/o/r/pulls/1/merge'))
+        self.assertTrue(merge('gh api -XPUT repos/o/r/pulls/1/merge'))
+        self.assertFalse(merge('gh api -XGET repos/o/r/pulls/1/merge'))
+        self.assertTrue(merge('gh api graphql --input=q.json', subagent=True))
+        self.assertFalse(merge('gh api graphql --input=q.json'))
+        self.assertTrue(merge("gh api graphql -fquery='mutation { mergePullRequest(input:{}) { x } }'"))
+        self.assertTrue(merge("gh api graphql --field='query=mutation { mergePullRequest(input:{}) { x } }'"))
+        self.assertTrue(merge("gh api graphql --raw-field='query=mutation { enablePullRequestAutoMerge(input:{}) { x } }'"))
+        self.assertFalse(merge("gh api graphql -fquery='query { viewer { login } }'"))
+        self.assertTrue(merge('gh api graphql -Fquery=@m.graphql', subagent=True))
+        self.assertFalse(merge('gh api graphql -Fquery=@m.graphql'))
+        self.assertTrue(merge('gh api repos/o/r/merges -fbase=main -fhead=x'))
+        self.assertTrue(merge('gh api -fbase=main repos/o/r/merges'))
 
     def test_gh_api_merge_by_method_and_path(self):
         def merge(t, subagent=False):
