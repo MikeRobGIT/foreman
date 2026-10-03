@@ -262,12 +262,36 @@ class RunMarkerTest(Case):
         call = f'python3 {HOOKS} run-end'
         self.fx.hook('posttool', self.fx.payload('Bash', {'command': call}, sid='S1', agent='a1', event='PostToolUse'))
         self.assertIsNotNone(self.fx.marker('S1'))
-        self.fx.hook('posttool', self.fx.payload('Bash', {'command': call + '; true'}, sid='S1', event='PostToolUse'))
+        self.fx.hook('posttool', self.fx.payload('Bash', {'command': 'echo ' + call}, sid='S1', event='PostToolUse'))
         self.assertIsNotNone(self.fx.marker('S1'))
         self.fx.hook('posttool', self.fx.payload('Bash', {'command': call}, sid='S1', event='PostToolUse'))
         self.assertIsNone(self.fx.marker('S1'))
         self.assertIsNotNone(self.fx.marker('S2'))
         self.assertEqual(self.fx.cli('run-end'), 0)
+
+    def post(self, command, **kw):
+        self.fx.hook('posttool', self.fx.payload('Bash', {'command': command}, event='PostToolUse', **kw))
+
+    def test_every_spelling_of_the_run_end_call_ends_the_run(self):
+        for command in (f'python3 "{HOOKS}" run-end', f'python3  {HOOKS}  run-end', f'python3 {HOOKS} run-end 2>&1',
+                        f'python3 {HOOKS} run-end >/dev/null 2>&1', f'python3 {HOOKS} run-end; echo done',
+                        f'cd {self.fx.tmp} && python3 {HOOKS} run-end', f'/usr/bin/python3 {HOOKS} run-end',
+                        f'cd {SCRIPTS} && python3 hooks.py run-end'):
+            self.fx.start_run()
+            self.post(command, agent='a1')
+            self.assertIsNotNone(self.fx.marker(), command)   # a subagent's call never ends the run
+            self.post(command)
+            self.assertIsNone(self.fx.marker(), command)
+
+    def test_a_command_that_only_mentions_run_end_keeps_the_run(self):
+        other = os.path.join(self.fx.tmp, 'other', 'hooks.py')
+        write(other, '')
+        self.fx.start_run()
+        for command in (f'echo python3 {HOOKS} run-end', f'python3 {other} run-end', f'python3 {HOOKS} run-end now',
+                        f"bash -c 'python3 {HOOKS} run-end'", f'git commit -m "python3 {HOOKS} run-end"',
+                        'python3 hooks.py run-end'):   # a relative path that isn't this hooks.py from the cwd
+            self.post(command)
+            self.assertIsNotNone(self.fx.marker(), command)
 
     def test_48_hour_expiry(self):
         self.fx.start_run('S2')

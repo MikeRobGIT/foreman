@@ -100,7 +100,7 @@ Every handler is `type: command`, in exec form: `python3 ${CLAUDE_PLUGIN_ROOT}/s
 - **PreToolUse** with matcher `Bash` and **no `if:`** → `pretool`. On a Bash command that names no `git`, `gh` or `gt`, the script returns within milliseconds of its own start. It does no git work for those.
 - **PreToolUse** with matcher `Edit|Write|MultiEdit|NotebookEdit` → `pretool`.
 - **PostToolUse** with matcher `Edit|Write|MultiEdit` → `posttool`. Also matcher `Bash` → `posttool`.
-  - Before any import or the common path, the Bash handler checks for no `agent_id` and for `hooks.py run-end` in the command text, and exits at once otherwise. That is one `json.load` per Bash call.
+  - Before any import or the common path, the Bash handler checks for no `agent_id` and for `hooks.py`, then `run-end`, in the command text (one regex, `hooks\.py["']?\s+run-end`), and exits at once otherwise. That is one `json.load` per Bash call.
   - The `hooks.py` CLIs always exit 0 for `run-end`, so PostToolUse fires whether or not it fires on a non-zero exit (the plan probes this as P8).
 - **SubagentStart** → `subagent-start`.
 - **SubagentStop** → `subagent-stop`.
@@ -198,7 +198,7 @@ Two review rounds showed that parsing Bash keeps missing forms. Detection is the
     - the autonomous loop's end;
     - serial step 12 after a manual pass.
 
-    `pretool` recognises this exact call (a single segment: `python3` plus that path plus `run-end`). For the main session, `posttool` then deletes `runs/<session_id>.json`, using the hook input's own session id. Piece 8 allows the call.
+    `posttool` recognises the call through the scan: a top-level segment whose words are a `python3` (any path with that basename), that `hooks.py` (quoted or not, relative to the segment's directory) and `run-end`, redirects allowed, so `cd X && python3 … run-end 2>&1; echo done` counts. For the main session it then deletes `runs/<session_id>.json`, using the hook input's own session id. Piece 8 allows the plain call.
   - **Only from the main session:** `run-end`, `release`, `stopping` and `forget` take effect only when the hook input has no `agent_id`. A subagent's call is denied ("only the orchestrator ends a run or releases a spec"). Subagents share the `session_id`, so without this a worker could unguard the run or release itself.
   - **Timing:** `pretool` denies the subagent's call before anything is deleted. For the main session, the marker is deleted in `PostToolUse`, after the call ran, so piece 8's PermissionRequest still sees an active run.
   - **The fast path** treats a command naming `hooks.py` like one naming `git`, `gh` or `gt`.

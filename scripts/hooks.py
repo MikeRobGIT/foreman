@@ -28,6 +28,7 @@ BATCH = re.compile(r'^[A-Za-z0-9_-]+$')
 SHA = re.compile(r'^[0-9a-f]{7,40}$')
 CONTROL = ('run-end', 'release', 'stopping', 'forget')
 CONTROL_TEXT = re.compile(r'hooks\.py\S*\s+(run-end|release|stopping|forget)\b')
+RUN_END = re.compile(r'hooks\.py["\']?\s+run-end')   # posttool's pre-filter: one regex per Bash call
 EDIT_TOOLS = ('Edit', 'Write', 'MultiEdit', 'NotebookEdit')
 BACKLOG_DEFAULT = '.claude/improvement-backlog.md'
 RULES_DEFAULT = '.claude/rules/*.md'
@@ -271,6 +272,25 @@ def control_words(w):
           or (verb == 'release' and len(rest) == 2 and BATCH.match(rest[0]) and SHA.match(rest[1]))
           or (verb in ('stopping', 'forget') and len(rest) == 1 and BATCH.match(rest[0])))
     return (verb, rest) if ok else None
+
+
+def ends_run(sc):
+    """True when a top-level segment is `python3 <this hooks.py> run-end`: any python3 (a path whose basename is
+    python3), the path quoted or relative to the segment's directory, redirects allowed."""
+    for seg in sc.segs:
+        w, i = [], 0
+        while i < len(seg.words or []):
+            m = shellscan.REDIRECT.match(seg.words[i])
+            if m:
+                i += 2 if m.end() == len(seg.words[i]) else 1   # `>` alone takes the next word as its target
+                continue
+            w.append(seg.words[i])
+            i += 1
+        p = os.path.expanduser(w[1]) if len(w) == 3 else ''
+        if (len(w) == 3 and os.path.basename(w[0]) == 'python3' and w[2] == 'run-end' and (os.path.isabs(p) or seg.cwd)
+                and same_file(os.path.join(seg.cwd or '', p), os.path.join(HERE, 'hooks.py'))):
+            return True
+    return False
 
 
 def runs_control(sc, text, cwd):
@@ -1450,7 +1470,7 @@ def pretool_bash(h, command):
 def posttool(h):
     ti = h.inp.get('tool_input') or {}
     if h.inp.get('tool_name') == 'Bash':
-        if not h.agent and control_call(ti.get('command') or '') == ('run-end', []):
+        if not h.agent and ends_run(shellscan.scan(ti.get('command') or '', h.cwd)):
             end_run(h.sid)
         return
     for k in sorted(POST_EDIT):
@@ -1501,7 +1521,7 @@ def main(argv):
         if inp.get('tool_name') == 'Bash':
             command = ti.get('command') if isinstance(ti, dict) else None
             command = command if isinstance(command, str) else ''
-        if event == 'posttool' and command is not None and (inp.get('agent_id') or 'hooks.py run-end' not in command):
+        if event == 'posttool' and command is not None and (inp.get('agent_id') or not RUN_END.search(command)):
             return
         if event == 'pretool' and command is not None and not inp.get('agent_id') and not FAST.search(command):
             return   # a subagent's call goes on: its first one carries the briefing (probe P2)
