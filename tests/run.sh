@@ -268,6 +268,89 @@ for flag in --yolo --disable-approval --disable-sandbox; do
   check "muse never runs with $flag" bash -c "! grep -qx -- '$flag' '$MUSE_CALLED.args'"
 done
 
+echo "## review.sh --spec"
+# A batch branch: two spec commits on top of the fork base, then main moves on.
+S=$T/sp && mkdir -p "$S" && cd "$S" && git init -q -b main && echo base >code.txt && git add . && git commit -qm init
+git switch -qc batch
+mkdir -p "docs/my specs" && printf '# design\nROUND-ONE line\n' >"docs/my specs/d.md" && git add . && git commit -qm "spec r1"
+fork=$(git merge-base main HEAD)
+printf 'ROUND-TWO line\n' >>"docs/my specs/d.md" && git commit -qam "spec r2"
+git switch -q main && echo MAIN-MOVED >>code.txt && git commit -qam "main moves" && git switch -q batch
+# reader: a reads-repo fake whose review is the mode, the prompt it got, and the diff it sees against <base>.
+cat >"$A/reader.sh" <<'EOF'
+#!/bin/bash
+# foreman: reads-repo
+. "$(dirname "$0")/_lib.sh"
+{ echo "mode=$FOREMAN_REVIEW_MODE"; cat "$prompt"; /usr/bin/git diff "$base...HEAD"; } >"$log"; finish
+EOF
+# hang: a reads-repo fake that never finishes; its child's pid goes to $HANG_PIDFILE.
+cat >"$A/hang.sh" <<'EOF'
+#!/bin/bash
+# foreman: reads-repo
+. "$(dirname "$0")/_lib.sh"
+sleep 299 & echo $! >"$HANG_PIDFILE"; wait
+EOF
+chmod +x "$A/reader.sh" "$A/hang.sh"
+sv() { FOREMAN_REVIEWERS_DIR=$A FOREMAN_WATCH_POLL=1 FOREMAN_TOOL_POLL=1 FOREMAN_CONFIG=$T/chain.md "$root/scripts/review.sh" "$@" 2>"$T/sv.err"; }
+chain 60 30 200 reader >"$T/chain.md"
+sv --spec "docs/my specs/d.md" "$fork" "$T/out/spec.log"
+check "--spec: lands (exit 0)" test $? = 0
+check "--spec: adapters get FOREMAN_REVIEW_MODE=spec" grep -qx 'mode=spec' "$T/out/spec.log"
+check "--spec: the spec-review template" grep -q 'has not been written yet' "$T/out/spec.log"
+check "--spec: {spec_path} filled, the space kept" grep -qF 'The spec is `docs/my specs/d.md`' "$T/out/spec.log"
+check "--spec: {base} is the fork base" grep -qF "committed on top of \`$fork\`" "$T/out/spec.log"
+check "--spec: no placeholder left" bash -c "! grep -qE '\{(spec_path|base)\}' '$T/out/spec.log'"
+check "the adapter's diff against the given base: the reviewed diff has round 1" grep -q 'ROUND-ONE' "$T/out/spec.log"
+check "the adapter's diff against the given base: ...and round 2" grep -q 'ROUND-TWO' "$T/out/spec.log"
+check "the adapter's diff against the given base: main's later commits are not in it" bash -c "! grep -q MAIN-MOVED '$T/out/spec.log'"
+check "pid file removed after a normal exit" test ! -e "$T/out/spec.log.pid"
+sv "$fork" "$T/out/plain.log"
+check "plain call still works (exit 0)" test $? = 0
+check "plain call: FOREMAN_REVIEW_MODE=review" grep -qx 'mode=review' "$T/out/plain.log"
+check "plain call: the PR review template" grep -q 'You are reviewing a pull request' "$T/out/plain.log"
+sv; check "no arguments: usage, exit 2" test $? = 2
+sv --spec; check "--spec without a value: exit 2" test $? = 2
+sv --bogus "$fork" "$T/out/x.log"; check "unknown option: exit 2" test $? = 2
+sv --spec "docs/my specs/d.md" "$fork" "$T/out/x.log" extra; check "extra argument: exit 2" test $? = 2
+sv --spec docs/nope.md "$fork" "$T/out/x.log"; check "missing spec file: exit 2" test $? = 2
+check "...naming the path" grep -q 'docs/nope.md' "$T/sv.err"
+check "...before any adapter ran" test ! -e "$T/out/x.log.attempts"
+sv "$fork" "$T/out/opt.log" --spec "docs/my specs/d.md"; check "an option after the positionals parses" grep -qx 'mode=spec' "$T/out/opt.log"
+# TERM mid-adapter: the adapter's group dies, review.sh exits 143, the next adapter never starts.
+export HANG_PIDFILE=$T/hang.pid; rm -f "$HANG_PIDFILE"
+chain 60 30 200 quota hang reader >"$T/chain.md"
+FOREMAN_REVIEWERS_DIR=$A FOREMAN_WATCH_POLL=1 FOREMAN_TOOL_POLL=1 FOREMAN_CONFIG=$T/chain.md \
+  "$root/scripts/review.sh" --spec "docs/my specs/d.md" "$fork" "$T/out/term.log" 2>/dev/null &
+rvpid=$!
+for _ in $(seq 1 40); do [ -s "$HANG_PIDFILE" ] && break; sleep 0.25; done
+check "hang adapter started" test -s "$HANG_PIDFILE"
+check "pid file holds review.sh's pid" test "$(cat "$T/out/term.log.pid" 2>/dev/null)" = "$rvpid"
+kill -TERM "$(cat "$T/out/term.log.pid")"; wait "$rvpid"
+check "TERM: review.sh exits 143" test $? = 143
+sleep 1
+check "TERM: the adapter's child (sleep 299) is gone" bash -c "! kill -0 $(cat "$HANG_PIDFILE") 2>/dev/null"
+check "TERM: the next adapter never started" bash -c "grep -q quota '$T/out/term.log.attempts' && ! grep -q reader '$T/out/term.log.attempts'"
+check "TERM: no reviewer recorded" test ! -e "$T/out/term.log.reviewer"
+check "TERM: pid file removed" test ! -e "$T/out/term.log.pid"
+pkill -f '^sleep 299$' 2>/dev/null; unset HANG_PIDFILE
+echo "## templates/spec-review-prompt.md"
+sp=$root/templates/spec-review-prompt.md
+while IFS= read -r s; do check "spec-review prompt has: $s" grep -qF -- "$s" "$sp"; done <<'EOF'
+The spec is `{spec_path}`
+committed on top of `{base}`
+has not been written yet
+Before you read the spec's "Callers and writers checked" section
+A caller or writer the spec missed
+A wrong claim about current behaviour
+breaks a rule
+A test that can't fail
+An Implementation outline step that doesn't achieve its row's acceptance
+A failure path the design doesn't handle
+Scope outside the stated files
+P1 = the design is wrong or unsafe as written. P2 = a likely defect or a gap to close before coding. P3 = minor.
+Verdict: <ready to build | revise | redesign>
+EOF
+cd "$T"
 echo "## backlog.py + ui.py"
 check "test_backlog.py" python3 "$root/tests/test_backlog.py"
 check "test_ui_api.py" python3 "$root/tests/test_ui_api.py"
