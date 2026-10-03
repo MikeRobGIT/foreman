@@ -279,11 +279,12 @@ def describe(op, mapping=None):
     kind = op['op']
     if kind == 'add':
         return f'new row {mapping.get(op["tmp"], op["tmp"])}: {op["title"]}'
+    id_ = f'new row {mapping[op["id"]]}' if op['id'] in mapping else op['id']
     if kind == 'set':
-        return f'{op["id"]}: {op["field"]} edited'
+        return f'{id_}: {op["field"]} edited'
     if kind == 'status':
         reason = (op.get('reason') or '').strip()
-        return f'{op["id"]}: status → {op["to"]}' + (f' ({reason})' if reason else '')
+        return f'{id_}: status → {op["to"]}' + (f' ({reason})' if reason else '')
     to = op['to']
-    where = to if isinstance(to, str) else f'{next(iter(to))} {next(iter(to.values()))}'
-    return f'{op["id"]}: moved to {where}'
+    where = to if isinstance(to, str) else f'{next(iter(to))} {mapping.get(next(iter(to.values())), next(iter(to.values())))}'
+    return f'{id_}: moved to {where}'

@@ -368,7 +368,7 @@ class Repo:
 
     @staticmethod
     def title_for(applied):
-        ids = {o['id'] for o in applied if o['op'] != 'add'}
+        ids = {o['id'] for o in applied if o['op'] != 'add' and not re.fullmatch(r'NEW-\d+', o['id'])}  # a new row's edits are part of "add"
         adds = sum(1 for o in applied if o['op'] == 'add')
         parts = ([f'triage {len(ids)} row{"s" if len(ids) != 1 else ""}'] if ids else []) + ([f'add {adds}'] if adds else [])
         return 'docs(backlog): ' + ', '.join(parts)

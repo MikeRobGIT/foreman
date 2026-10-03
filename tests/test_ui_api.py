@@ -261,6 +261,16 @@ class PublishTest(unittest.TestCase):
         self.assertEqual(data['ops'], [])
         self.assertEqual(len(git(self.f.work, 'worktree', 'list').splitlines()), 1)
 
+    def test_edits_of_a_new_row_are_named_by_its_final_id(self):
+        self.f.request('POST', '/api/ops', {'op': 'add', 'title': 'New one', 'risk': 'low', 'status': 'ready', 'reason': '', 'acceptance': 'Acc', 'source': 'ui', 'insert': 'bottom'})
+        status, data, _ = self.f.request('POST', '/api/ops', {'op': 'set', 'id': 'NEW-1', 'field': 'title', 'value': 'Newer one'})
+        self.assertEqual(status, 200, data)
+        status, res, _ = self.f.request('POST', '/api/publish')
+        self.assertEqual(status, 200, res)
+        gh = open(self.f.gh_log).read()
+        self.assertIn('--title docs(backlog): add 1 --body', gh)
+        self.assertIn('- new row IB-4: title edited', gh)
+
     def test_publish_keeps_conflicts(self):
         self.f.request('POST', '/api/ops', {'op': 'status', 'id': 'IB-1', 'to': 'deferred', 'reason': ''})
         self.f.request('POST', '/api/ops', {'op': 'set', 'id': 'IB-2', 'field': 'title', 'value': 'Two!'})
