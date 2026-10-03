@@ -50,6 +50,7 @@ The docs were read on 2026-10-02 (`code.claude.com/docs/en/hooks`, `sub-agents`,
 
 Still to be probed in the plan; the design states a fallback for each:
 - (P6) whether `SubagentStart`'s `agent_id` equals the same worker's `PreToolUse` `agent_id`;
+- (P8) whether PostToolUse fires for a Bash call that exits non-zero (the `run-end` CLI exits 0 either way);
 - **(P7) whether TaskStop fires `SubagentStop`.** Fallback: the orchestrator runs `hooks.py stopping <batch>` before every TaskStop, so piece 7 never blocks a stopping worker;
 - (P1) whether `UserPromptSubmit` or `UserPromptExpansion` carries the `/foreman` text;
 - (P2) whether `SubagentStart` input includes the prompt or a readable transcript;
@@ -431,7 +432,6 @@ Only Bash is considered. Anything that doesn't match every rule below gets no de
 | `hooks_disabled` | `[]` | piece ids to turn off in this repo |
 | `design_spec_dir` | `docs/superpowers/specs` | read by piece 10; the default lives in `cfg.py` from 0.4.0, and the spec phase documents the key |
 | `status_pane` | `true` | piece 9 |
-| (none new) | | piece 10 reads `design_spec_dir` (spec-phase design) |
 
 `templates/foreman.config.md` documents them. vacancy-vibe sets `forbid_trailers: [Co-Authored-By, Claude-Session, Generated with]` at switch-over.
 
