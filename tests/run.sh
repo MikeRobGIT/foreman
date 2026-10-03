@@ -445,6 +445,38 @@ check "custom review mode: a command with no placeholders still runs" grep -qx '
 cust 'cat {prompt_file}; echo {base}'; TMPDIR="$T/a{base}b" sv --spec "docs/my specs/d.md" "$fork" "$T/out/x6.log"
 check "custom: a {base} inside the prompt path is not substituted again" grep -q 'has not been written yet' "$T/out/x6.log"
 cd "$T"
+echo "## codex: exec in spec mode"
+cd "$S"
+cat >"$F/codex" <<'EOF'
+#!/bin/bash
+printf '%s\n' "$@" >"$CODEX_ARGS"; cat >"$CODEX_ARGS.stdin"
+out=""; prev=""
+for a in "$@"; do [ "$prev" = -o ] && out=$a; prev=$a; done
+if [ -n "$out" ]; then echo '- [P2] `Change` misses a writer. Verdict: revise' >"$out"; else echo '- [P2] app/x.ts:3 review'; fi
+EOF
+chmod +x "$F/codex"
+export CODEX_ARGS=$T/codex.args
+before() { awk -v a="$2" -v b="$3" '$0==a && !x {x=NR} $0==b && !y {y=NR} END {exit !(x && y && x < y)}' "$1"; }
+chain 60 30 200 codex >"$T/chain.md"; PATH=$F:$PATH sv --spec "docs/my specs/d.md" "$fork" "$T/out/cx.log"
+check "codex spec mode lands" grep -q '^codex' "$T/out/cx.log.reviewer"
+check "...the -o message is the review" grep -q 'misses a writer' "$T/out/cx.log"
+check "...runs exec" grep -qx exec "$CODEX_ARGS"
+check "...--sandbox precedes exec" before "$CODEX_ARGS" --sandbox exec
+check "...the sandbox is read-only" bash -c "grep -A1 -x -- --sandbox '$CODEX_ARGS' | grep -qx read-only"
+check "...the prompt comes from stdin (last argument -)" bash -c "tail -1 '$CODEX_ARGS' | grep -qx -- -"
+check "...and stdin is the spec prompt" grep -q 'has not been written yet' "$CODEX_ARGS.stdin"
+check "...model and effort still passed" bash -c "grep -qx -- -m '$CODEX_ARGS' && grep -qx 'model_reasoning_effort=\"e\"' '$CODEX_ARGS'"
+for flag in --ephemeral --color; do check "codex spec mode passes $flag" grep -qx -- "$flag" "$CODEX_ARGS"; done
+for flag in review --approve-for-me --dangerously-bypass-approvals-and-sandbox --dangerously-bypass-hook-trust --add-dir --worktree --full-auto; do
+  check "codex spec mode never passes $flag" bash -c "! grep -qx -- '$flag' '$CODEX_ARGS'"
+done
+chain 60 30 200 codex >"$T/chain.md"; PATH=$F:$PATH sv "$fork" "$T/out/cx2.log"
+check "codex review mode unchanged: review --base <base>" bash -c "grep -qx review '$CODEX_ARGS' && grep -A1 -x -- --base '$CODEX_ARGS' | grep -qx '$fork'"
+check "...no exec there" bash -c "! grep -qx exec '$CODEX_ARGS'"
+check "...review text from stdout" grep -q 'app/x.ts:3' "$T/out/cx2.log"
+check "codex.sh is marked reads-repo" grep -q '^# foreman: reads-repo' "$root/reviewers/codex.sh"
+unset CODEX_ARGS
+cd "$T"
 echo "## backlog.py + ui.py"
 check "test_backlog.py" python3 "$root/tests/test_backlog.py"
 check "test_ui_api.py" python3 "$root/tests/test_ui_api.py"
