@@ -62,7 +62,11 @@ class Repo:
         self.origin = self.git('remote', 'get-url', 'origin', check=False).strip()
         self.key = hashlib.sha1(f'{self.origin}\n{self.path}'.encode()).hexdigest()[:12]
         self.state = os.path.join(home(), self.key)
-        os.makedirs(self.state, exist_ok=True)
+        os.makedirs(self.state, mode=0o700, exist_ok=True)
+        os.chmod(self.state, 0o700)
+        for name in ('pending.json', 'ui.json'):
+            if os.path.exists(os.path.join(self.state, name)):
+                os.chmod(os.path.join(self.state, name), 0o600)
         self.branch = self.default_branch()
         self.lock = threading.Lock()
         self.ops_lock = threading.Lock()
@@ -114,6 +118,7 @@ class Repo:
             return []
 
     def save_ops(self, ops):
+        # mkstemp creates the file 0600; the rename keeps a crash from leaving half a file.
         fd, tmp = tempfile.mkstemp(dir=self.state, suffix='.json')
         with os.fdopen(fd, 'w', encoding='utf-8') as f:
             json.dump(ops, f, indent=1, ensure_ascii=False)
@@ -477,7 +482,7 @@ def main():
         print(running['url'])
         return
     server, url = make_server(a.repo, a.port)
-    with open(info, 'w') as f:
+    with os.fdopen(os.open(info, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600), 'w') as f:
         json.dump({'pid': os.getpid(), 'port': server.server_port, 'url': url}, f)
     print(url, flush=True)
     if not a.no_open:

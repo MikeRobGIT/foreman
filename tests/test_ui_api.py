@@ -2,6 +2,8 @@
 import http.client
 import json
 import os
+import re
+import stat
 import subprocess
 import sys
 import tempfile
@@ -309,6 +311,37 @@ class PublishTest(unittest.TestCase):
         self.assertTrue(res['available'])
         self.assertEqual(res['days'], [{'day': '2026-09-30', 'done': 0, 'filed': 1},
                                        {'day': '2026-10-01', 'done': 1, 'filed': 0}])
+
+
+class ProcessTest(unittest.TestCase):
+    def setUp(self):
+        self.f = Fixture()
+
+    def tearDown(self):
+        self.f.close()
+
+    def start(self):
+        script = os.path.join(HERE, '..', 'scripts', 'ui.py')
+        p = subprocess.Popen([sys.executable, script, '--repo', self.f.work, '--no-open'], stdout=subprocess.PIPE, text=True)
+        self.addCleanup(lambda: (subprocess.run([sys.executable, script, '--repo', self.f.work, '--stop'], capture_output=True), p.wait(30)))
+        url = p.stdout.readline().strip()
+        return url, int(re.search(r':(\d+)/', url).group(1)), re.search(r'[?#]t=(.+)$', url).group(1)
+
+    def test_state_files_are_private(self):
+        repo = self.f.server.repo
+        repo.save_ops([])
+        os.chmod(repo.ops_path(), 0o644)
+        os.chmod(repo.state, 0o755)
+        url, port, token = self.start()
+        mode = lambda path: stat.S_IMODE(os.stat(path).st_mode)
+        self.assertEqual(mode(repo.state), 0o700)
+        self.assertEqual(mode(os.path.join(repo.state, 'ui.json')), 0o600)
+        self.assertEqual(mode(repo.ops_path()), 0o600)
+        c = http.client.HTTPConnection('127.0.0.1', port, timeout=30)
+        c.request('POST', '/api/ops', json.dumps({'op': 'move', 'id': 'IB-2', 'to': 'top'}),
+                  {'Host': f'127.0.0.1:{port}', 'X-Foreman-Token': token, 'Content-Type': 'application/json'})
+        self.assertEqual(c.getresponse().status, 200)
+        self.assertEqual(mode(repo.ops_path()), 0o600)
 
 
 if __name__ == '__main__':
