@@ -58,3 +58,30 @@ A throwaway mod making every call Task 13 needs passed `claude plugin validate`,
 | `on('session.start', …)`, `on('ui.render', { component: 'AbovePrompt' }, …)` | event and render component present |
 
 Static analysis: extra named export accepted; `$` passed from an inner arrow to a top-level function accepted (validate lists those calls as `(via tick)`).
+
+## Headless end-to-end (tests/e2e-hooks.sh, Claude Code 2.1.288)
+
+Run 2, `passed 10, failed 0`:
+
+```text
+PASS this session's run marker exists
+PASS the tagged worker was briefed on its first allowed call
+PASS the briefing recorded the agent map
+PASS the worker's gh pr merge was denied
+PASS ...and gh never ran the merge
+PASS the worker's report without a json block was sent back once
+PASS the worker saw the briefing (quoted its first line back)
+PASS the receipt-less push was denied
+PASS ...and nothing reached origin
+PASS after the gate the push went through
+```
+
+- **Run 1 passed 9 of 10.** The one failure was the check's needle, not a hook. The worker quoted the contract's first content line ("You run steps 2-8 on your batch in your own worktree, with these overrides:"), not the `# foreman worker briefing` heading. Both strings exist only in the injected briefing, and its transcript has a `hook_additional_context` attachment. The check now accepts either.
+- **The marker survives `/foreman`.** The script stops the skill with `--max-turns 2`. Otherwise, on an empty backlog, SKILL.md ends the run with `hooks.py run-end` before the later steps.
+- **The briefing arrives on the first ALLOWED call.** A denied call carries none (Ruling P2). The worker therefore runs `echo e2e-start` before the denied `gh pr merge`.
+- **The report check, live:** the json-less final report was blocked once, and the worker then appended its block.
+- **PermissionRequest from a subagent (controller probe, `--permission-mode default`):**
+  - It carries `agent_id`; both `permission` lines in the trace had the worker's id.
+  - `script_allow` allowed the worker's `gate-lock.sh` and `wt-setup.sh` calls.
+  - A plain `git status` was denied, as `-p` default mode does for an unlisted command.
+  - So piece 8's "hooks.py only for the main session" rule can rely on `agent_id` here as well as on piece 2's PreToolUse deny.
