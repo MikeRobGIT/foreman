@@ -370,7 +370,7 @@ Only Bash is considered. Anything that doesn't match every rule below gets no de
 - **The config file is write-protected for subagents** by piece 2.
 - **On a match:** `{"hookSpecificOutput":{"hookEventName":"PermissionRequest","decision":{"behavior":"allow"}}}`.
 - **Other commands:** the README gives a `permissions.allow` snippet for the rest of the worker contract:
-  - for the orchestrator's clock (spec phase): `sleep` and `date +%s`;
+  - for the orchestrator's clock and parking (spec phase): `sleep`, `date +%s`, and `kill -TERM <pid>` (stopping a parked batch's review chain via its `<log>.pid`);
   - `git add`, `git commit`, `git fetch`, `git merge`, `git push` and `git worktree`;
   - `gh pr create|view|checks|comment|edit`, `gh api`;
   - `node --check`.
