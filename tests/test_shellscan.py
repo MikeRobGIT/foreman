@@ -137,6 +137,21 @@ class DetectTest(unittest.TestCase):
     def test_redirect_ampersand_does_not_split(self):
         self.assertEqual(pairs('git push 2>&1 | tail -1'), [('git', 'push')])
 
+    def test_a_segment_shlex_cannot_read_keeps_its_subcommand_with_unknown_args(self):
+        for t in ('git push foo\\', "git push $'a\\'b'", "'git' push foo\\", '\\git push foo\\',
+                  "bash -c 'git push' foo\\"):
+            sc = shellscan.scan(t, '/r')
+            self.assertTrue(sc.ok, t)
+            self.assertEqual([(c.prog, c.sub, c.args, c.cwd) for c in sc.cmds], [('git', 'push', None, None)], t)
+        self.assertEqual([(c.prog, c.sub, c.args) for c in cmds('gh pr merge 1 foo\\')], [('gh', 'pr merge', None)])
+        self.assertEqual([(c.prog, c.sub, c.args) for c in cmds('gt ss foo\\')], [('gt', 'submit', None)])
+        self.assertEqual([(c.sub, c.args) for c in cmds("git commit -m x && git push $'a\\'b'")],
+                         [('commit', ['-m', 'x']), ('push', None)])
+
+    def test_an_unreadable_segment_with_no_regex_match_stays_a_candidate(self):
+        self.assertEqual([(c.prog, c.sub, c.args, c.cwd) for c in cmds('git status foo\\')],
+                         [('git', None, None, None)])
+
 
 class ClassifyTest(unittest.TestCase):
     def test_gt_aliases(self):
@@ -170,6 +185,12 @@ class ClassifyTest(unittest.TestCase):
         self.assertEqual(info('git push origin HEAD:refs/heads/main'), (False, False, True))
         self.assertEqual(info('git push origin feat 2>&1'), (False, False, False))
 
+    def test_push_info_skips_a_redirect_word_before_the_remote(self):
+        def info(t):
+            return shellscan.push_info(cmds(t)[0].args, 'main')
+        self.assertEqual(info('git push main'), (False, False, False))
+        self.assertEqual(info('git push 2>&1 main'), (False, False, False))
+
     def test_gh_api_merge_by_method_and_path(self):
         def merge(t, subagent=False):
             return shellscan.gh_api_merge(cmds(t)[0].args, subagent)
@@ -196,6 +217,19 @@ class SegmentTest(unittest.TestCase):
     def test_quoted_operators_stay_in_one_segment(self):
         sc = shellscan.scan("/p/gate-lock.sh w1 -- 'npm run lint && npm test'", '/r')
         self.assertEqual([s.words for s in sc.segs if s.words], [['/p/gate-lock.sh', 'w1', '--', 'npm run lint && npm test']])
+
+    def test_braces_and_keywords_split_into_their_own_segments(self):
+        sc = shellscan.scan('{ git push; }', '/r')
+        self.assertEqual([(s.words, s.sep) for s in sc.segs], [([], 'kw'), (['git', 'push'], ';'), ([], 'kw'), ([], None)])
+        sc = shellscan.scan('if true; then git push; fi', '/r')
+        self.assertEqual([(s.words, s.sep) for s in sc.segs],
+                         [([], 'kw'), (['true'], ';'), ([], 'kw'), (['git', 'push'], ';'), (['fi'], None)])
+
+    def test_background_ampersand_splits_but_ampersand_redirects_do_not(self):
+        sc = shellscan.scan('sleep 1 & git push', '/r')
+        self.assertEqual([(s.words, s.sep) for s in sc.segs], [(['sleep', '1'], '&'), (['git', 'push'], None)])
+        sc = shellscan.scan('git push &> log', '/r')
+        self.assertEqual([(s.words, s.sep) for s in sc.segs], [(['git', 'push', '&>', 'log'], None)])
 
 
 if __name__ == '__main__':

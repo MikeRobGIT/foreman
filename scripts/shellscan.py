@@ -324,10 +324,13 @@ def _level(t, cwd, depth):
         seg = Seg(start, end, words, sep, len(stack), cwd)
         segs.append(seg)
         own = []
-        if words is None:
+        if words is None:   # shlex can't read the segment: fail closed, as on a lexing failure
+            own = _fallback_cmds(t[start:end], start, end)
+            matched = {c.prog for c in own}
             for m in WORD.finditer(blanked, start, end):
-                if FILL not in m.group() and os.path.basename(m.group()) in PROGS:
-                    own.append(_classify(Cmd(os.path.basename(m.group()), None, None, cwd, t[start:end], start, end)))
+                prog = os.path.basename(m.group())
+                if FILL not in m.group() and prog in PROGS and prog not in matched:
+                    own.append(_classify(Cmd(prog, None, None, cwd, t[start:end], start, end)))
         elif words:
             for k, w in enumerate(words):
                 if os.path.basename(w) in PROGS:
@@ -426,18 +429,23 @@ def _classify(cmd):
     return cmd
 
 
+def _fallback_cmds(text, start, end):
+    """One candidate per FALLBACK regex that matches the raw `text`, with unknown arguments and directory."""
+    cmds = []
+    for prog, sub, pat in FALLBACK:
+        if re.search(pat, text):
+            c = Cmd(prog, None, None, None, text, start, end)
+            c.sub = sub
+            cmds.append(c)
+    return cmds
+
+
 def scan(text, cwd):
     try:
         cmds, segs, docs, blanked = _level(text, cwd, 0)
         return Scan(True, cmds, segs, docs, blanked)
     except ScanError:
-        cmds = []
-        for prog, sub, pat in FALLBACK:
-            if re.search(pat, text):
-                c = Cmd(prog, None, None, None, text, 0, len(text))
-                c.sub = sub
-                cmds.append(c)
-        return Scan(False, cmds, [], [], text)
+        return Scan(False, _fallback_cmds(text, 0, len(text)), [], [], text)
 
 
 # ---- classification helpers for the pieces --------------------------------------------------------
