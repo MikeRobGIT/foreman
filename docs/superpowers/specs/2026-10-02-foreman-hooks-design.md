@@ -224,12 +224,11 @@ Two review rounds showed that parsing Bash keeps missing forms. Detection is the
   - `gh pr create`;
   - `gt submit`.
 - **The push's tree** is `git rev-parse HEAD^{tree}` in the command's effective directory. The limit: an explicit refspec source other than HEAD is still judged by HEAD.
-- **Allowed when any of these holds:**
+- **Allowed when either holds:**
   - **(a)** a receipt matches HEAD exactly:
     - either `state_dir/gate/<HEAD tree>` exists (an exact lookup);
     - or the last receipt for this checkout (`gate/last/<sha1(toplevel)>`) has a tree that equals `HEAD^{tree}` once `gate_exempt` paths are dropped from both. That is, `git diff --name-only --no-renames <receipt tree> HEAD^{tree}` lists only exempt paths.
   - **(b)** every path of `git diff --name-only --no-renames $(git merge-base origin/<default> HEAD) HEAD` is exempt;
-  - **(c)** a "last receipt" pointer exists for this checkout (`state_dir/gate/last/<sha1(toplevel)>`, naming the last receipted tree), and every path of `git diff --name-only --no-renames <that tree> HEAD^{tree}` is exempt. This covers a docs-only or bookkeeping push on a branch that already has code.
 - **Exempt paths:**
   - anything matching `gate_exempt`, using gitignore-style patterns (`**/` matches zero or more directories);
   - always `backlog_path` and anything matching `rules_glob`.
