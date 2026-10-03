@@ -51,6 +51,7 @@ check "template: empty list" test -z "$(tc required_ci)"
 check "template: gate_exempt" test "$(tc gate_exempt | tr '\n' ' ')" = "docs/** **/*.md "
 check "template: hook lists default empty" test -z "$(tc forbid_trailers)$(tc hooks_disabled)"
 check "template: design_spec_dir" test "$(tc design_spec_dir)" = "docs/superpowers/specs"
+check "template: all six hook keys present" test "$(grep -c -E '^(forbid_trailers|gate_exempt|worker_agent_types|hooks_disabled|design_spec_dir|status_pane):' "$root/templates/foreman.config.md")" = 6
 mkdir -p "$T/tpl/.claude" && cp "$root/templates/improvement-backlog.md" "$T/tpl/.claude/" && printf -- '---\n---\n' >"$T/tpl/.claude/foreman.config.md"
 echo '{"pr": 1, "done": [{"id": "IB-1", "note": "x"}], "new_rows": ["| IB-NEW-a | t | low | ready | a | s |"]}' >"$T/tpl.json"
 python3 "$root/scripts/bk.py" "$T/tpl" --dry-run "$T/tpl.json" >"$T/tpl.out" 2>&1

@@ -121,15 +121,18 @@ W1-W6 to keep them apart from steps 0-12; W6's stop conditions replace the auton
     surface yes/no) before launching.
 - **W3 Launch.** One `Agent` call per batch in one message (general-purpose, `isolation: "worktree"`,
   named, background). The prompt's FIRST line is exactly `foreman-worker: <batch>` (the hooks brief and
-  check tagged workers; see **Hooks**). Then the **Worker contract** from this file copied in (a worker
-  cannot read this command; keep the copy even though the hooks also brief it), plus the batch's rows, owned
-  files, a unique test-data id prefix and the resolved absolute `$FOREMAN` path. Keep a short state table
-  (batch, rows, PR, verified SHA, status) instead of re-reading reports. Before launching, check that each
-  `reviewers` entry's CLI is on PATH (`command -v`) and that the README's `permissions.allow` entries are in
-  `~/.claude/settings.json`, `.claude/settings.json` or `.claude/settings.local.json`. The chain already falls
-  through on quota, credits, auth and unknown models, so a missing CLI is the only thing to tell workers about;
-  warn the user about missing permission entries, because a background worker that hits a permission prompt it
-  can't show is denied and stalls.
+  check tagged workers; see **Hooks**). A batch name must match `[A-Za-z0-9_-]+`: the tag grammar and the
+  `hooks.py` CLIs reject anything else, and a name with a space silently disables the briefing and the report
+  check. Then the **Worker contract** from this file copied in (a worker cannot read this command; keep the
+  copy even though the hooks also brief it), plus the batch's rows, owned files, a unique test-data id prefix
+  and the resolved absolute `$FOREMAN` path. Keep a short state table (batch, rows, PR, verified SHA, status)
+  instead of re-reading reports. Before launching, check that each `reviewers` entry's CLI is on PATH
+  (`command -v`) and that the `permissions.allow` entries listed in the Hooks section of
+  `${CLAUDE_PLUGIN_ROOT}/README.md` are in `~/.claude/settings.json`, `.claude/settings.json` or
+  `.claude/settings.local.json`. A missing CLI is the only reviewer problem to tell workers about, because the
+  chain already falls through on quota, credits, auth and unknown models. Missing permission entries are for the
+  user, not the workers: warn the user, because a background worker that hits a permission prompt it can't show
+  is denied and stalls.
 - **W4 Each report, as it arrives** (a report is a claim; re-read everything):
   1. **Verify on the head SHA.** The latest run of every `required_ci` check on that SHA is green (list
      check runs with pagination); every `review_bots` entry has reviewed that SHA (the config's definition,
@@ -369,8 +372,9 @@ Read `.claude/foreman.config.md`, or the legacy `.claude/improve-next.config.md`
 ### 4. Gate
 - Run the gate under a slot, from the checkout's top level, with the configured string as ONE argument:
   `$FOREMAN/gate-lock.sh orchestrator -- '{{gate}}'`. Loop fix → rerun until green. During a run the hooks deny a
-  push (`git push`, `gh pr create`, `gt submit`) whose tree has no passing gate receipt, so re-run this after every
-  change you push (steps 7, 8 and 10 included).
+  push (`git push`, `gh pr create`, `gt submit`) whose tree has no passing gate receipt, so when the branch changes
+  any non-exempt path, re-run this after every change you push (steps 7, 8 and 10 included); a branch that changes
+  only exempt paths needs no receipt.
 - Run any `{{extra_gates}}` whose `when` condition matches the diff.
 
 ### 5. Draft PR (sibling branch off main — NOT stacked)
@@ -392,6 +396,7 @@ Read `.claude/foreman.config.md`, or the legacy `.claude/improve-next.config.md`
 - **Optional E2E (`{{e2e}}`):** if the project marks E2E non-gating / opt-in, don't block on it — read it for signal, investigate *persistent* reds via the report artifact.
 - **Ceiling:** if a required bot never posts, or CI stays pending, after ~90 minutes counted from when the check starts (a check still queued after 3 hours means CI is down) (or a fixed poll cap), STOP and notify the human instead of polling forever — a missing bot (outage, app removed, misconfig) must not hang the pass.
 - **Poll hygiene:** a settle-loop that exits on "0 pending" must FIRST confirm the `gh pr checks` output is non-empty (e.g. it contains a known job name) before counting — `gh pr checks` intermittently returns empty output that a bare pending-counter misreads as "settled" while jobs are still running.
+- **Record the head SHA** that the green `{{required_ci}}` checks and every `{{review_bots}}` review ran on; step 12 merges exactly that SHA, and a push after it means step 7 again.
 
 ### 8. Address comments — invoke `/foreman:pr-address-comments`
 - Carry its guardrails: (a) **grep-verify** every bot-cited "convention" against the actual file before complying — cite the rule file:line when declining (bots fabricate rules); (b) **diminishing-returns gate** (round ≥3 + severity downshift + no open real defect + CI green → recommend merge, stop iterating).
@@ -413,7 +418,7 @@ Do the bookkeeping now and commit it to **this PR's branch** so it is reviewed a
 
 ### 11. Merge decision (mode-dependent)
 - Post the concise summary either way: what changed, gate result, bot-round count, browser evidence (or skip-note), declined → new-backlog items, and confirmation the bookkeeping is folded in.
-- **Manual mode (default):** HALT and ask the human to approve the merge. **Never self-merge.**
+- **Manual mode (default):** HALT and ask the human to approve the merge of the PR at the head SHA recorded in step 7 (name the SHA in the ask). **Never self-merge.**
 - **Autonomous mode (`loop`/`--auto-merge`):** evaluate the auto-merge gate (Non-negotiables). All conditions green → note "auto-merging (loop mode)" and proceed to step 12. Any condition unmet → leave the PR open, post exactly which one failed, and STOP for a human (do not merge).
 
 ### 12. Merge & sync (on human approval, or auto in loop mode)

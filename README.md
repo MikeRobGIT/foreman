@@ -181,7 +181,7 @@ nothing until it finishes.
 | `scripts/wt-setup.sh <worktree>` / `--check <dir>` | copy env files, install, stale-install check; `--check` with no `stale_check` configured fails |
 | `scripts/bk.py <repo> [--dry-run] <reports...>` | fold worker JSON reports into the backlog and rules files; writes nothing on any mismatch |
 | `scripts/cfg.py <repo> <key> [default]` | read a config key (no PyYAML needed) |
-| `scripts/hooks.py <event>` | the hooks' dispatcher; orchestrator CLIs `run-end`, `release <batch> <sha>`, `stopping <batch>`, `forget <batch>` (exit 3 = hooks inactive) |
+| `scripts/hooks.py <event>` | the hooks' dispatcher; orchestrator CLIs `run-end` (always exits 0), `release <batch> <sha>`, `stopping <batch>`, `forget <batch>` (these three exit 3 when the hooks are inactive) |
 | `scripts/state.py <path>` | print the repo's state dir (`~/.claude/foreman/<repo-key>`, or under `$FOREMAN_HOME`) |
 
 ## Tests
