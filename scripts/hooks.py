@@ -795,6 +795,142 @@ def other_worktree(c):
 BASH_PIECES[3] = merge_discipline
 
 
+# ---- piece 4: trailer guard -----------------------------------------------------------------------
+
+MESSAGE_OPTS = {
+    'git': {'commit': (('-m', '--message'), ('-F', '--file'))},
+    'gh': {s: (('-t', '--title', '-b', '--body', '--subject'), ('-F', '--body-file'))
+           for s in ('pr create', 'pr edit', 'pr comment', 'pr merge', 'pr review')},
+    'gt': {s: (('-m', '--message'), ()) for s in ('create', 'modify', 'submit')},
+}
+
+
+def piped_docs(sc, c):
+    """The heredoc bodies of the pipeline stages before the top-level command c. shellscan attaches a heredoc only
+    to the command it is written on, so `cat <<EOF | gh pr create --body-file -` doesn't reach c.heredocs."""
+    i = next((k for k, s in enumerate(sc.segs) if (s.start, s.end) == (c.start, c.end)), 0)
+    out = []
+    while i and sc.segs[i - 1].sep in ('|', '|&'):
+        i -= 1
+        out += [d.body for d in sc.docs if sc.segs[i].start <= d.op < sc.segs[i].end]
+    return out
+
+
+def message_texts(c, sc, h):
+    """The message texts a commit/PR/comment command would write, or None when it writes none."""
+    opts = MESSAGE_OPTS.get(c.prog, {}).get(c.sub)
+    if opts is None:
+        return None
+    if c.args is None:
+        return [c.text]
+    texts = opt_values(c.args, opts[0]) + list(c.heredocs)
+    for f in opt_values(c.args, opts[1]):
+        if f == '-':
+            texts += piped_docs(sc, c)
+            continue
+        path = os.path.join(c.cwd or h.cwd, os.path.expanduser(f))
+        if os.path.isfile(path):
+            with open(path, encoding='utf-8', errors='replace') as fh:
+                texts.append(fh.read(1 << 20))
+        else:
+            doc = next((d for d in sc.docs if d.target == os.path.normpath(path)), None)
+            if doc:
+                texts.append(doc.body)
+            else:
+                print(f'foreman: trailer guard skipped {f} (it does not exist yet)', file=sys.stderr)
+    return texts
+
+
+def find_trailer(rules, texts):
+    """The first forbid_trailers entry that starts a line of the texts (after non-word characters, any case);
+    an entry written /.../ is a regex searched within each line."""
+    for entry in rules:
+        e = str(entry)
+        if len(e) > 2 and e.startswith('/') and e.endswith('/'):
+            try:
+                rx = re.compile(e[1:-1])
+            except re.error:
+                print(f'foreman: bad forbid_trailers regex {e}', file=sys.stderr)
+                continue
+            if any(rx.search(line) for t in texts for line in t.splitlines()):
+                return e
+        elif any(re.search(r'(?im)^[^\w\n]*' + re.escape(e), t) for t in texts):
+            return e
+    return None
+
+
+def merge_method(args):
+    if has_flag(args, ('--squash', '-s')):
+        return 'squash'
+    if has_flag(args, ('--rebase', '-r')):
+        return 'rebase'
+    return 'merge'
+
+
+def trailer_guard(h, sc):
+    for c in sc.cmds:
+        repo = cmd_repo(c, h)
+        if not h.active(repo, 'trailer_guard', run_only=False):
+            continue
+        rules = repo.list('forbid_trailers')
+        texts = message_texts(c, sc, h) if rules else None
+        if texts is None:
+            continue
+        hit = find_trailer(rules, texts)
+        if hit:
+            h.deny(f'no forbidden trailer lines — a message line starts with "{hit}" (forbid_trailers); remove it')
+        if (c.prog, c.sub) == ('gh', 'pr merge') and c.args is not None and not c.denied:
+            bad = [m for m in (pr_view(c) or {}).get('commits') or []
+                   if find_trailer(rules, [f"{m.get('messageHeadline', '')}\n{m.get('messageBody', '')}"])]
+            method = merge_method(c.args)
+            if bad and not (method == 'squash' and opt_values(c.args, ('-b', '--body', '-F', '--body-file'))):
+                fix = ('pass --body (and --subject) without it' if method == 'squash'
+                       else 'squash with a --body without it; merge and rebase keep every commit message')
+                h.deny(f"the PR's commit {str(bad[0].get('oid', ''))[:9]} carries a forbidden trailer — {fix}")
+
+
+BASH_PIECES[4] = trailer_guard
+
+
+# ---- piece 5: backlog row check -------------------------------------------------------------------
+
+def backlog_problems(text, prefix):
+    """(the number of rows with a problem, ['<id>: <problem>', ...]). A row counts once, however many problems
+    name it: a duplicated id puts every row that carries it among the problem rows."""
+    bl = backlog.parse(text, prefix)
+    pat = backlog.row_pattern(prefix)
+    dups = bl.duplicates()
+    rows, out = set(), []
+    for n, line in enumerate(bl.lines):
+        raw = (line.raw if isinstance(line, backlog.Row) else str(line)).rstrip('\r')
+        m = pat.match(raw)
+        if m and f'{prefix}-{m.group(1)}' in dups:
+            rows.add(n)
+        if m or raw.startswith('| NEW-'):
+            for p in backlog.line_problems(raw):
+                rows.add(n)
+                out.append(f'{raw.split(" | ")[0][2:]}: {p[1]} " | " separators, want 5')
+    out += [f'{id_}: on {count} rows' for id_, count in dups.items()]
+    return len(rows), out
+
+
+def backlog_check(h, ti):
+    path = ti.get('file_path')
+    path = os.path.join(h.cwd, path) if path else None
+    repo = repo_at(path) if path else None
+    if not h.active(repo, 'backlog_check', run_only=False) or repo.rel(path) != os.path.normpath(repo.backlog):
+        return
+    with open(path, encoding='utf-8', newline='') as f:
+        rows, probs = backlog_problems(f.read(), str(repo.get('id_prefix', 'IB')))
+    if probs:
+        print(json.dumps({'hookSpecificOutput': {'hookEventName': 'PostToolUse', 'additionalContext':
+              f'foreman: the backlog now has {rows} problem rows: {"; ".join(probs[:10])}. '
+              'Fix them before committing.'}}))
+
+
+POST_EDIT[5] = backlog_check
+
+
 # ---- pretool / posttool ---------------------------------------------------------------------------
 
 def pretool(h):

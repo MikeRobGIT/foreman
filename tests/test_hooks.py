@@ -1370,5 +1370,184 @@ class OptionHelpersTest(unittest.TestCase):
         self.assertEqual(hooks.positionals(['--squash', '-t', 'x', '12'], hooks.GH_MERGE_VALUE_OPTS), ['12'])
 
 
+class TrailerGuardTest(Case):
+    def test_trailer_in_a_message_option(self):
+        self.assertIn('starts with "Co-Authored-By"', self.fx.bash('git commit -m "fix: x" -m "Co-Authored-By: a <a@b>"'))
+        self.assertIn('Claude-Session', self.fx.bash('git commit -am "x\nClaude-Session: abc"'))
+        self.assertIn('Co-Authored-By', self.fx.bash('gt create -m "x\n\nco-authored-by: a"'))
+
+    def test_trailer_in_a_message_file_in_the_scratchpad(self):
+        msg = os.path.join(self.fx.tmp, 'scratch', 'msg.txt')
+        write(msg, 'fix: thing\n\nCo-Authored-By: a <a@b>\n')
+        self.assertIn('Co-Authored-By', self.fx.bash(f'git commit -F {msg}'))
+        write(msg, 'fix: thing\n')
+        self.assertIsNone(self.fx.bash(f'git commit -F {msg}'))
+
+    def test_trailer_in_a_heredoc(self):
+        self.assertIn('Co-Authored-By', self.fx.bash("git commit -F - <<'EOF'\nfix: x\n\nCo-Authored-By: a\nEOF"))
+        cmd = ("git commit -m \"$(cat <<'EOF'\nfix: x\n\n- \"two words\"\nCo-Authored-By: a <a@b>\nEOF\n)\"")
+        self.assertIn('Co-Authored-By', self.fx.bash(cmd))
+        later = os.path.join(self.fx.tmp, 'later.txt')
+        self.assertIn('Co-Authored-By', self.fx.bash(f"cat > {later} <<'EOF'\nx\nCo-Authored-By: a\nEOF\ngit commit -F {later}"))
+
+    def test_trailer_in_a_heredoc_piped_into_a_stdin_message(self):
+        # shellscan attaches a heredoc only to the command it is written on, so `cat <<EOF | gh ... -F -` reads sc.docs
+        pipe = "cat <<'EOF' | gh pr create --title t --body-file -\n## Summary\n\nCo-Authored-By: a\nEOF"
+        self.assertIn('Co-Authored-By', self.fx.bash(pipe))
+        self.assertIn('Co-Authored-By', self.fx.bash(pipe.replace('| gh pr', '| tee /dev/null | gh pr')))   # two stages back
+        self.assertIsNone(self.fx.bash(pipe.replace('Co-Authored-By: a', 'all good')))
+        # a heredoc that feeds something else isn't what the candidate reads
+        other = "cat <<'EOF' > notes.txt\nCo-Authored-By: a\nEOF\necho ok | gh pr create --title t --body-file -"
+        self.assertIsNone(self.fx.bash(other))
+
+    def test_generated_with_footer_in_a_pr_body(self):
+        cmd = ("gh pr create --title t --body \"$(cat <<'EOF'\n## Summary\n- \"two words\"\n\n"
+               "🤖 Generated with [Claude Code](https://claude.com/claude-code)\nEOF\n)\"")
+        self.assertIn('Generated with', self.fx.bash(cmd))
+        self.assertIn('Generated with', self.fx.bash('gh pr comment 5 --body "ok\n🤖 Generated with Claude Code"'))
+
+    def test_mid_sentence_mention_is_allowed(self):
+        self.assertIsNone(self.fx.bash('git commit -m "fix: drop the Co-Authored-By line from the template"'))
+
+    def test_regex_entry_searches_within_lines(self):
+        write(os.path.join(self.fx.work, '.claude/foreman.config.md'),
+              CONFIG.replace('Generated with]', '/Generated with \\[Claude Code\\]/]'))
+        self.assertIsNone(self.fx.bash('git commit -m "x\n- Generated with the seed script"'))
+        self.assertIn('Generated with', self.fx.bash('git commit -m "x\n🤖 Generated with [Claude Code](https://x)"'))
+        self.assertIsNone(self.fx.bash('git commit -m "x\n🤖 generated with [claude code](https://x)"'))   # a regex is case-sensitive
+
+    def test_a_bad_regex_entry_is_skipped_with_a_note(self):
+        write(os.path.join(self.fx.work, '.claude/foreman.config.md'), CONFIG.replace('[Co-Authored-By, ', '[/(/, '))   # the bad entry first: a later hit would end the search
+        out, err = self.fx.hook('pretool', self.fx.payload('Bash', {'command': 'git commit -m "x\nClaude-Session: a"'}))
+        self.assertIn('Claude-Session', out['hookSpecificOutput']['permissionDecisionReason'])   # the other entries still apply
+        self.assertIn('bad forbid_trailers regex /(/', err)
+        self.assertNotIn('foreman hook error', err)
+
+    def test_a_message_file_resolves_against_the_effective_directory(self):
+        write(os.path.join(self.fx.work, 'sub', 'msg.txt'), 'fix: x\n\nCo-Authored-By: a\n')
+        self.assertIn('Co-Authored-By', self.fx.bash(f'cd {self.fx.work}/sub && git commit -F msg.txt'))
+        self.assertIn('Co-Authored-By', self.fx.bash('git commit -F msg.txt', cwd=os.path.join(self.fx.work, 'sub')))
+        self.assertIsNone(self.fx.bash('git commit -F msg.txt'))   # no msg.txt at the top: skipped with a note
+
+    def test_applies_without_a_run_and_not_with_an_empty_list(self):
+        self.assertIsNotNone(self.fx.bash('git commit -m "x\nCo-Authored-By: a"', sid='S9'))
+        write(os.path.join(self.fx.work, '.claude/foreman.config.md'),
+              CONFIG.replace('[Co-Authored-By, Claude-Session, Generated with]', '[]'))
+        self.assertIsNone(self.fx.bash('git commit -m "x\nCo-Authored-By: a"'))
+
+    def test_unknown_arguments_check_the_raw_text(self):
+        self.assertIn('Co-Authored-By', self.fx.bash('git commit -m "x\nCo-Authored-By: a'))
+
+    def test_hooks_disabled_drops_the_piece(self):
+        write(os.path.join(self.fx.work, '.claude/foreman.config.md'),
+              CONFIG.replace('---\n', '---\nhooks_disabled: [trailer_guard]\n', 1))
+        self.assertIsNone(self.fx.bash('git commit -m "x\nCo-Authored-By: a"'))
+
+    def test_merges_whose_commits_carry_a_trailer(self):
+        commits = [{'oid': 'abcdef1234567', 'messageHeadline': 'fix', 'messageBody': 'Co-Authored-By: a <a@b>'}]
+        write(self.fx.env['FAKE_GH_PR'], json.dumps({'headRefName': 'feat', 'commits': commits}))
+        base = 'gh pr merge 5 --match-head-commit abc1234 '
+        self.assertIn('pass --body', self.fx.bash(base + '--squash'))
+        self.assertIsNone(self.fx.bash(base + '--squash --subject "fix: x" --body "clean body"'))
+        clean = os.path.join(self.fx.tmp, 'clean.txt')
+        write(clean, 'clean body\n')
+        self.assertIsNone(self.fx.bash(base + f'--squash --body-file {clean}'))
+        self.assertIn('merge and rebase keep every commit message', self.fx.bash(base + '--merge'))
+        self.assertIn('merge and rebase keep every commit message', self.fx.bash(base + '--rebase'))
+        self.assertIn('abcdef123', self.fx.bash(base + '--rebase'))
+
+    def test_a_merge_with_no_method_is_judged_like_merge(self):
+        commits = [{'oid': 'abcdef1234567', 'messageHeadline': 'fix', 'messageBody': 'Co-Authored-By: a <a@b>'}]
+        write(self.fx.env['FAKE_GH_PR'], json.dumps({'headRefName': 'feat', 'commits': commits}))
+        self.assertIn('merge and rebase keep every commit message', self.fx.bash('gh pr merge 5 --match-head-commit abc1234'))
+
+    def test_a_merge_of_clean_commits_is_allowed(self):
+        commits = [{'oid': 'abcdef1234567', 'messageHeadline': 'fix', 'messageBody': 'about the Co-Authored-By line'}]
+        write(self.fx.env['FAKE_GH_PR'], json.dumps({'headRefName': 'feat', 'commits': commits}))
+        for method in ('--squash', '--merge', '--rebase'):
+            self.assertIsNone(self.fx.bash(f'gh pr merge 5 --match-head-commit abc1234 {method}'), method)
+
+    def test_the_merge_check_reuses_piece_3s_gh_call(self):
+        self.fx.start_run()
+        commits = [{'oid': 'abcdef1234567', 'messageHeadline': 'fix', 'messageBody': 'Co-Authored-By: a <a@b>'}]
+        write(self.fx.env['FAKE_GH_PR'], json.dumps({'headRefName': 'feat', 'commits': commits}))
+        # --delete-branch makes piece 3 read the PR's head, piece 4 reads the commits: one gh call serves both
+        why = self.fx.bash('gh pr merge 5 --squash --match-head-commit abc1234 --delete-branch')
+        self.assertIn('pass --body', why)
+        with open(self.fx.env['FAKE_GH_LOG']) as f:
+            self.assertEqual(len([l for l in f.read().splitlines() if l.startswith('pr view')]), 1)
+
+    def test_a_denied_worker_merge_makes_no_gh_call(self):
+        self.fx.start_run()
+        commits = [{'oid': 'abcdef1234567', 'messageHeadline': 'fix', 'messageBody': 'Co-Authored-By: a <a@b>'}]
+        write(self.fx.env['FAKE_GH_PR'], json.dumps({'headRefName': 'feat', 'commits': commits}))
+        why = self.fx.bash('gh pr merge 5 --squash --match-head-commit abc1234', agent='a1')
+        self.assertIn('workers never merge', why)
+        self.assertNotIn('forbidden trailer', why)
+        self.assertFalse(os.path.exists(self.fx.env['FAKE_GH_LOG']))
+
+
+class BacklogCheckTest(Case):
+    def post(self, path, tool='Edit', **kw):
+        out, _ = self.fx.hook('posttool', self.fx.payload(tool, {'file_path': path}, event='PostToolUse', **kw))
+        return out['hookSpecificOutput']['additionalContext'] if out else None
+
+    def backlog_path(self):
+        return os.path.join(self.fx.work, '.claude/improvement-backlog.md')
+
+    def write_raw(self, text):
+        with open(self.backlog_path(), 'w', newline='') as f:   # newline='': keep the CRLFs the caller wrote
+            f.write(text)
+
+    def test_clean_backlog_returns_nothing(self):
+        self.assertIsNone(self.post(os.path.join(self.fx.work, '.claude/improvement-backlog.md')))
+        self.assertIsNone(self.post(os.path.join(self.fx.work, 'app.py')))
+
+    def test_a_bookkeeping_worktree_edit_is_checked(self):
+        wt = os.path.join(self.fx.tmp, 'bk')
+        git(self.fx.work, 'worktree', 'add', '-q', wt, '-b', 'bk')
+        bad = BACKLOG + '| IB-3 | Three | a | b | low | ready | C | s |\n| IB-3 | Dup | low | ready | D | s |\n'
+        write(os.path.join(wt, '.claude/improvement-backlog.md'), bad)
+        ctx = self.post(os.path.join(wt, '.claude/improvement-backlog.md'), tool='Write', cwd=wt)
+        self.assertIn('the backlog now has 2 problem rows', ctx)
+        self.assertIn('IB-3: 7 " | " separators, want 5', ctx)
+        self.assertIn('IB-3: on 2 rows', ctx)
+
+    def test_crlf_backlog(self):
+        # a CRLF file is read as is (newline=''), so every row ends in \r and the check must not carry it along
+        self.write_raw(BACKLOG.replace('\n', '\r\n'))
+        self.assertIsNone(self.post(self.backlog_path()))
+        self.write_raw((BACKLOG + '| IB-3 | Broken | low |\n').replace('\n', '\r\n'))
+        self.assertIn('IB-3: 2 " | " separators, want 5', self.post(self.backlog_path()))
+        # a row cut back to its id has no " | " to name it by: the \r that ends the line must not leak into the name
+        self.write_raw((BACKLOG + '| IB-4 |\n').replace('\n', '\r\n'))
+        ctx = self.post(self.backlog_path())
+        self.assertIn('0 " | " separators, want 5', ctx)
+        self.assertIn('IB-4', ctx)
+        self.assertNotIn('\r', ctx)
+
+    def test_a_row_counts_once_however_many_problems_it_has(self):
+        # two broken rows sharing an id: three problems, two rows
+        self.write_raw(BACKLOG + '| IB-3 | Broken | low |\n| IB-3 | Also | low |\n')
+        ctx = self.post(self.backlog_path())
+        self.assertIn('the backlog now has 2 problem rows:', ctx)
+        self.assertEqual(ctx.count('IB-3: 2 " | " separators, want 5'), 2)
+        self.assertIn('IB-3: on 2 rows', ctx)
+
+    def test_only_the_first_ten_problems_are_listed(self):
+        self.write_raw(BACKLOG + ''.join(f'| IB-{n} | Broken | low |\n' for n in range(10, 22)))
+        ctx = self.post(self.backlog_path())
+        self.assertIn('the backlog now has 12 problem rows:', ctx)
+        self.assertEqual(ctx.count('separators, want 5'), 10)
+        self.assertIn('IB-19:', ctx)
+        self.assertNotIn('IB-20:', ctx)
+
+    def test_hooks_disabled_drops_the_piece(self):
+        write(os.path.join(self.fx.work, '.claude/foreman.config.md'),
+              CONFIG.replace('---\n', '---\nhooks_disabled: [backlog_check]\n', 1))
+        self.write_raw(BACKLOG + '| IB-3 | Broken | low |\n')
+        self.assertIsNone(self.post(self.backlog_path()))
+
+
 if __name__ == '__main__':
     unittest.main()
