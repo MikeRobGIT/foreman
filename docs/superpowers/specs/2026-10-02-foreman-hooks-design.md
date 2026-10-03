@@ -46,7 +46,7 @@ Still to be probed in the plan; the design states a fallback for each:
 
 ## Scope
 
-There are nine pieces. Pieces 1–8 are `command` hooks served by one script; piece 9 is a mod.
+There are ten pieces. Pieces 1–8 and 10 are `command` hooks served by one script; piece 9 is a mod.
 
 | # | Name (config id) | Event | Active | Applies to |
 |---|---|---|---|---|
@@ -59,8 +59,9 @@ There are nine pieces. Pieces 1–8 are `command` hooks served by one script; pi
 | 7 | Report check (`report_check`) | SubagentStop | worker tag present | tagged workers; blocks once |
 | 8 | Script allow (`script_allow`) | PermissionRequest | during a run | everyone; exact scripts, strict arguments |
 | 9 | Wave status (`status_pane`) | Mod | during a run | the session that started the run |
+| 10 | Spec gate (`spec_gate`) | PreToolUse | during a run | tagged workers whose batch is not released |
 
-A tenth piece, a **spec gate**, is proposed under Interactions and isn't part of this scope until the user approves it.
+The user approved the spec gate on 2026-10-02. It enforces the spec-phase rule "no code before the batch's spec is released".
 
 ## Non-goals
 
@@ -73,8 +74,8 @@ A tenth piece, a **spec gate**, is proposed under Interactions and isn't part of
 ## Architecture
 
 ```
-hooks/hooks.json        settings hooks (pieces 1-8) + "modules": ["./status.mjs"] (piece 9)
-scripts/hooks.py        dispatcher: python3 hooks.py <event>, JSON on stdin; also `hooks.py run-end`
+hooks/hooks.json        settings hooks (pieces 1-8, 10) + "modules": ["./status.mjs"] (piece 9)
+scripts/hooks.py        dispatcher: python3 hooks.py <event>, JSON on stdin; also the CLIs `hooks.py run-end` and `hooks.py release <batch> <sha>`
 scripts/shellparse.py   split a Bash command into simple commands (below); used by hooks.py
 scripts/state.py        main_checkout(path), repo_key(main), state_dir(main); CLI: state.py <path> → prints state_dir
 hooks/status.mjs        the wave status mod
@@ -220,7 +221,7 @@ Serial step 12 (`--delete-branch`, no worktree) passes that second check, but it
   - the `### Worker contract` section read from the installed `SKILL.md`, rendered. `$FOREMAN` becomes `${CLAUDE_PLUGIN_ROOT}/scripts`; `{{key}}` values come from the config; `<prefix>` becomes `id_prefix`.
   - then `gate`, `forbid_trailers` and `shared_resources`.
   - Cap: 8 KB. Over the cap, `shared_resources` is truncated first, never the contract.
-- **The briefing records `agent_id → batch`** in `state_dir/runs/<session_id>.agents.json`. The proposed spec gate needs it.
+- **The briefing records `agent_id → batch`** in `state_dir/batches/agents/<agent_id>`, with the batch name as the file's content. Piece 10 needs it. Batch names are unique per run (W2 names them by wave, e.g. `w16a`), so the map isn't keyed by session.
 - **Dispatch prompts keep:** the batch, rows, owned files, test-data id prefix, the resolved plugin path, and W6's inline rule notes from an unmerged bookkeeping PR.
 
 ### 7. Report check (SubagentStop)
@@ -267,6 +268,20 @@ Only Bash is considered, and anything not matching every rule below gets no deci
 - **Errors:** each refresh is wrapped. A failure shows "foreman status unavailable: <reason>" and keeps the last good table.
 - **API binding:** the plan binds the exact calls against the generated `.d.ts`. The formatter is a pure exported function.
 
+### 10. Spec gate (tagged workers during a run)
+
+- **Who:** a subagent (`agent_id` present) whose id is in the map from piece 6, during a run, whose batch has no release file `state_dir/batches/<batch>.released`.
+- **Unmapped ids fail open:** an `agent_id` with no map entry (no tag, or P2 failed) passes, and so does any call outside a run.
+- **Denied before release:**
+  - Edit-family calls whose target, resolved in its own checkout, is outside that checkout's `spec_dir`;
+  - `git commit` when any staged path is outside `spec_dir`, judged from `git diff --cached --name-only` in the effective directory. With `-a`/`--all`, the modified tracked files (`git diff --name-only`) count as staged too. This catches code written through Bash, which the Edit rule can't see.
+  - `git push`, `gh pr create` and `gt submit`. The spec phase doesn't push.
+- **Allowed before release:** reading anything, running anything else (tests, `git grep`), and editing and committing inside `spec_dir`.
+- **Reason:** "foreman: batch <b>'s spec isn't released yet. Finish the spec, report `SPEC READY <path> <sha>`, and wait for the orchestrator's release."
+- **Release:** at W3.6, before its `SendMessage`, the orchestrator runs `python3 $FOREMAN/hooks.py release <batch> <sha>`. That writes `state_dir/batches/<batch>.released` = `{"sha", "time"}`. In manual mode this happens only for the batches the human approved at the checkpoint.
+- **After release** the gate is silent. Later spec edits are W4's concern: its byte-identical check, or a listed deviation.
+- **Cleanup:** W5 deletes `batches/*` for this wave's batches. Entries older than 14 days are pruned on `run-start`.
+
 ## Config keys (new)
 
 | key | default | meaning |
@@ -276,6 +291,7 @@ Only Bash is considered, and anything not matching every rule below gets no deci
 | `worker_agent_types` | `["general-purpose", "workflow-subagent"]` | subagent types eligible for pieces 6 and 7 |
 | `hooks_disabled` | `[]` | piece ids to turn off in this repo |
 | `status_pane` | `true` | piece 9 |
+| (none new) | | piece 10 reads `spec_dir` from the spec-phase design |
 
 `templates/foreman.config.md` documents them. vacancy-vibe sets `forbid_trailers: [Co-Authored-By, Claude-Session, Generated with]` at switch-over.
 
@@ -292,6 +308,7 @@ Only Bash is considered, and anything not matching every rule below gets no deci
 - **Step 12 and W4.6:** `gh pr merge --match-head-commit <verified sha>`. Step 12 deletes the branch after the sync, when no worktree holds it.
 - **W5:** a bookkeeping diff with non-exempt paths is gated in its worktree after `{{worktree_setup}}`.
 - **Termination** (W6 stop and the autonomous loop's end) runs `python3 $FOREMAN/hooks.py run-end`.
+- **W3.6 (spec-phase release):** runs `python3 $FOREMAN/hooks.py release <batch> <sha>` before the release message. **W5** deletes `batches/*` for this wave.
 - **`/foreman ui`** passes `--repo <main checkout>`.
 - **A "Hooks" paragraph** lists the pieces, `hooks_disabled`, and the `! <command>` override.
 
@@ -299,10 +316,7 @@ Only Bash is considered, and anything not matching every rule below gets no deci
 
 - **Piece 7** allows the `SPEC READY` stop. That rule is in piece 7 above.
 - **Piece 6** briefs the contract as the spec-phase design rewrites it: Step 2 becomes the spec phase.
-- **Proposed piece 10, spec gate** (not in scope until approved). During a run, it denies a tagged worker's Edit or Write outside `spec_dir` until its batch's spec is released.
-  - The batch comes from piece 6's `agent_id → batch` map.
-  - Release is a file the orchestrator writes at W3.6: `state_dir/runs/<session_id>.released/<batch>`.
-  - It fails open when the map has no entry. That case is P2: no tag readable at SubagentStart.
+- **Piece 10 (spec gate)** enforces the spec phase's "no code before release". The spec-phase design's W3.6 gains the `hooks.py release <batch> <sha>` step, and its "Non-goals: no enforcement by hooks" line is replaced by a pointer to piece 10.
 
 ## Error handling
 
@@ -341,6 +355,12 @@ These are guardrails, not a security boundary. Piece 8 is the only piece that gr
     - no decision for each of: a newline, `$(`, `; rm`;
     - no decision for gate-lock with a non-gate command or `--name`, for wt-setup on a non-worktree directory, and for bk.py without `--dry-run` from a subagent.
   - **Run marker:** `/loop … /foreman`, `ui`/`init` skipped, `SessionEnd` reasons, `hooks.py run-end`, and the 48-hour expiry.
+  - **Piece 10:**
+    - a mapped, unreleased worker is denied an Edit outside `spec_dir` and allowed one inside it;
+    - `git commit` with a staged code file is denied; with only the spec staged it is allowed; `git commit -a` with a modified code file is denied;
+    - `git push` and `gh pr create` are denied before release;
+    - after `hooks.py release` everything passes;
+    - an unmapped `agent_id` passes, and the main session always passes.
 - **`tests/test_status.mjs`** tests the pure formatter.
 - **A headless end-to-end** (manual, documented) loads the plugin with `--plugin-dir` in a throwaway repo with a fake `gh` and haiku workers. Its checks:
   - P1–P5 answered;
