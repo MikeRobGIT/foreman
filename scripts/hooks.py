@@ -730,8 +730,8 @@ NO_MERGE = 'workers never merge — the worker contract: "Never merge."; report 
 NO_FORCE = ('no force-push — the worker contract: "never amend or force-push once the PR is open"; push a '
             'follow-up commit')
 NO_REBASE = 'no rebase — the worker contract: "merge `origin/main` into it, do not rebase"'
-NO_PUSH_DEFAULT = ('no push to {default} — the worker contract: "open the PR ready for review"; push your own '
-                   'branch and open the PR')
+NO_PUSH_DEFAULT = ('no push to {default} — the worker contract: "Never merge." (a direct push to the default branch '
+                   'is an unreviewed merge); push your own branch and open the PR')
 NO_AMEND = ('no gt modify once the branch has an upstream — the worker contract: "never amend or force-push once '
             'the PR is open"; commit a follow-up instead')
 NO_BOOKKEEPING = ('workers don\'t edit the backlog, the rules files or the foreman config — the worker contract: '

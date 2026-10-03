@@ -1261,6 +1261,12 @@ class WorkerGuardTest(Case):
             for q in quoted:
                 self.assertIn(' '.join(q.split()), contract, name)
 
+    def test_a_push_to_the_default_branch_quotes_never_merge(self):
+        # a direct push to the default branch is an unreviewed merge
+        why = self.fx.bash('git push origin HEAD:main', agent='a1')
+        self.assertIn('no push to main — the worker contract: "Never merge."', why)
+        self.assertIn('unreviewed merge', why)
+
     def test_gt_modify_only_once_the_branch_has_an_upstream(self):
         git(self.fx.work, 'switch', '-q', '-c', 'feat')
         self.assertIsNone(self.fx.bash('gt modify -a', agent='a1'))
