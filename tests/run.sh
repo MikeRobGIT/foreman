@@ -382,6 +382,36 @@ P1 = the design is wrong or unsafe as written. P2 = a likely defect or a gap to 
 Verdict: <ready to build | revise | redesign>
 EOF
 cd "$T"
+echo "## spec mode: only reads-repo adapters"
+cd "$S"
+chain 60 30 200 good reader >"$T/chain.md"
+sv --spec "docs/my specs/d.md" "$fork" "$T/out/ro.log"
+check "spec mode: a non-reads-repo adapter falls through, the reader lands" grep -q '^reader' "$T/out/ro.log.reviewer"
+check "...noting why" grep -q 'good.*spec mode needs an adapter that reads the repo' "$T/out/ro.log.attempts"
+chain 60 30 200 good >"$T/chain.md"; sv "$fork" "$T/out/ro2.log"
+check "review mode: the same adapter still lands" grep -q '^good' "$T/out/ro2.log.reviewer"
+for cli in prime-agent pi; do printf '#!/bin/bash\ntouch "%s/spec-%s.called"\n' "$T" "$cli" >"$F/$cli"; chmod +x "$F/$cli"; done
+chain 60 30 200 prime-agent pi >"$T/chain.md"; PATH=$F:$PATH sv --spec "docs/my specs/d.md" "$fork" "$T/out/ro3.log"
+check "spec mode: diff-in-prompt adapters exhaust the chain (exit 1)" test $? = 1
+check "...each with exit 10, not a hard error" test "$(grep -c 'exit 10' "$T/out/ro3.log.attempts")" = 2
+check "...each naming spec mode" test "$(grep -c 'spec mode needs an adapter' "$T/out/ro3.log.attempts")" = 2
+check "...without calling either CLI" bash -c "! ls '$T'/spec-*.called >/dev/null 2>&1"
+for a in claude opencode; do check "$a.sh is marked reads-repo" grep -q '^# foreman: reads-repo' "$root/reviewers/$a.sh"; done
+for a in agy hermes openclaw pi prime-agent; do check "$a.sh is not marked reads-repo" bash -c "! grep -q '^# foreman: reads-repo' '$root/reviewers/$a.sh'"; done
+cat >"$F/opencode" <<'EOF'
+#!/bin/bash
+printf '%s\n' "$@" >"$OPENCODE_ARGS"
+echo '{"type":"text","part":{"text":"spec review by opencode"}}'
+EOF
+chmod +x "$F/opencode"
+export OPENCODE_ARGS=$T/opencode.args
+chain 60 30 200 opencode >"$T/chain.md"; PATH=$F:$PATH sv --spec "docs/my specs/d.md" "$fork" "$T/out/oc.log"
+check "opencode lands in spec mode" grep -q '^opencode' "$T/out/oc.log.reviewer"
+check "...with the plan agent" bash -c "grep -A1 -x -- --agent '$OPENCODE_ARGS' | grep -qx plan"
+chain 60 30 200 opencode >"$T/chain.md"; PATH=$F:$PATH sv "$fork" "$T/out/oc2.log"
+check "opencode review mode: no --agent" bash -c "! grep -qx -- --agent '$OPENCODE_ARGS'"
+unset OPENCODE_ARGS
+cd "$T"
 echo "## backlog.py + ui.py"
 check "test_backlog.py" python3 "$root/tests/test_backlog.py"
 check "test_ui_api.py" python3 "$root/tests/test_ui_api.py"
