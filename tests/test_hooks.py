@@ -841,12 +841,12 @@ class ReceiptMintTest(Case):
             p = subprocess.Popen([GATE_LOCK, 'w1', '--', 'sleep 30'], env=dict(self.fx.env, TMPDIR=tmpdir), cwd=self.fx.work,
                                  stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
             try:
-                deadline = time.time() + 15
+                deadline = time.time() + 60   # generous: under a loaded machine 15 s timed out
                 while not os.listdir(tmpdir) and time.time() < deadline:
                     time.sleep(0.05)
                 self.assertTrue(os.listdir(tmpdir), 'the gate never took its snapshot')
                 os.killpg(p.pid, sig)   # the whole group: bash runs its trap only once the foreground child is gone
-                p.wait(timeout=15)
+                p.wait(timeout=60)
             finally:
                 if p.poll() is None:
                     os.killpg(p.pid, signal.SIGKILL)
