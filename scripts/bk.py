@@ -67,7 +67,11 @@ def main():
     path = os.path.join(repo, BACKLOG)
     lines = open(path).read().split('\n')
     ids = [int(m.group(1)) for l in lines for m in [ROW.match(l)] if m]
-    subprocess.run(['git', 'fetch', '-q', '--prune', 'origin', backlog.UI_REFSPEC], cwd=repo, capture_output=True)
+    try:  # best effort: a prompt or a stalled remote must not hang the loop's bookkeeping
+        subprocess.run(['git', 'fetch', '-q', '--prune', 'origin', backlog.UI_REFSPEC], cwd=repo, capture_output=True,
+                       stdin=subprocess.DEVNULL, env={**os.environ, 'GIT_TERMINAL_PROMPT': '0'}, timeout=30)
+    except subprocess.TimeoutExpired:
+        pass
     next_id = first_id = max(max(ids), backlog.reserved_max_id(repo, BACKLOG, P)) + 1
     anchor = max(n for n, l in enumerate(lines) if (m := ROW.match(l)) and int(m.group(1)) == max(ids))
 

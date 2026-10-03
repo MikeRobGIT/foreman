@@ -358,7 +358,7 @@ class Repo:
 
     def check_commit(self, wt, base_sha, text):
         """The commit must change only the backlog, to exactly the text written (a commit hook could change either)."""
-        changed = self.git('diff', '--name-only', f'{base_sha}..HEAD', cwd=wt).split()
+        changed = [n for n in self.git('diff', '--name-only', '-z', f'{base_sha}..HEAD', cwd=wt).split('\0') if n]
         want = subprocess.run(['git', 'hash-object', '--stdin', f'--path={self.backlog_path}'], cwd=wt,
                               input=text.encode('utf-8'), capture_output=True).stdout.decode().strip()
         got = self.git('rev-parse', f'HEAD:{self.backlog_path}', cwd=wt).strip()
