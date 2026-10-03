@@ -39,3 +39,22 @@ The spec reads the tag "from the input or the transcript (P2)". The plan's "P2 f
  "prompt": "/foreman:foreman ui", "command_name": "foreman:foreman", "command_args": "ui",
  "command_source": "…", "expansion_type": "…", "permission_mode": "…", "prompt_id": "…"}
 ```
+
+## Mod API binding (Claude Code 2.1.288: `// Written by Claude Code 2.1.288.`)
+
+A throwaway mod making every call Task 13 needs passed `claude plugin validate`, and a `claude -p --plugin-dir` session generated `.claude-plugin/types/claude-code/index.d.ts` (562 KiB). Each signature below was matched in that file.
+
+| call in hooks/status.mjs | signature in the installed .d.ts |
+|---|---|
+| `$.plugin.root` | `root: string` |
+| `await $.session.cwd()`, `await $.session.id()` | `() => Promise<string>` |
+| `await $.process.run(argv, { cwd, timeoutMs })` → `{ exitCode, stdout, stderr }` | `(argv: readonly string[], init?: ProcessRunInit) => Promise<ProcessRunResult>`; `timeoutMs?: number`; result `exitCode: number`, `stdout: string`, `stderr: string` (each capped at 4 MiB) |
+| `$.clock.every(ms, fn)` | `every: TimerCall`, `TimerCall = (ms: number, fn: () => void) => Timer` |
+| `await $.fs.exists(path)`, `await $.fs.read(path)` | `(path: string) => Promise<boolean>`, `(path: string): Promise<string>` |
+| `$.ui.status(text \| undefined)` | `(text: string \| undefined) => void` |
+| `$.ui.invalidate('ui.render')` | `(event: InvalidatableEventName) => void`; `RenderEventName = 'ui.render'` is a member |
+| `$.ui.resolve(e)` → `{ Box, Text }` | `<E extends ResolveInput>(e: E) => Elements[E['surface']]`; every surface has `Box: ElementConstructor<BoxProps>` and `Text: ElementConstructor<TextProps>` |
+| `Box({ flexDirection: 'column', children })`, `Text({ children, wrap: 'truncate-end' })` | `ElementConstructor<P> = (props: P & ElementChildren) => RenderElement`; `children?: RenderChildren`; `BoxProps.flexDirection?: 'row' \| 'column' \| …`; `TextProps.wrap?: 'wrap' \| … \| 'truncate-end'` |
+| `on('session.start', …)`, `on('ui.render', { component: 'AbovePrompt' }, …)` | event and render component present |
+
+Static analysis: extra named export accepted; `$` passed from an inner arrow to a top-level function accepted (validate lists those calls as `(via tick)`).
