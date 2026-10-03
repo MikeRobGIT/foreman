@@ -1,6 +1,11 @@
 # Foreman hooks: design
 
-Status: draft for review, revision 3 (2026-10-02). Revision 1 drew 3 Critical, 13 Important and 5 Minor findings. Revision 2 drew 2 Critical, 3 Important and 6 Minor findings plus 8 partials. Revision 3 replaces Bash parsing with fail-closed scanning and addresses the rest. Branch `feat/hooks`. Target version 0.4.0. This depends on the parallel spec-phase design (`feat/spec-phase`, see Interactions).
+Status: draft for review, revision 4 (2026-10-02). The findings so far:
+- revision 1: 3 Critical, 13 Important, 5 Minor;
+- revision 2: 2 Critical, 3 Important, 6 Minor, plus 8 partials;
+- revision 3: 1 Critical, 4 Important, 8 Minor.
+
+Revision 4 makes the scan anchor on any git/gh/gt word, keeps quoted newlines and heredocs from splitting commands, makes the run and release controls orchestrator-only, and makes the spec gate opt-in per batch. Branch `feat/hooks`. Target version 0.4.0. This depends on the parallel spec-phase design (`feat/spec-phase`, see Interactions).
 
 ## Purpose
 
@@ -39,7 +44,7 @@ The docs were read on 2026-10-02 (`code.claude.com/docs/en/hooks`, `sub-agents`,
 
 Still to be probed in the plan; the design states a fallback for each:
 - (P6) whether `SubagentStart`'s `agent_id` equals the same worker's `PreToolUse` `agent_id`;
-- (P7) whether TaskStop fires `SubagentStop`;
+- **(P7) whether TaskStop fires `SubagentStop`.** Fallback: the orchestrator runs `hooks.py stopping <batch>` before every TaskStop, so piece 7 never blocks a stopping worker;
 - (P1) whether `UserPromptSubmit` or `UserPromptExpansion` carries the `/foreman` text;
 - (P2) whether `SubagentStart` input includes the prompt or a readable transcript;
 - (P3) whether a resumed session keeps its `session_id`;
@@ -92,7 +97,7 @@ Every handler is `type: command`, in exec form: `python3 ${CLAUDE_PLUGIN_ROOT}/s
 - **SessionEnd** → `run-end`.
 - **PreToolUse** with matcher `Bash` and **no `if:`** → `pretool`. On a Bash command that names no `git`, `gh` or `gt`, the script returns within milliseconds of its own start. It does no git work for those.
 - **PreToolUse** with matcher `Edit|Write|MultiEdit|NotebookEdit` → `pretool`.
-- **PostToolUse** with matcher `Edit|Write|MultiEdit` → `posttool`.
+- **PostToolUse** with matcher `Edit|Write|MultiEdit` → `posttool`. Also matcher `Bash` → `posttool`, which acts only on the main session's `hooks.py run-end` and exits at once otherwise.
 - **SubagentStart** → `subagent-start`.
 - **SubagentStop** → `subagent-stop`.
 - **PermissionRequest** with matcher `Bash` → `permission`.
@@ -106,45 +111,47 @@ Two review rounds showed that parsing Bash keeps missing forms. Detection is the
 - husky owns `core.hooksPath` in vacancy-vibe.
 - Every repo would need an install step.
 
-**Scan steps for one Bash command string:**
-1. **`-c` bodies:** for `bash`, `sh`, `zsh` and `eval` (basename), scan the argument of `-c` (or `eval`'s arguments) recursively. This is done once, before the next step hides it.
-2. **Blank, don't delete:**
-   - heredoc bodies, from `<<[-~]? *['"]?WORD['"]?` to the line equal to `WORD`;
-   - the contents of single- and double-quoted strings;
-   - `#` comments that start a word outside quotes, up to the end of the line (the newline is kept).
-
-   Blanking keeps every offset, so the original text can be looked up.
-3. **Split** the blanked text into segments at:
+**Scan steps for one Bash command string**, in order:
+1. **Heredocs first:**
+   - Find each `<<[-~]? *['"]?WORD['"]?` and its body, up to the line equal to `WORD`. `<<<` is a here-string, not a heredoc.
+   - A heredoc whose command is a shell (`bash`, `sh` or `zsh`, with any options, including `-s`) is scanned recursively as commands.
+   - Every other heredoc body is blanked and attributed to the segment holding its `<<`. Piece 4 reads it from there.
+2. **Recursion:** scan recursively, once per level:
+   - the argument of a shell's `-[a-z]*c[a-z]*` option (`-c`, `-lc`, `-ec`, …);
+   - `eval`'s arguments;
+   - every `$(…)` and backtick body, including those inside double quotes.
+3. **Blanking:** quoted strings (single and double, with their newlines) and `#` comments that start a word outside quotes are blanked with a non-space filler character (`\x00`). Offsets are kept.
+   - Newlines inside quotes and heredocs are therefore never split points.
+   - The original text is kept for argument extraction.
+4. **Split** the blanked text into segments at:
    - `;`, `&&`, `||`, `|`, `|&` and `&`;
    - newlines;
    - `(`, `)`, `{` and `}`;
    - the words `then`, `do`, `else`, `elif`, `if`, `while`, `until`, `!` and `time`.
 
-   Each segment is a candidate simple command.
-4. **Strip each segment's prefix:**
-   - `VAR=value` assignments;
-   - `env` with its options;
-   - `command`, `nice`, `exec` and `xargs`.
+   A `cd` inside `( … )` scopes only to the end of that group.
+5. **Candidates anchor on the program word, not on a wrapper list.**
+   - In each segment, every word whose basename is `git`, `gh` or `gt` starts a candidate. Basename handles `/usr/bin/git`, `'git'` and `\git`.
+   - Wrappers before it (`nohup`, `timeout 60`, `sudo`, `xargs -n1`, `nice -n 5`, `env -i`, `command -p`, `stdbuf`, `caffeinate`, `find … -exec`) don't matter.
+   - **Accepted false denies:** an unquoted `echo git push` is a candidate.
+   - **Assignments and `env`:** a `VAR=` assignment or an `env` anywhere before the candidate is recorded, because piece 8 needs it.
+6. **Classify each candidate, using `shlex.split` words** from the original text of the candidate's segment:
+   - **`git`:** skip global options (`-C <p>`, `-c <k=v>`, `--git-dir=…`, `--work-tree=…`, `--no-pager`, other `-x`/`--x`); the next word is the subcommand.
+   - **`gh`:** skip global flags (`-R <repo>`, `--repo <repo>`) before and after `pr`; then `gh pr <verb>`. Also `gh api` with a path matching `pulls/\d+/merge`, or a body containing `mergePullRequest`, classifies as **`gh pr merge`**.
+   - **`gt`:** `gt <verb>`.
+   - **Effective directory:** from the last preceding in-scope `cd <p>`, then `git -C <p>`. Unknown with `--git-dir` or `--work-tree`.
+   - **Arguments:** from `shlex.split`. If that fails, they are unknown.
+7. **On failure** (unbalanced quotes, an unterminated heredoc), pieces 1–4 regex-scan the raw text (`\bgit\b[^\n]*\bpush\b`, `\bgh\b[^\n]*\bmerge\b`, `\bgt\s+(submit|merge|modify)\b`, …). Every match is treated as a command with unknown arguments. Piece 8 gives no decision.
 
-   The **program** is the next word's basename, so `/usr/bin/git` counts as `git`. Record whether a prefix was stripped. Piece 8 needs that.
-5. **Classify:**
-   - `git`: skip global options (`-C <p>`, `-c <k=v>`, `--git-dir=…`, `--work-tree=…`, other `-x`/`--x`); the next word is the subcommand.
-   - `gh`: `gh pr <verb>`.
-   - `gt`: `gt <verb>`.
-   - The segment's **effective directory** comes from the last preceding `cd <p>` segment, then `git -C <p>`. With `--git-dir`/`--work-tree` present it is unknown.
-   - The segment's **arguments** are its original text (quotes restored), split by `shlex.split`. If that fails, the arguments are unknown.
-6. **On failure** (unbalanced quotes, an unterminated heredoc): pieces 1–4 regex-scan the raw text (`\bgit\b[^\n]*\bpush\b`, `\bgh\s+pr\s+(create|merge|…)\b`, `\bgt\s+(submit|merge|modify)\b`) and treat every match as a command with unknown arguments. Each piece says what it does with unknown arguments. Piece 8 gives no decision.
-
-**Known false denies,** accepted because they fail closed:
-- a `git` word inside an unquoted `echo`, e.g. `echo git push`;
-- unknown arguments, where piece 1 requires a receipt.
-
-**Tests** pin every form the reviews found:
-- comment then newline, `true;(git push)`, `(cd wt && git push)`, `{ git push; }`, `if …; then git push; fi`, `|&`;
-- a heredoc body containing `don't`, `+main` and `:old`;
-- `/usr/bin/git push`, `env -i git push`, `GIT_DIR=x git push`;
-- `bash -c 'git push'`, `eval "git push"`;
-- the quoted string `'a;b'`, which stays one argument.
+**Tests** pin every form the three reviews found:
+- the wrappers above;
+- `x="$(git push)"`, `` x=`git push` ``, `bash -lc 'git push'`, `bash <<'EOF'⏎git push⏎EOF`;
+- `gh pr -R o/r merge 1`, `gh api -X PUT repos/o/r/pulls/1/merge`;
+- `git -C "my dir" push`;
+- the Claude Code PR form `gh pr create --title t --body "$(cat <<'EOF'⏎…⏎EOF⏎)"`, which must give known arguments;
+- `git commit -m "fix: git push retry"`, which must not be a push;
+- `(cd wt && git push); git push`, where the second push runs in the original directory;
+- plus every revision-3 form.
 
 ### `hooks.py` common path
 
@@ -179,8 +186,10 @@ Two review rounds showed that parsing Bash keeps missing forms. Detection is the
     - the autonomous loop's end;
     - serial step 12 after a manual pass.
 
-    The script itself does nothing. `pretool` recognises this exact call (a single segment: `python3` plus that path plus `run-end`) and deletes `runs/<session_id>.json`, using the hook input's own session id. Piece 8 allows the call.
-  - **Only from the main session:** `run-end` and `release` take effect only when the hook input has no `agent_id`. A subagent's call is denied ("only the orchestrator ends a run or releases a spec"). Subagents share the `session_id`, so without this a worker could unguard the run or release itself.
+    `pretool` recognises this exact call (a single segment: `python3` plus that path plus `run-end`). For the main session, `posttool` then deletes `runs/<session_id>.json`, using the hook input's own session id. Piece 8 allows the call.
+  - **Only from the main session:** `run-end`, `release` and `stopping` take effect only when the hook input has no `agent_id`. A subagent's call is denied ("only the orchestrator ends a run or releases a spec"). Subagents share the `session_id`, so without this a worker could unguard the run or release itself.
+  - **Timing:** `pretool` denies the subagent's call before anything is deleted. For the main session, the marker is deleted in `PostToolUse`, after the call ran, so piece 8's PermissionRequest still sees an active run.
+  - **The fast path** treats a command naming `hooks.py` like one naming `git`, `gh` or `gt`.
 - **Expiry:** a marker untouched for 48 hours is ignored and pruned on the next `run-start`.
 - **While a marker exists:**
   - subagents can't merge, force-push or rebase, or edit the backlog, rules or config;
@@ -224,6 +233,7 @@ Two review rounds showed that parsing Bash keeps missing forms. Detection is the
     - there was no `--name`;
     - the exit code is 0.
     Extra gates never mint, because their `when:` can't be checked.
+  - **Matching:** a receipt matches a push when `HEAD^{tree}` differs from the receipt tree only by paths ABSENT from HEAD. Those are untracked files the gate saw and nobody committed: scratch files, or leftovers from before the gate. Any other difference means the gate didn't see this code.
   - **The tree** is that of the working copy at the end:
     1. copy the checkout's real index (`git rev-parse --git-path index`) to a temp file;
     2. run `GIT_INDEX_FILE=<temp> git add -A -- . ':!<new untracked paths>'`;
@@ -233,9 +243,10 @@ Two review rounds showed that parsing Bash keeps missing forms. Detection is the
 
 ### 2. Worker guard (subagents during a run)
 
-- **Bash simple commands denied:**
-  - `gh pr merge` and `gt merge`;
-  - `git push` with `--force`, `-f`, `--force-with-lease` or a `+` refspec;
+- **Bash commands denied:**
+  - `gh pr merge` (including the `gh api` merge forms) and `gt merge`;
+  - `git push` with `--force`, `-f` or any combined short flag containing `f` (`-uf`), `--force-with-lease`, `--mirror`, or a `+` refspec;
+  - `git push` whose destination ref is the default branch (`HEAD:main`, `main`, `refs/heads/<default>`);
   - `git rebase`;
   - `gt modify` once the branch has an upstream ("never amend or force-push once the PR is open").
   - Revision 1's `git reset --hard` is dropped: it has no contract line, and it is a legitimate local recovery.
@@ -260,7 +271,8 @@ Two review rounds showed that parsing Bash keeps missing forms. Detection is the
   - **Heredoc bodies** belong to the command they feed.
   - **With unknown arguments,** the segment's raw text.
 - **Files:** a file path resolves against the effective directory; absolute paths are used as given. A file that doesn't exist yet (written earlier in the same command) is read from the heredoc that writes it if there is one, and otherwise skipped with a stderr note.
-- **Rule:** deny when a line of the message starts with a `forbid_trailers` entry after any non-word characters: `(?im)^[^\w\n]*<entry>`, case-insensitive. That catches `🤖 Generated with …`. Mentions inside a sentence don't count.
+- **Rule:** deny when a line of the message starts with a `forbid_trailers` entry after any non-word characters: `(?im)^[^\w\n]*<re.escape(entry)>`, case-insensitive. That catches `🤖 Generated with …`. Mentions inside a sentence don't count.
+  - An entry written as `/…/` is a full-line regex instead, e.g. `/Generated with \[Claude Code\]/`. That avoids false denies such as `- Generated with the seed script`. vacancy-vibe's switch-over uses the regex form for that entry.
 - **`gh pr merge`** with any method (`--squash`, `--merge` or `--rebase`) lands the PR's commit messages unless a body replaces them.
   - The hook reads the commits from piece 3's shared `gh pr view` call. It verifies the field names (`messageHeadline`, `messageBody`) in the plan.
   - It denies when any commit message has a forbidden line and no `--body`/`--body-file` replaces it (squash), or for merge and rebase, which always keep them. The reason names the commit.
@@ -275,13 +287,13 @@ Two review rounds showed that parsing Bash keeps missing forms. Detection is the
 
 ### 6. Worker briefing (SubagentStart)
 
-- **Who gets it:** `agent_type` must be in `worker_agent_types`, default `["general-purpose", "workflow-subagent"]`. The subagent's prompt must also begin with the worker tag `foreman-worker: <batch>`, read from the input or the transcript (P2).
+- **Who gets it:** `agent_type` must be in `worker_agent_types`, default `["general-purpose", "workflow-subagent"]`. The subagent's prompt must also begin with the worker tag `foreman-worker: <batch>`, optionally followed by ` spec-phase`, read from the input or the transcript (P2).
   - With no readable tag, there is no briefing. Revision 1's "brief every worker-type subagent" fallback is dropped.
   - Workers then still get the contract the way they do today, in the dispatch prompt. SKILL.md keeps it there until P2 is confirmed.
   - The briefing does not need a run marker: the tag is the proof of a foreman worker.
 - **Content,** as `additionalContext`:
   - the `### Worker contract` section read from the installed `SKILL.md`, rendered:
-    - `$FOREMAN` becomes `${CLAUDE_PLUGIN_ROOT}/scripts`;
+    - `$FOREMAN` becomes the absolute path of the plugin's `scripts` directory. It's never left as a variable, because the Bash tool doesn't have it, and piece 8 gives no decision on `${`.
     - `{{key}}` takes the config value, or the SKILL.md default-table value when the config lacks it;
     - `<prefix>` becomes `id_prefix`;
     - `<batch>` comes from the tag.
@@ -289,14 +301,18 @@ Two review rounds showed that parsing Bash keeps missing forms. Detection is the
     `<scratch>` and `<worktree>` stay as written, followed by a one-line legend: "<scratch> = your scratchpad dir; <worktree> = your current checkout's top level".
   - then `gate`, `forbid_trailers` and `shared_resources`.
   - Cap: 8 KB. Over the cap, `shared_resources` is truncated first, never the contract.
-- **The briefing records `agent_id → batch`** as one file per agent, `state_dir/batches/agents/<agent_id>`, written atomically (temp file plus rename) with the batch name as its content. Workers launched in one message can't lose each other's entries. Piece 10 needs it. Batch names are dated, `<YYYYMMDD>-w<n><x>` (spec-phase W2), so they're unique across invocations, and the map isn't keyed by session. Entries are pruned with the batch files.
+- **The briefing records `agent_id → {batch, spec}`** as one file per agent, `state_dir/batches/<session_id>/agents/<agent_id>`, written atomically (temp file plus rename). `spec` is true when the tag ends with ` spec-phase`. Workers launched in one message can't lose each other's entries. Piece 10 needs it. Batch names are dated, `<YYYYMMDD>-w<n><x>` (spec-phase W2), so they're unique across invocations, and the map isn't keyed by session. Entries are pruned with the batch files.
 - **Dispatch prompts keep:** the batch, rows, owned files, test-data id prefix, the resolved plugin path, and W6's inline rule notes from an unmerged bookkeeping PR.
 
 ### 7. Report check (SubagentStop)
 
 - **Same who-test as piece 6.** The tag comes from the first user message in `agent_transcript_path`. With no tag, the stop is allowed.
 - **When `stop_hook_active` is true,** the stop is allowed. The check blocks at most once per stop.
-- **If any line of the last message starts with `SPEC READY `,** the stop is allowed. That is the spec-phase hand-off, not a final report.
+- **Spec-phase batches** (piece 6 recorded `spec: true`) with no valid release:
+  - a stop whose last message has a line starting with `SPEC READY ` is allowed;
+  - any other stop is blocked once: "you're in the spec phase: finish the spec and end with `SPEC READY <worktree> <branch> <spec path> <sha>` as the first line".
+  - After release, `SPEC READY` no longer skips the check.
+- **A stopping batch** (the file `batches/<session_id>/<batch>.stopped` exists, written by `hooks.py stopping <batch>` before a TaskStop) is always allowed to stop (P7).
 - **Otherwise,** it takes the last fenced `json` block in `last_assistant_message`:
   - **Missing:** block with "end your report with ONE fenced json block in the worker contract's format, even if empty".
   - **Invalid JSON:** block, quoting the parse error.
@@ -322,7 +338,8 @@ Only Bash is considered. Anything that doesn't match every rule below gets no de
   - **`wt-setup.sh [--check] <dir>`:** `<dir>` is a worktree of this repo.
   - **`review.sh [--spec <path>] <base> <logfile>`:** the effective directory is a worktree of this repo. Both scripts read config from that worktree's MAIN checkout, never from the directory itself. Otherwise a planted config could run any `worktree_install` or `custom` reviewer command. The scripts keep honouring `FOREMAN_CONFIG` for tests, which is safe because an env prefix gets no decision here.
   - **`bk.py`:** subagents only with `--dry-run`.
-  - **`hooks.py`:** only `run-end` or `release <batch> <sha>`.
+  - **`hooks.py`:** only `run-end`, `release <batch> <sha>` or `stopping <batch>`, and only for the main session (no `agent_id`). Piece 8 never allows `hooks.py` for a subagent.
+- **Argument charset** for every allowed script: each argument matches `[A-Za-z0-9._/@~^+:=-]+`, and none starts with `-` except the scripts' own options (`--`, `--check`, `--spec`, `--dry-run`). The one exception is gate-lock's gate argument, which must equal the config value exactly.
 - **The config file is write-protected for subagents** by piece 2.
 - **On a match:** `{"hookSpecificOutput":{"hookEventName":"PermissionRequest","decision":{"behavior":"allow"}}}`.
 - **Other commands:** the README gives a `permissions.allow` snippet for the rest of the worker contract:
@@ -351,16 +368,27 @@ Only Bash is considered. Anything that doesn't match every rule below gets no de
 
 ### 10. Spec gate (tagged workers during a run)
 
-- **Who:** a subagent (`agent_id` present) whose id is in the map from piece 6, during a run, whose batch has no valid release. A valid release is a file `state_dir/batches/<batch>.released` whose `session_id` equals the hook input's `session_id`, so a stale file from an earlier run never counts.
+- **Who:** a subagent (`agent_id` present) whose map entry from piece 6 has `spec: true`, during a run, whose batch has no release file `state_dir/batches/<session_id>/<batch>.released`.
+  - Keying by `session_id` keeps a stale file from another session out.
+  - Dated batch names keep a stale file from an earlier invocation in the same session out.
+  - **Opt-in per batch:** only batches launched with the ` spec-phase` tag are gated. Hooks 0.4.0 can therefore ship before the spec phase (0.5.0) without blocking any worker.
 - **Unmapped ids fail open:** an `agent_id` with no map entry (no tag, or P2 failed) passes, and so does any call outside a run.
 - **Denied before release:**
   - Edit-family calls whose target, resolved in its own checkout, is outside that checkout's `design_spec_dir`;
-  - `git commit` when any staged path is outside `design_spec_dir`, judged from `git diff --cached --name-only` in the effective directory. With `-a`/`--all`, the modified tracked files (`git diff --name-only`) count as staged too. This catches code written through Bash, which the Edit rule can't see.
+  - `git commit` that would commit a path outside `design_spec_dir`:
+    - the staged paths come from `git diff --cached --name-only` in the effective directory;
+    - with `-a`/`--all`, the modified tracked files count too;
+    - with a pathspec, `-i` or `-o`, the named paths count too;
+    - `gt create -a` and `gt modify -a` are judged the same way.
+
+    This catches code written through Bash, which the Edit rule can't see.
   - `git push`, `gh pr create` and `gt submit`. The spec phase doesn't push.
 - **Allowed before release:** reading anything, running anything else (tests, `git grep`), and editing and committing inside `design_spec_dir`.
 - **Reason:** "foreman: batch <b>'s spec isn't released yet. Finish the spec, put `SPEC READY <worktree> <branch> <spec path> <sha>` as your final message's first line, and wait for the orchestrator's release."
 - **Release:** at W3.6, before its `SendMessage`, the orchestrator runs `python3 $FOREMAN/hooks.py release <batch> <sha>`.
-  - Like `run-end`, the script itself does nothing. `pretool` recognises the exact call and writes `state_dir/batches/<batch>.released` = `{"sha", "time", "session_id"}` from its own hook input. This puts the file where the hooks look, whatever `FOREMAN_HOME` the Bash tool has (P4).
+  - Like `run-end`, `pretool` recognises the exact call and writes `state_dir/batches/<session_id>/<batch>.released` = `{"sha", "time"}` from its own hook input. This puts the file where the hooks look, whatever `FOREMAN_HOME` the Bash tool has (P4).
+  - The script then checks that the file exists in either state dir, and exits 1 if not.
+  - `<batch>` must match `[A-Za-z0-9_-]+`, because it becomes a filename.
   - In manual mode it runs only for the batches the human approved at the checkpoint.
 - **After release** the gate is silent. Later spec edits are W4's concern: its byte-identical check, or a listed deviation.
 - **Cleanup:** W5 deletes `batches/*` for this wave's batches. Entries older than 14 days are pruned on `run-start`.
