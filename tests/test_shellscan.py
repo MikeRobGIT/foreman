@@ -257,6 +257,15 @@ class ClassifyTest(unittest.TestCase):
         self.assertEqual(info('git push origin HEAD:refs/heads/main'), (False, False, True))
         self.assertEqual(info('git push origin feat 2>&1'), (False, False, False))
 
+    def test_push_info_delete_means_every_refspec_deletes(self):
+        def info(t):
+            return shellscan.push_info(cmds(t)[0].args, 'main')
+        self.assertEqual(info('git push origin :old :older'), (True, False, False))
+        self.assertEqual(info('git push origin HEAD :old'), (False, False, False))     # a push plus a delete
+        self.assertEqual(info('git push origin :old HEAD'), (False, False, False))
+        self.assertEqual(info('git push origin HEAD:refs/heads/x :old'), (False, False, False))
+        self.assertEqual(info('git push --delete origin old HEAD'), (True, False, False))
+
     def test_push_info_skips_a_redirect_word_before_the_remote(self):
         def info(t):
             return shellscan.push_info(cmds(t)[0].args, 'main')

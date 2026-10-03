@@ -518,12 +518,24 @@ def changed(top, a, b):
     return None if out is None else [p for p in out.split('\0') if p]
 
 
-def receipt_reason(repo, since):
+def worktree_links(top, tree, paths):
+    """The paths among `paths` that `tree` holds as gitlinks under .claude/worktrees/: a worktree some commit swept in."""
+    under = [p for p in paths if p.startswith('.claude/worktrees/')]
+    out = state.git(top, '--literal-pathspecs', 'ls-tree', '-z', tree, '--', *under) if under else None
+    return {e.split('\t', 1)[1] for e in (out or '').split('\0') if e.startswith('160000 ')}
+
+
+def receipt_reason(repo, since, links=()):
     r = (f"no passing gate for this tree — run `{HERE}/gate-lock.sh <owner> -- '{repo.get('gate') or '<gate>'}'` "
          "from the checkout's top level, commit every file the gate changed, then push")
-    if since:
+    plain = [p for p in since or () if p not in links]
+    if plain:
         r += ("; the gate ran on a different tree: commit these, or restore them (`git checkout -- <path>` for a "
-              "tracked file, delete for an untracked one) and re-run the gate: " + ', '.join(since[:10]))
+              "tracked file, delete for an untracked one) and re-run the gate: " + ', '.join(plain[:10]))
+    if links:
+        r += ("; a worktree under .claude/worktrees/ was committed as a gitlink, which the gate never sees: "
+              "`git rm --cached " + ' '.join(shlex.quote(p) for p in sorted(links)[:10]) + "`, commit, and ignore "
+              ".claude/worktrees/ (e.g. in .git/info/exclude)")
     return r
 
 
@@ -549,7 +561,7 @@ def receipt_check(repo, cwd):
     names = changed(top, base.strip(), 'HEAD') if base else None
     if names is not None and all(exempt(repo, p) for p in names):
         return None
-    return receipt_reason(repo, since)
+    return receipt_reason(repo, since, worktree_links(top, tree, since or []))
 
 
 def is_push_trigger(c):

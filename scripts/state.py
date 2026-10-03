@@ -132,24 +132,21 @@ def outside(paths, nested):
 
 def write_tree(top, exclude):
     """The tree of the working copy, from a copy of the real index (keeps force-added files and existing blobs,
-    so clean/eol/LFS filters don't re-run on unchanged files), leaving out `exclude`."""
+    so clean/eol/LFS filters don't re-run on unchanged files). `exclude` goes to the add as `:(exclude)` pathspecs,
+    so git never reads those paths: no filter runs on an artifact, and an embedded repo with no commit can't make
+    the add fail. A path the real index already tracks stays, which is what keeps the receipt equal to HEAD."""
     real = os.path.join(top, git(top, 'rev-parse', '--git-path', 'index').strip())
     fd, tmp = tempfile.mkstemp(suffix='.index')
     os.close(fd)
     try:
         if os.path.exists(real):
-            shutil.copyfile(real, tmp)
+            shutil.copy2(real, tmp)
         else:
             os.remove(tmp)
+        specs = ['.'] + [f':(exclude,literal){p}' for p in sorted(exclude)]
         env = dict(os.environ, GIT_INDEX_FILE=tmp)
-        subprocess.run(['git', 'add', '-A', '--', '.'], cwd=top, env=env, check=True, capture_output=True)
-        if exclude:
-            # -r: a worktree git no longer sees as a repo is staged as plain files. -f: git refuses to drop a
-            # newly staged gitlink without it ("staged content different from both the file and the HEAD").
-            subprocess.run(['git', 'rm', '-r', '-f', '--cached', '-q', '--ignore-unmatch', '--pathspec-from-file=-',
-                            '--pathspec-file-nul'], cwd=top, env=dict(env, GIT_LITERAL_PATHSPECS='1'),
-                           input='\0'.join(sorted(exclude)).encode('utf-8', 'surrogateescape'), check=True,
-                           capture_output=True)
+        subprocess.run(['git', 'add', '-A', '--pathspec-from-file=-', '--pathspec-file-nul'], cwd=top, env=env,
+                       input='\0'.join(specs).encode('utf-8', 'surrogateescape'), check=True, capture_output=True)
         return subprocess.run(['git', 'write-tree'], cwd=top, env=env, check=True, capture_output=True,
                               text=True).stdout.strip()
     finally:
@@ -164,6 +161,19 @@ def prune_receipts(sd):
             p = os.path.join(d, name)
             if os.path.isfile(p) and os.path.getmtime(p) < cutoff:
                 os.remove(p)
+
+
+def needs_commit(top, paths):
+    """`paths` minus what a push may leave uncommitted, by the hooks' own rule (hooks.exempt with receipt=True:
+    gate_exempt, the backlog, the rules, worktree_env_files), so the note below never tells a worker to commit a
+    worktree's .env.local. Imported here because hooks.py imports this module."""
+    try:
+        import hooks
+        hooks._load()
+        repo = hooks.repo_at(top)
+        return [p for p in paths if not (repo and hooks.exempt(repo, p, receipt=True))]
+    except Exception:   # a note must never cost the receipt
+        return list(paths)
 
 
 def mint(top, owner, command, before_file):
@@ -181,7 +191,7 @@ def mint(top, owner, command, before_file):
     old = set(last.get('artifacts') or [])
     new = now - before
     artifacts = new | (old & now)
-    swept = sorted((now & before) - old)
+    swept = needs_commit(top, sorted((now & before) - old))
     if new:
         print('gate-lock: the gate created untracked files; they are not part of the receipt: '
               + ', '.join(sorted(new)[:10]), file=sys.stderr)

@@ -6,6 +6,8 @@ import json
 import os
 import re
 import shutil
+import signal
+import stat
 import subprocess
 import sys
 import tempfile
@@ -712,6 +714,25 @@ class ReceiptMintTest(Case):
         self.fx.gate()
         self.assertEqual(self.receipts(), [head_tree(self.fx.work)])
 
+    def test_a_same_size_edit_made_in_the_tick_git_wrote_the_index_is_in_the_receipt(self):
+        # git trusts a stat-clean entry unless the index file is no newer than it ("racily clean"), so the index
+        # copy must keep its mtime: with a fresh one the edit is never re-hashed and the receipt holds the old blob.
+        # Pinned in the past, with ctime ignored, so the stat is identical and the result doesn't hang on the clock.
+        then = time.time_ns() - 10 * 10 ** 9
+        path = os.path.join(self.fx.work, 'app.py')
+        write(path, 'print(2)\n')
+        os.utime(path, ns=(then, then))
+        git(self.fx.work, 'add', '-A')
+        git(self.fx.work, 'commit', '-q', '-m', 'two')
+        git(self.fx.work, 'config', 'core.trustctime', 'false')
+        write(path, 'print(3)\n')   # same size, rewritten in place
+        os.utime(path, ns=(then, then))
+        index = os.path.join(self.fx.work, '.git', 'index')
+        os.utime(index, ns=(then, then))   # git wrote the index in the tick the entry was recorded
+        self.fx.gate()
+        tree = state.read_json(state.last_path(self.fx.state, self.fx.work))['tree']
+        self.assertEqual(git(self.fx.work, 'show', f'{tree}:app.py'), 'print(3)\n')
+
     def test_receipt_tree_with_a_crlf_blob_under_text_auto(self):
         # The blob goes in CRLF BEFORE text=auto exists. Only a copy of the real index keeps it: from an empty
         # index, `git add` under text=auto normalises the unchanged file to LF and the tree no longer matches.
@@ -726,6 +747,69 @@ class ReceiptMintTest(Case):
         self.assertEqual(blob, b'a\r\nb\r\n')   # the premise: a CRLF blob under text=auto
         self.fx.gate()
         self.assertEqual(self.receipts(), [head_tree(self.fx.work)])
+
+    def test_an_empty_gate_never_mints(self):
+        # no `gate` key: cfg.py prints nothing, and '' equals ''
+        write(os.path.join(self.fx.work, '.claude/foreman.config.md'), CONFIG.replace('gate: echo gated\n', ''))
+        self.assertEqual(self.fx.gate('').returncode, 0)
+        self.assertEqual(self.receipts(), [])
+
+    def default_dir(self):
+        return os.path.join(self.fx.env['HOME'], '.claude', 'foreman', state.repo_key(self.fx.work))
+
+    def test_a_receipt_lands_in_both_state_dirs_and_is_found_without_foreman_home(self):
+        # probe P4: a hook that doesn't see the Bash tool's FOREMAN_HOME looks only at the default dir
+        self.fx.start_run()
+        self.fx.commit('app.py', 'print(2)\n')
+        self.fx.gate()
+        tree = head_tree(self.fx.work)
+        for d in (self.fx.state, self.default_dir()):
+            self.assertEqual(state.read_json(os.path.join(d, 'gate', tree))['command'], 'echo gated', d)
+            self.assertEqual(state.read_json(state.last_path(d, self.fx.work))['tree'], tree, d)
+        state.write_json(os.path.join(self.default_dir(), 'runs', 'S1.json'), {'started': time.time(), 'touched': time.time()})
+        del self.fx.env['FOREMAN_HOME']
+        self.assertIsNone(self.fx.bash('git push -u origin HEAD'))
+        self.fx.commit('app.py', 'print(3)\n')
+        self.assertIn('no passing gate', self.fx.bash('git push -u origin HEAD'))   # control: the hook is judging
+
+    def test_receipts_older_than_14_days_are_pruned_at_the_next_mint(self):
+        old, fresh = time.time() - 15 * 86400, time.time() - 13 * 86400
+        for sub, name, t in (('gate', 'a' * 40, old), ('gate', 'b' * 40, fresh),
+                             ('gate/last', 'c' * 40, old), ('gate/last', 'd' * 40, fresh)):
+            path = os.path.join(self.fx.state, sub, name)
+            state.write_json(path, {})
+            os.utime(path, (t, t))
+        self.fx.gate()
+        self.assertEqual(self.receipts(), sorted(['b' * 40, head_tree(self.fx.work)]))
+        self.assertEqual(sorted(os.listdir(os.path.join(self.fx.state, 'gate', 'last'))),
+                         sorted(['d' * 40, os.path.basename(state.last_path(self.fx.state, self.fx.work))]))
+
+    def test_gate_dirs_are_0700_and_receipts_0600(self):
+        self.fx.gate()
+        for sd in (self.fx.state, self.default_dir()):
+            for d in (sd, os.path.join(sd, 'gate'), os.path.join(sd, 'gate', 'last')):
+                self.assertEqual(stat.S_IMODE(os.stat(d).st_mode), 0o700, d)
+                for name in os.listdir(d):
+                    if os.path.isfile(os.path.join(d, name)):
+                        self.assertEqual(stat.S_IMODE(os.stat(os.path.join(d, name)).st_mode), 0o600, name)
+
+    def test_a_killed_gate_removes_its_untracked_snapshot(self):
+        tmpdir = os.path.join(self.fx.tmp, 'tmpdir')
+        os.makedirs(tmpdir)
+        for sig in (signal.SIGINT, signal.SIGTERM):
+            p = subprocess.Popen([GATE_LOCK, 'w1', '--', 'sleep 30'], env=dict(self.fx.env, TMPDIR=tmpdir), cwd=self.fx.work,
+                                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
+            try:
+                deadline = time.time() + 15
+                while not os.listdir(tmpdir) and time.time() < deadline:
+                    time.sleep(0.05)
+                self.assertTrue(os.listdir(tmpdir), 'the gate never took its snapshot')
+                os.killpg(p.pid, sig)   # the whole group: bash runs its trap only once the foreground child is gone
+                p.wait(timeout=15)
+            finally:
+                if p.poll() is None:
+                    os.killpg(p.pid, signal.SIGKILL)
+            self.assertEqual((os.listdir(tmpdir), p.returncode), ([], 128 + sig), sig)
 
     def test_a_gate_run_from_a_subdirectory_runs_at_the_top_level(self):
         write(os.path.join(self.fx.work, '.claude/foreman.config.md'), CONFIG.replace('echo gated', 'pwd > "$GATE_OUT"'))
@@ -804,6 +888,36 @@ class GateBeforePushTest(Case):
         self.assertIsNone(self.fx.bash('git push origin :old'))
         self.assertIsNone(self.fx.bash('git push --delete origin old'))
 
+    def test_a_delete_mixed_with_a_real_ref_is_still_judged(self):
+        self.fx.commit('app.py', 'print(2)\n')
+        for cmd in ('git push origin HEAD :old', 'git push origin :old HEAD', 'git push origin HEAD:refs/heads/x :old'):
+            self.assertIn('no passing gate', self.fx.bash(cmd) or '', cmd)
+        self.assertIsNone(self.fx.bash('git push origin :old :older'))   # every refspec deletes
+
+    def test_a_nested_worktree_committed_as_a_gitlink_is_told_to_untrack_and_ignore_it(self):
+        write(os.path.join(self.fx.work, 'app.py'), 'print(2)\n')
+        git(self.fx.work, 'worktree', 'add', '-q', os.path.join(self.fx.work, '.claude/worktrees/agent-x'), '-b', 'agent-x')
+        self.fx.gate()   # leaves the unignored worktree out of the receipt
+        git(self.fx.work, 'add', '-A')   # a worker's commit sweeps it in as a gitlink
+        git(self.fx.work, 'commit', '-q', '-m', 'sweeps the worktree in')
+        self.assertIn('160000', git(self.fx.work, 'ls-tree', '-r', 'HEAD'))
+        why = self.fx.bash('git push -u origin HEAD')
+        self.assertIn('git rm --cached .claude/worktrees/agent-x', why)
+        self.assertIn('.git/info/exclude', why)
+        self.assertNotIn('commit these', why)   # the generic hint doesn't fix this case
+        git(self.fx.work, 'rm', '--cached', '-q', '.claude/worktrees/agent-x')
+        git(self.fx.work, 'commit', '-q', '-m', 'untrack it')
+        self.assertIsNone(self.fx.bash('git push -u origin HEAD'))
+
+    def test_a_regular_file_under_the_worktrees_dir_gets_the_generic_hint(self):
+        self.fx.commit('app.py', 'print(2)\n')
+        self.fx.gate()
+        self.fx.commit('.claude/worktrees/notes.txt', 'x\n')   # created after the gate; not a gitlink
+        why = self.fx.bash('git push -u origin HEAD')
+        self.assertIn('commit these', why)
+        self.assertIn('.claude/worktrees/notes.txt', why)
+        self.assertNotIn('git rm --cached', why)
+
     def test_undeterminable_diff_is_denied(self):
         git(self.fx.work, 'remote', 'set-head', 'origin', '--delete')
         git(self.fx.work, 'update-ref', '-d', 'refs/remotes/origin/main')
@@ -826,6 +940,19 @@ class GateBeforePushTest(Case):
         git(self.fx.work, 'commit', '-q', '-m', 'gate')
         p = self.fx.gate(gate)
         self.assertIn('not part of the receipt: coverage/out.txt', p.stderr)
+        self.assertIsNone(self.fx.bash('git push -u origin HEAD'))
+
+    def test_an_artifact_whose_name_holds_glob_characters_excludes_only_itself(self):
+        # git matches a pathspec literally before it tries it as a glob, so `cov[ab]/x.txt` alone would pass; the
+        # glob also matches the real, untracked cova/x.txt, which must stay in the receipt
+        gate = "mkdir -p 'cov[ab]' && echo x > 'cov[ab]/x.txt'"
+        write(os.path.join(self.fx.work, '.claude/foreman.config.md'), CONFIG.replace('echo gated', gate))
+        git(self.fx.work, 'add', '-A')
+        git(self.fx.work, 'commit', '-q', '-m', 'gate')
+        write(os.path.join(self.fx.work, 'cova/x.txt'), 'real\n')
+        self.assertIn('not part of the receipt: cov[ab]/x.txt', self.fx.gate(gate).stderr)
+        git(self.fx.work, 'add', 'cova')
+        git(self.fx.work, 'commit', '-q', '-m', 'the real file')
         self.assertIsNone(self.fx.bash('git push -u origin HEAD'))
 
     def test_push_from_a_worktree_path_with_spaces(self):
@@ -912,6 +1039,39 @@ class ReceiptExactnessTest(Case):
         os.remove(os.path.join(self.fx.work, '.git', 'worktrees', 'agent-x', 'HEAD'))
         write(os.path.join(wt, 'inside.txt'), 'x\n')
         self.gated_push_passes()
+
+    def test_an_embedded_repo_with_no_commit_does_not_break_minting(self):
+        # `git add -A` fails outright on one ("does not have a commit checked out")
+        self.fx.commit('app.py', 'print(2)\n')
+        for name, has_file in (('tmp-repo', True), ('empty-repo', False)):
+            repo = os.path.join(self.fx.work, name)
+            os.makedirs(repo)
+            git(repo, 'init', '-q')
+            if has_file:
+                write(os.path.join(repo, 'f.txt'), 'x\n')
+        self.gated_push_passes()
+
+    def test_clean_filters_do_not_run_on_excluded_artifacts(self):
+        log = os.path.join(self.fx.tmp, 'spy.log')
+        gate = 'mkdir -p cov && echo x > cov/out.cov'
+        write(os.path.join(self.fx.work, '.claude/foreman.config.md'), CONFIG.replace('echo gated', gate))
+        write(os.path.join(self.fx.work, '.gitattributes'), '*.cov filter=spy\n')
+        git(self.fx.work, 'add', '-A')
+        git(self.fx.work, 'commit', '-q', '-m', 'gate and attributes')
+        git(self.fx.work, 'config', 'filter.spy.clean', f'echo %f >> "{log}"; cat')
+        p = self.fx.gate(gate)
+        self.assertIn('not part of the receipt: cov/out.cov', p.stderr)
+        self.assertNotIn('out.cov', open(log).read() if os.path.exists(log) else '')
+        self.assertIsNone(self.fx.bash('git push -u origin HEAD'))
+
+    def test_the_untracked_note_leaves_out_paths_a_push_may_not_commit(self):
+        self.fx.commit('app.py', 'print(2)\n')
+        for rel in ('.env.local', 'docs/n.md', 'new.py'):   # a worktree env file, an exempt doc, real code
+            write(os.path.join(self.fx.work, rel), 'x\n')
+        p = self.fx.gate()
+        self.assertIn('new.py', p.stderr)
+        self.assertNotIn('.env.local', p.stderr)
+        self.assertNotIn('n.md', p.stderr)
 
     def test_a_tracked_gitlink_stays_in_the_receipt(self):
         # a real submodule is in HEAD^{tree}; leaving it out would deny every push in such a repo

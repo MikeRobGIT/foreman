@@ -67,14 +67,14 @@ echo "$owner $(date '+%Y-%m-%d %H:%M:%S')" > "$root/$slot/owner"
 # capturing gate-lock's output would otherwise wait for it.
 ( while sleep "${FOREMAN_LOCK_BEAT:-60}"; do kill -0 $$ 2>/dev/null && touch "$root/$slot/owner" 2>/dev/null || exit; done ) >/dev/null 2>&1 &
 beat=$!
-release() { kill "$beat" 2>/dev/null; rm -f "$root/$slot/owner"; rmdir "$root/$slot" 2>/dev/null; }
+before=""
+release() { kill "$beat" 2>/dev/null; rm -f "$root/$slot/owner"; rmdir "$root/$slot" 2>/dev/null; [ -z "$before" ] || rm -f "$before"; }
 trap release EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
 
 echo "gate-lock: $owner holds $root/$slot" >&2
 top=$(/usr/bin/git rev-parse --show-toplevel 2>/dev/null) || top=""
-before=""
 if [ -n "$top" ]; then
   cd "$top" || exit 2
   before=$(mktemp "${TMPDIR:-/tmp}/foreman-untracked.XXXXXX")
@@ -83,10 +83,10 @@ fi
 if [ $# -eq 1 ]; then bash -c "$1"; else "$@"; fi
 rc=$?
 if [ -n "$before" ]; then
-  if [ "$rc" = 0 ] && [ -z "$name" ] && [ $# -eq 1 ] && [ "$1" = "$(python3 "$here/cfg.py" "$main" gate)" ]; then
+  # an empty gate never mints: with no `gate` key cfg.py prints nothing, and '' would equal it
+  if [ "$rc" = 0 ] && [ -z "$name" ] && [ $# -eq 1 ] && [ -n "$1" ] && [ "$1" = "$(python3 "$here/cfg.py" "$main" gate)" ]; then
     python3 "$here/state.py" mint "$top" "$owner" "$1" "$before" >/dev/null ||
       echo "gate-lock: could not mint a gate receipt" >&2
   fi
-  rm -f "$before"
 fi
 exit "$rc"

@@ -520,7 +520,8 @@ def scan(text, cwd):
 # ---- classification helpers for the pieces --------------------------------------------------------
 
 def push_info(args, default):
-    """(delete, force, to_default) for `git push <args>`."""
+    """(delete, force, to_default) for `git push <args>`. A delete is `--delete`/`-d`, or every refspec after the
+    remote starting with `:`: `git push origin HEAD :old` also pushes HEAD."""
     delete = force = to_default = False
     positional, i = [], 0
     while i < len(args):
@@ -541,11 +542,11 @@ def push_info(args, default):
     for ref in positional[1:]:
         if ref.startswith('+'):
             force = True
-        if ref.startswith(':'):
-            delete = True
         dst = ref.lstrip('+').split(':')[-1]
         if dst in (default, f'refs/heads/{default}'):
             to_default = True
+    if positional[1:] and all(ref.startswith(':') for ref in positional[1:]):
+        delete = True
     return delete, force, to_default
 
 
