@@ -383,6 +383,27 @@ class PublishTest(unittest.TestCase):
         self.assertEqual([b for b in self.remote_branches() if b.startswith('backlog/ui-')], [])
         self.assertEqual(len(self.f.server.repo.load_ops()), 1)
 
+    def test_shutdown_mid_publish_undoes_it(self):
+        repo = self.f.server.repo
+        self.f.request('POST', '/api/ops', {'op': 'move', 'id': 'IB-2', 'to': 'top'})
+        block = os.path.join(self.f.tmp, 'release-gh')
+        os.environ['FAKE_GH_BLOCK'] = block
+        t = threading.Thread(target=lambda: self.f.request('POST', '/api/publish'))
+        t.start()
+        try:
+            for _ in range(200):
+                if os.path.exists(self.f.gh_log) and 'pr create' in open(self.f.gh_log).read():
+                    break
+                time.sleep(0.05)
+            self.assertIn('backlog/ui-', ' '.join(self.remote_branches()))
+            ui.shutdown(repo, wait=0)
+            self.assertEqual([b for b in self.remote_branches() if b.startswith('backlog/ui-')], [])
+            self.assertNotIn('backlog/ui-', git(self.f.work, 'branch', '--list'))
+            self.assertEqual(len(git(self.f.work, 'worktree', 'list').splitlines()), 1)
+        finally:
+            write(block, '')
+            t.join(30)
+
     def test_concurrent_publish_is_409(self):
         self.f.server.repo.publishing.acquire()
         try:
@@ -476,6 +497,36 @@ class ProcessTest(unittest.TestCase):
                   {'Host': f'127.0.0.1:{port}', 'X-Foreman-Token': token, 'Content-Type': 'application/json'})
         self.assertEqual(c.getresponse().status, 200)
         self.assertEqual(mode(repo.ops_path()), 0o600)
+
+    def test_stop_mid_publish_lets_it_finish_and_clean_up(self):
+        script = os.path.join(HERE, '..', 'scripts', 'ui.py')
+        block = os.path.join(self.f.tmp, 'release-gh')
+        os.environ['FAKE_GH_BLOCK'] = block
+        self.addCleanup(lambda: os.environ.pop('FAKE_GH_BLOCK', None))
+        p = subprocess.Popen([sys.executable, script, '--repo', self.f.work, '--no-open'], stdout=subprocess.PIPE, text=True)
+        self.addCleanup(lambda: p.poll() is None and p.kill())
+        url = p.stdout.readline().strip()
+        port, token = int(re.search(r':(\d+)/', url).group(1)), re.search(r'[?#]t=(.+)$', url).group(1)
+
+        def post(path, body=None):
+            c = http.client.HTTPConnection('127.0.0.1', port, timeout=60)
+            c.request('POST', path, json.dumps(body) if body else None, {'Host': f'127.0.0.1:{port}', 'X-Foreman-Token': token, 'Content-Type': 'application/json'})
+            return c.getresponse().status
+        self.assertEqual(post('/api/ops', {'op': 'move', 'id': 'IB-2', 'to': 'top'}), 200)
+        t = threading.Thread(target=lambda: post('/api/publish'))
+        t.start()
+        for _ in range(200):
+            if os.path.exists(self.f.gh_log) and 'pr create' in open(self.f.gh_log).read():
+                break
+            time.sleep(0.05)
+        subprocess.run([sys.executable, script, '--repo', self.f.work, '--stop'], capture_output=True)
+        time.sleep(0.5)
+        write(block, '')
+        p.wait(30)
+        t.join(30)
+        self.assertNotIn('backlog/ui-', git(self.f.work, 'branch', '--list'))
+        self.assertEqual(len(git(self.f.work, 'worktree', 'list').splitlines()), 1)
+        self.assertFalse(os.path.exists(os.path.join(self.f.server.repo.state, 'ui.json')))
 
 
 if __name__ == '__main__':

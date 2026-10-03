@@ -75,6 +75,8 @@ class Repo:
         self.lock = threading.Lock()
         self.ops_lock = threading.Lock()
         self.publishing = threading.Lock()
+        self.cleanup_lock = threading.Lock()
+        self._pub = None
         self.notice = ''
         self.version = 0
         self._fetched = None
@@ -284,16 +286,15 @@ class Repo:
     def publish(self):
         if not self.publishing.acquire(blocking=False):
             raise Busy()
-        wt = branch = None
-        pushed = False
+        self._pub = st = {'wt': None, 'branch': None, 'pushed': False}
         try:
             ops = self.load_ops()
             if not ops:
                 return {'pr_url': None, 'applied': 0, 'conflicts': 0, 'branch': None, 'message': 'nothing pending'}
             self.git('fetch', '-q', '--prune', 'origin', f'+refs/heads/{self.branch}:refs/remotes/origin/{self.branch}', backlog.UI_REFSPEC)
             base_sha = self.git('rev-parse', f'origin/{self.branch}').strip()
-            branch = self.next_branch()
-            wt = tempfile.mkdtemp(prefix='foreman-ui-')
+            st['branch'] = branch = self.next_branch()
+            st['wt'] = wt = tempfile.mkdtemp(prefix='foreman-ui-')
             os.rmdir(wt)
             self.git('worktree', 'add', '-q', '-b', branch, wt, base_sha)
             path = os.path.join(wt, self.backlog_path)
@@ -321,8 +322,8 @@ class Repo:
                         'message': 'nothing to publish: the pending changes already match main'}
             self.git('commit', '-q', '-m', title, cwd=wt)
             self.check_commit(wt, base_sha, text)
+            st['pushed'] = True  # set first: a stop during the push must still delete what it made
             self.git('push', '-q', 'origin', f'HEAD:refs/heads/{branch}', cwd=wt)
-            pushed = True
             body = '\n'.join(['Backlog edits made in the foreman UI, replayed onto '
                               f'`{self.branch}` at `{base_sha[:9]}`.', '']
                              + [f'- {backlog.describe(o, mapping)}' for o in applied]
@@ -334,18 +335,26 @@ class Repo:
                 raise PublishError(f'gh pr create: {p.stderr.strip() or p.stdout.strip()}')
             url = (p.stdout.strip().splitlines() or [''])[-1]
             self.settle(applied)
-            pushed = False  # success: the remote branch stays for the PR
+            st['pushed'] = False  # success: the remote branch stays for the PR
             return {'pr_url': url, 'applied': len(applied), 'conflicts': len(conflicts), 'branch': branch, 'message': ''}
         except FileNotFoundError as e:
             raise PublishError(str(e))
         finally:
-            if pushed:
-                self.git('push', '-q', 'origin', '--delete', branch, check=False)
-            if wt and os.path.exists(wt):
-                self.git('worktree', 'remove', '--force', wt, check=False)
-            if branch:
-                self.git('branch', '-D', branch, check=False)
+            self.cleanup_publish()
             self.publishing.release()
+
+    def cleanup_publish(self):
+        """Delete what an unfinished publish made: its pushed branch, worktree and local branch. Runs once."""
+        with self.cleanup_lock:
+            st, self._pub = self._pub, None
+        if not st:
+            return
+        if st['pushed']:
+            self.git('push', '-q', 'origin', '--delete', st['branch'], check=False)
+        if st['wt'] and os.path.exists(st['wt']):
+            self.git('worktree', 'remove', '--force', st['wt'], check=False)
+        if st['branch']:
+            self.git('branch', '-D', st['branch'], check=False)
 
     def check_commit(self, wt, base_sha, text):
         """The commit must change only the backlog, to exactly the text written (a commit hook could change either)."""
@@ -479,6 +488,15 @@ def make_server(repo_path, port=0):
     return server, f'http://127.0.0.1:{server.server_port}/#t={server.token}'
 
 
+def shutdown(repo, wait=30):
+    """Publish runs on a request thread, which dies with the process: give it `wait` seconds to finish
+    (it cleans up after itself), then delete what it made so far."""
+    if repo.publishing.acquire(timeout=wait):
+        repo.publishing.release()
+    else:
+        repo.cleanup_publish()
+
+
 def info_path(repo):
     return os.path.join(repo.state, 'ui.json')
 
@@ -517,9 +535,11 @@ def main():
     print(url, flush=True)
     if not a.no_open:
         webbrowser.open(url)
+    signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))  # so --stop runs the finally below
     try:
         server.serve_forever()
     finally:
+        shutdown(server.repo)
         if os.path.exists(info):
             os.remove(info)
 
