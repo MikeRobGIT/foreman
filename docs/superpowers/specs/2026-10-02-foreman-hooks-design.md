@@ -1,17 +1,12 @@
 # Foreman hooks: design
 
-Status: draft for review, revision 4 (2026-10-02). The findings so far:
-- revision 1: 3 Critical, 13 Important, 5 Minor;
-- revision 2: 2 Critical, 3 Important, 6 Minor, plus 8 partials;
-- revision 3: 1 Critical, 4 Important, 8 Minor.
+Status: ready for user review, revision 6 (2026-10-02). Six independent review rounds; round 6 found no Critical or Important issue, and its Minor findings are applied. Branch `feat/hooks`. Target version 0.4.0, which ships first. The parallel spec phase (`feat/spec-phase`, 0.5.0) relies on these hooks for enforcement; see Interactions.
 
 Revision 4 made the scan anchor on any git/gh/gt word, kept quoted newlines and heredocs from splitting commands, made the run and release controls orchestrator-only, and made the spec gate opt-in per batch. Its review found 2 Important and 8 Minor issues, and a combined round-5 review found 2 more Important issues (fixed in revision 6: exact receipt matching apart from exempt paths; a time-scoped `stopping` marker). Revision 5:
 - restricts receipt matching to the files that were untracked when the receipt was minted;
 - classifies `gh api` by method and path;
 - pins the heredoc, tag and batch-name rules;
 - lists the remaining scan gaps as accepted limits.
-
-Branch `feat/hooks`. Target version 0.4.0, which ships first. The parallel spec phase (`feat/spec-phase`, 0.5.0) relies on these hooks for enforcement; see Interactions.
 
 ## Purpose
 
@@ -89,7 +84,7 @@ The user approved the spec gate on 2026-10-02. It enforces the spec-phase rule "
 
 ```
 hooks/hooks.json        settings hooks (pieces 1-8, 10) + "modules": ["./status.mjs"] (piece 9)
-scripts/hooks.py        dispatcher: python3 hooks.py <event>, JSON on stdin; also the CLIs `hooks.py run-end` and `hooks.py release <batch> <sha>`
+scripts/hooks.py        dispatcher: python3 hooks.py <event>, JSON on stdin; also the CLIs `hooks.py run-end`, `release <batch> <sha>`, `stopping <batch>` and `forget <batch>` (each handled by `pretool` for the main session only)
 scripts/shellscan.py    fail-closed command detection (below); used by hooks.py
 scripts/state.py        main_checkout(path), repo_key(main), state_dir(main); CLI: state.py <path> → prints state_dir
 hooks/status.mjs        the wave status mod
@@ -153,7 +148,7 @@ Two review rounds showed that parsing Bash keeps missing forms. Detection is the
        - its path is `graphql` and the query contains `mergePullRequest` or `enablePullRequestAutoMerge`.
      - **A subagent's non-GET `graphql` call** whose query comes from a file (`-F query=@…`, `--input`), so it can't be read, is a merge too, failing closed.
      - **A GET** of `pulls/N/merge` ("is it merged?") is not a merge, and neither is `-X DELETE` on `git/refs/…` (a branch delete).
-     - **Scope:** piece 2 (worker guard) denies these `gh api` merges for subagents. Piece 3 (merge discipline) covers only `gh pr merge` and `gt merge`, because a `gh api` merge can't carry `--match-head-commit`. Piece 2 already denies it for workers, and the orchestrator merges only through `gh pr merge`.
+     - **Scope:** piece 2 (worker guard) denies these `gh api` merges for subagents. Piece 3 (merge discipline) covers only `gh pr merge` and `gt merge`, because a `gh api` merge isn't covered by piece 3's `--match-head-commit` rule (the REST endpoint accepts a `sha`, but foreman never merges that way). Piece 2 already denies it for workers, and the orchestrator merges only through `gh pr merge`.
    - **`gt`:** `gt <verb>`, with Graphite's built-in aliases resolved: `s` and `ss` mean `submit`, `m` means `modify`, `c` means `create`.
    - **`git pull`** with `--rebase` or `-r` counts as a **rebase** for piece 2.
    - **Effective directory:** from the last preceding in-scope `cd <p>` or `pushd <p>`, then `git -C <p>`. It is unknown with `--git-dir` or `--work-tree`, or with a `GIT_DIR=` or `GIT_WORK_TREE=` assignment.
@@ -227,7 +222,7 @@ Two review rounds showed that parsing Bash keeps missing forms. Detection is the
 - **Allowed when either holds:**
   - **(a)** a receipt matches HEAD exactly:
     - either `state_dir/gate/<HEAD tree>` exists (an exact lookup);
-    - or the last receipt for this checkout (`gate/last/<sha1(toplevel)>`) has a tree that equals `HEAD^{tree}` once `gate_exempt` paths are dropped from both. That is, `git diff --name-only --no-renames <receipt tree> HEAD^{tree}` lists only exempt paths.
+    - or the last receipt for this checkout (`gate/last/<sha1(toplevel)>`) has a tree that equals `HEAD^{tree}` once exempt paths are dropped from both (`gate_exempt`, `backlog_path`, `rules_glob`, and `worktree_env_files`, which workers copy in but never commit). That is, `git diff --name-only --no-renames <receipt tree> HEAD^{tree}` lists only exempt paths.
   - **(b)** every path of `git diff --name-only --no-renames $(git merge-base origin/<default> HEAD) HEAD` is exempt;
 - **Exempt paths:**
   - anything matching `gate_exempt`, using gitignore-style patterns (`**/` matches zero or more directories);
@@ -255,8 +250,9 @@ Two review rounds showed that parsing Bash keeps missing forms. Detection is the
     - the exit code is 0.
     Extra gates never mint, because their `when:` can't be checked.
   - **Matching** is exact, apart from `gate_exempt` paths (see (a)). Every file the gate saw must be in the pushed tree, and nothing else.
-    - A tracked file deleted after the gate fails to match, and so does a new file the gate saw that `git commit -am` or an explicit-path commit left out. The deny lists the differing paths (up to 10): "the gate ran on a different tree: commit these, or delete them and re-run the gate".
+    - A tracked file deleted after the gate fails to match, and so does a new file the gate saw that `git commit -am` or an explicit-path commit left out. The deny lists the differing paths (up to 10): "the gate ran on a different tree: commit these; or restore them (`git checkout -- <path>` for a tracked file, delete for an untracked one) and re-run the gate".
     - **At mint,** `gate-lock.sh` lists any untracked, non-ignored files that were already present and went into the receipt: "these are part of the gated tree; commit them, or delete them and re-run the gate". Stray files are visible at gate time, not at push time.
+    - **Artifacts:** paths excluded as gate-created artifacts are recorded in `gate/last`. They are excluded again at later mints in the same checkout, so a second gate run doesn't sweep the first run's artifacts into its receipt.
   - **The tree** is that of the working copy at the end:
     1. copy the checkout's real index (`git rev-parse --git-path index`) to a temp file;
     2. run `GIT_INDEX_FILE=<temp> git add -A -- . ':!<new untracked paths>'`;
@@ -338,8 +334,8 @@ Two review rounds showed that parsing Bash keeps missing forms. Detection is the
   - any other stop is blocked once: "you're in the spec phase: finish the spec and end with `SPEC READY <worktree> <branch> <spec path> <sha>` as the first line".
   - After release, `SPEC READY` no longer skips the check.
 - **A stopping batch** is always allowed to stop (P7). That means the file `batches/<session_id>/<batch>.stopped` exists.
-  - Like `release`, `pretool` writes it from its own hook input when the main session runs `hooks.py stopping <batch>`, and the script exits 1 if it's missing.
-  - **The file holds a time:** it is honoured only for a worker whose map entry was written BEFORE that time, i.e. the worker being stopped. A W4.4 replacement launched afterwards for the same batch is checked normally. With no map entry (P2 failed), it falls back to the transcript file's creation time against that time.
+  - Like `release`, `pretool` writes it from its own hook input when the main session runs `hooks.py stopping <batch>`. The script exits 1 if the file is missing, and 3 when the hooks are inactive (same test as `release`). `forget` uses the same exit codes.
+  - **The file holds a time:** it is honoured only for a worker whose map entry was written BEFORE that time, i.e. the worker being stopped. A W4.4 replacement launched afterwards for the same batch is checked normally. With no map entry (P2 failed), it falls back to the timestamp of the transcript's first entry (file creation time isn't available on Linux).
   - SKILL.md runs it before every TaskStop of a tagged worker: parking, W6's stuck worker, and W4.4's replacement.
 - **Otherwise,** it takes the last fenced `json` block in `last_assistant_message`:
   - **Missing:** block with "end your report with ONE fenced json block in the worker contract's format, even if empty".
@@ -375,7 +371,7 @@ Only Bash is considered. Anything that doesn't match every rule below gets no de
 - **On a match:** `{"hookSpecificOutput":{"hookEventName":"PermissionRequest","decision":{"behavior":"allow"}}}`.
 - **Other commands:** the README gives a `permissions.allow` snippet for the rest of the worker contract:
   - for the orchestrator's clock (spec phase): `sleep` and `date +%s`;
-- `git add`, `git commit`, `git fetch`, `git merge`, `git push` and `git worktree`;
+  - `git add`, `git commit`, `git fetch`, `git merge`, `git push` and `git worktree`;
   - `gh pr create|view|checks|comment|edit`, `gh api`;
   - `node --check`.
 
@@ -420,7 +416,7 @@ Only Bash is considered. Anything that doesn't match every rule below gets no de
 - **Reason:** "foreman: batch <b>'s spec isn't released yet. Finish the spec, put `SPEC READY <worktree> <branch> <spec path> <sha>` as your final message's first line, and wait for the orchestrator's release."
 - **Release:** at W3.6, before its `SendMessage`, the orchestrator runs `python3 $FOREMAN/hooks.py release <batch> <sha>`.
   - Like `run-end`, `pretool` recognises the exact call and writes `state_dir/batches/<session_id>/<batch>.released` = `{"sha", "time"}` from its own hook input. This puts the file where the hooks look, whatever `FOREMAN_HOME` the Bash tool has (P4).
-  - The script exits 3 ("hooks inactive") when no run marker exists in either state dir, which means the hooks aren't firing. Otherwise it checks that the file exists in either state dir, and exits 1 if not.
+  - The script exits 3 ("hooks inactive") when no run marker in either state dir was touched after the batch name's timestamp, which means the hooks aren't firing for this run. A stale marker from another session can't mask that. Otherwise it checks that the file exists in either state dir, and exits 1 if not.
   - `<batch>` must match `[A-Za-z0-9_-]+`, because it becomes a filename.
   - In manual mode it runs only for the batches the human approved at the checkpoint.
 - **After release** the gate is silent. Later spec edits are W4's concern: its byte-identical check, or a listed deviation.
@@ -452,7 +448,7 @@ Only Bash is considered. Anything that doesn't match every rule below gets no de
 - **Step 12:** `gh pr merge <n> --squash --match-head-commit <verified sha> --delete-branch`, from the main checkout. **W4.6:** `--match-head-commit`, no `--delete-branch` (the worktree holds the branch).
 - **W5:** a bookkeeping diff with non-exempt paths is gated in its worktree after `{{worktree_setup}}`.
 - **Termination** (W6's stop, the autonomous loop's end, and serial step 12) runs `python3 $FOREMAN/hooks.py run-end`.
-- **W3.6 (spec-phase release):** runs `python3 $FOREMAN/hooks.py release <batch> <sha>` before the release message. **W5** deletes `batches/*` for this wave.
+- **W3.6 (spec-phase release):** runs `python3 $FOREMAN/hooks.py release <batch> <sha>` before the release message. **W5** runs `hooks.py forget <batch>` for each batch of the wave.
 - **`/foreman ui`** passes `--repo <main checkout>`.
 - **A "Hooks" paragraph** lists the pieces, `hooks_disabled`, and the `! <command>` override.
 
@@ -498,6 +494,15 @@ These are guardrails, not a security boundary. Piece 8 is the only piece that gr
     - allowed: a one-paren wrap `(cd <wt> && <review.sh> --spec …)`, gate-lock with `post_merge_check` (no receipt minted), a `~/` plugin path, `hooks.py run-end`, and `hooks.py release w1a <sha>`;
     - no decision for gate-lock with a non-gate command or `--name`, for wt-setup on a non-worktree directory, and for bk.py without `--dry-run` from a subagent.
   - **Run marker:** `/loop 2h /foreman` starts a run; a mid-prompt mention doesn't; `ui`/`init` are skipped; `SessionEnd` reasons; `hooks.py run-end` deletes only the calling session's marker while another session's stays; the 48-hour expiry.
+  - **Revision 6:**
+    - `git rm` after the gate is denied;
+    - `commit -am` leaving out a new file is denied;
+    - a modified `worktree_env_files` path passes;
+    - a second gate run doesn't sweep the first run's artifact into its receipt;
+    - `.stopped` lets the stopped worker through but not a W4.4 replacement launched later;
+    - `forget` removes the batch's files;
+    - `release` exits 3 with no fresh marker;
+    - piece 8 allows `stopping` and `forget` for the main session.
   - **Piece 10:**
     - a mapped, unreleased worker is denied an Edit outside `design_spec_dir` and allowed one inside it;
     - `git commit` with a staged code file is denied; with only the spec staged it is allowed; `git commit -a` with a modified code file is denied;
