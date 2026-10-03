@@ -153,7 +153,7 @@ W1-W6 to keep them apart from steps 0-12; W6's stop conditions replace the auton
      <batch>` before any TaskStop of it, remove its worktree, and launch a new worker on the branch whose prompt again
      starts `foreman-worker: <batch>`), then W4.1 again.
   5. **Approve.** Manual mode: present the ready PRs with their evidence and head SHAs, and stop; the human
-     approves a PR at a SHA.
+     approves a PR at a SHA. This stop is a pause, not the run's end: don't run `run-end` here.
   6. **Merge.** Reply to and resolve every thread (step 8's triage), post the merge summary, check the PR's
      commit messages for trailers the user forbids (pass `--subject`/`--body` without them if needed), then
      `gh pr merge --match-head-commit <the SHA verified in W4.1, or approved in W4.5>` with the repo's merge
@@ -185,7 +185,8 @@ W1-W6 to keep them apart from steps 0-12; W6's stop conditions replace the auton
   wave failed. A worker with no report and no PR activity for `parallel_worker_timeout` minutes (not
   counting queued CI) is stuck: run `python3 $FOREMAN/hooks.py stopping <batch>`, then stop it (TaskStop), leave its
   worktree and PR alone, keep its rows out of the next pool, report it, and carry on. When the run stops, run
-  `python3 $FOREMAN/hooks.py run-end` last.
+  `python3 $FOREMAN/hooks.py run-end` last, and only after every worker has reported or been stopped (`stopping`,
+  then TaskStop): ending the run while a background worker still runs turns off the run-only hooks that guard it.
 
 ### Worker contract
 
