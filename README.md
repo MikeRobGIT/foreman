@@ -50,6 +50,60 @@ It reads the backlog from `origin`'s default branch, never your working copy.
 - **Themes.** Auto follows your system light/dark setting; Light and Dark pin it (remembered per browser).
 - `/foreman ui stop` stops the server. Without `gh`, Publish can't open the PR and Progress shows counts only.
 
+## Hooks (since 0.4.0)
+
+foreman ships settings hooks (`hooks/hooks.json`, one Python dispatcher: `scripts/hooks.py`) that enforce the worker
+contract and the merge rules at the tool call, plus a wave-status mod. They are guardrails against mistakes, not a
+security boundary. They fire in every session where the plugin is enabled, but only in a repo with a foreman config;
+they fail open on their own errors (the one exception: a push whose diff can't be determined is denied).
+
+Run-only pieces act while the session's **run marker** exists: a prompt starting `/foreman` (or `/loop … /foreman`;
+not `ui` or `init`) writes it, the skill runs `hooks.py run-end` when the run ends, `/clear` and logout delete it,
+and it expires after 48 hours.
+
+| id | applies | what it does |
+|---|---|---|
+| `gate_before_push` | run, everyone | `git push`, `gh pr create` and `gt submit` need a gate receipt for the pushed tree. `gate-lock.sh <owner> -- '<gate>'`, run with the exact configured `gate`, mints one. A branch whose diff touches only `gate_exempt`, the backlog and the rules files needs none. |
+| `worker_guard` | run, subagents | no merge (`gh pr merge`, `gt merge`, merging `gh api` calls), force-push, push to the default branch, rebase, `gt modify` once pushed, or edits of the backlog, the rules files or the foreman config |
+| `merge_discipline` | run, everyone | `gh pr merge` needs `--match-head-commit <sha>`; `--delete-branch` is refused while another worktree holds the branch; no `gt merge` |
+| `trailer_guard` | foreman repo | `forbid_trailers` lines are refused in commit, PR and comment messages, and in a `gh pr merge` that would keep them |
+| `backlog_check` | foreman repo | after an Edit/Write of the backlog, problem rows (wrong `\|` count, duplicate ids) are reported back |
+| `worker_briefing` | tagged workers | a subagent whose prompt starts `foreman-worker: <batch>` gets the Worker contract, rendered |
+| `report_check` | tagged workers | a tagged worker's final report must end with a valid `json` block that `bk.py --dry-run` accepts; it is sent back once |
+| `script_allow` | run | `gate-lock.sh`, `wt-setup.sh`, `review.sh`, `bk.py` and `hooks.py` run without a permission prompt, in strict shapes only |
+| `spec_gate` | run, `spec-phase` workers | edits and commits stay in `design_spec_dir`, and nothing is pushed, until the orchestrator runs `hooks.py release <batch> <sha>` |
+| `status_pane` | run | a band above the prompt: one line per worker worktree with its PR, state, head SHA, CI, bots, unresolved threads and merge state |
+
+Turn pieces off per repo with `hooks_disabled: [<id>, …]` in the config. Your own `! <command>` is never checked:
+it's the override. The status band is a mod: like every mod it runs in-process and unsandboxed. It only reads (git,
+gh, foreman's state dir) and draws, and only in the terminal and the Desktop app.
+
+**Permissions for background workers.** A background worker that hits a permission prompt it can't show is denied
+and stalls. `script_allow` covers foreman's own scripts; add the rest of the worker contract's commands to
+`permissions.allow` in `~/.claude/settings.json` or the project's `.claude/settings.json`:
+
+```json
+{
+  "permissions": {
+    "allow": [
+      "Bash(sleep:*)", "Bash(date +%s)", "Bash(kill -TERM:*)",
+      "Bash(git add:*)", "Bash(git commit:*)", "Bash(git fetch:*)", "Bash(git merge:*)", "Bash(git push:*)", "Bash(git worktree:*)",
+      "Bash(gh pr create:*)", "Bash(gh pr view:*)", "Bash(gh pr checks:*)", "Bash(gh pr comment:*)", "Bash(gh pr edit:*)", "Bash(gh api:*)",
+      "Bash(node --check:*)"
+    ]
+  }
+}
+```
+
+**Limits.**
+- The hooks see only Claude's tool calls, never yours. Writes to the backlog or rules files through Bash (a `python3 -c` that edits them) aren't guarded; `bk.py` validates its own writes.
+- Commands fed to a shell's stdin (`echo 'git push' | bash`), `eval` of built strings and encoded commands aren't detected.
+- An unquoted `echo git push` is treated as a push (a deliberate false deny).
+- A push with an explicit refspec source other than HEAD is judged by HEAD's tree.
+- A command the scan can't read (unbalanced quotes, an unterminated heredoc) is judged fail-closed: a push is denied with "couldn't read this command"; push with a plain `git push` in its own call.
+- A resumed session whose id changed, or a build whose subagent ids differ between events, runs some checks fail-open. `docs/superpowers/plans/2026-10-02-foreman-hooks-probes.md` records what was observed.
+- A tagged worker is briefed at its first Bash or edit call, not its first Read: the PreToolUse hooks match only those tools (the spec gate guards only those tools too).
+
 ## Prerequisites (not bundled)
 
 - The **superpowers** plugin (`superpowers@claude-plugins-official`), declared as a dependency. Installing
@@ -71,7 +125,8 @@ Main keys: `backlog_path`, `id_prefix` (row ids, default `IB`), `rules_glob`, `g
 `post_merge_check`, `merge_tool`, `required_ci`, `review_bots`, `reviewers` (+ `reviewer_timeout_seconds`,
 `reviewer_stall_seconds`, `reviewer_max_diff_kb`), `dev_url`, `dev_restart`, `e2e`, `browser_lib`,
 `pre_browser_check`, `worktree_env_files`, `worktree_install`, `stale_check`, `gate_slots`, `parallel_*`,
-`shared_resources`.
+`shared_resources`. Hooks: `forbid_trailers`, `gate_exempt`, `worker_agent_types`, `hooks_disabled`,
+`design_spec_dir`, `status_pane`.
 
 ### Per-project hooks
 
@@ -126,10 +181,13 @@ nothing until it finishes.
 | `scripts/wt-setup.sh <worktree>` / `--check <dir>` | copy env files, install, stale-install check; `--check` with no `stale_check` configured fails |
 | `scripts/bk.py <repo> [--dry-run] <reports...>` | fold worker JSON reports into the backlog and rules files; writes nothing on any mismatch |
 | `scripts/cfg.py <repo> <key> [default]` | read a config key (no PyYAML needed) |
+| `scripts/hooks.py <event>` | the hooks' dispatcher; orchestrator CLIs `run-end`, `release <batch> <sha>`, `stopping <batch>`, `forget <batch>` (exit 3 = hooks inactive) |
+| `scripts/state.py <path>` | print the repo's state dir (`~/.claude/foreman/<repo-key>`, or under `$FOREMAN_HOME`) |
 
 ## Tests
 
 ```bash
-tests/run.sh                       # offline: config parsing, bk.py, worktree setup, gate locks, the chain with fake reviewers
+tests/run.sh                       # offline: config parsing, bk.py, worktree setup, gate locks, the chain with fake reviewers, the hooks, the mod's formatter
+tests/e2e-hooks.sh                 # headless end-to-end of the hooks with haiku workers, in a throwaway repo; spends quota
 tests/real-reviewers.sh main /tmp/rr codex=gpt-6.1-sol:medium claude=haiku:low   # real runs, in a throwaway repo; spends quota
 ```

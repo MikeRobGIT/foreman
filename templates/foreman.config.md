@@ -61,6 +61,14 @@ parallel_worker_timeout: 90     # minutes of worker silence before it counts as 
 parallel_skip: []               # rows a wave never batches (ids, tags like "[serial]", title patterns) [none]
 parallel_shared_files: []       # files several batches may edit, each its own entries (e.g. locale JSON) [none]
 shared_resources: []            # rules every worker follows: shared database, test data, browser sign-in, VCS quirks [none]
+
+# --- hooks (README: Hooks) ------------------------------------------------------------------------------
+forbid_trailers: []             # lines that must never start a commit, PR or comment message, e.g. [Co-Authored-By, Claude-Session]; an entry written /.../ is a regex searched within each line [none]
+gate_exempt: [docs/**, "**/*.md"]   # gitignore-style paths a push may change without a gate receipt; backlog_path and rules_glob always may [docs/**, **/*.md]
+worker_agent_types: [general-purpose, workflow-subagent]   # subagent types the briefing and report check apply to [these two]
+hooks_disabled: []              # hook ids off in this repo: gate_before_push, worker_guard, merge_discipline, trailer_guard, backlog_check, worker_briefing, report_check, script_allow, spec_gate, status_pane [none]
+design_spec_dir: docs/superpowers/specs   # where a spec-phase worker may edit before its spec is released [docs/superpowers/specs]
+status_pane: true               # the wave status band above the prompt during a run [true]
 ---
 
 # Project notes & guardrails

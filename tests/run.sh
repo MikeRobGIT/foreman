@@ -48,10 +48,22 @@ check "template: gate" test "$(tc gate)" = "npm test"
 check "template: commented-out reviewers = empty chain" test -z "$(tc chain)"
 check "template: timeout" test "$(tc reviewer_timeout_seconds)" = 900
 check "template: empty list" test -z "$(tc required_ci)"
+check "template: gate_exempt" test "$(tc gate_exempt | tr '\n' ' ')" = "docs/** **/*.md "
+check "template: hook lists default empty" test -z "$(tc forbid_trailers)$(tc hooks_disabled)"
+check "template: design_spec_dir" test "$(tc design_spec_dir)" = "docs/superpowers/specs"
 mkdir -p "$T/tpl/.claude" && cp "$root/templates/improvement-backlog.md" "$T/tpl/.claude/" && printf -- '---\n---\n' >"$T/tpl/.claude/foreman.config.md"
 echo '{"pr": 1, "done": [{"id": "IB-1", "note": "x"}], "new_rows": ["| IB-NEW-a | t | low | ready | a | s |"]}' >"$T/tpl.json"
 python3 "$root/scripts/bk.py" "$T/tpl" --dry-run "$T/tpl.json" >"$T/tpl.out" 2>&1
 check "bk.py parses the template backlog" grep -q "dry run: ok, 1 new rows from IB-2" "$T/tpl.out"
+
+echo "## SKILL.md wires the hooks"
+SK=$root/skills/foreman/SKILL.md
+check "W3 tags every worker" grep -q 'FIRST line is exactly `foreman-worker: <batch>`' "$SK"
+check "every termination runs run-end" test "$(grep -c 'hooks.py run-end' "$SK")" -ge 4
+check "step 12 pins the verified SHA" grep -q 'gh pr merge <n> --squash --match-head-commit' "$SK"
+check "stopping before each TaskStop" test "$(grep -c 'hooks.py stopping' "$SK")" -ge 2
+check "W5 forgets each batch" grep -q 'hooks.py forget <batch>' "$SK"
+check "/foreman ui passes the main checkout" grep -q 'ui.py" --repo "$(git worktree list' "$SK"
 
 echo "## bk.py with a non-default prefix"
 mkdir -p "$T/bk/.claude/rules"

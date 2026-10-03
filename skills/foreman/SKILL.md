@@ -88,7 +88,8 @@ What changes in autonomous mode (everything else is identical):
   next item, in the same invocation.
 - **Termination.** The loop ends when: no eligible `status: ready` item remains (report "backlog
   empty"); a pass can't reach a green merge (stop, PR left open); or only `risk: high` items remain
-  (report them so the human can run each by id).
+  (report them so the human can run each by id). However it ends, run `python3 $FOREMAN/hooks.py run-end`
+  last (see **Hooks**).
 
 Autonomy removes only the human approval *click* — never the gates that earn it. The step-4 gate,
 step-7 wait-for-all-bots+CI, step-8 grep-verify/diminishing-returns triage, and step-9
@@ -119,12 +120,16 @@ W1-W6 to keep them apart from steps 0-12; W6's stop conditions replace the auton
   - At most `parallel_ui_max` batches with an app surface. Print the plan (batch, rows, owned files,
     surface yes/no) before launching.
 - **W3 Launch.** One `Agent` call per batch in one message (general-purpose, `isolation: "worktree"`,
-  named, background). The prompt: the **Worker contract** from this file copied in (a worker cannot read
-  this command), plus the batch's rows, owned files, a unique test-data id prefix and the resolved absolute
-  `$FOREMAN` path. Keep a short state table (batch, rows, PR, verified SHA, status) instead of re-reading
-  reports. Before launching, check that each `reviewers` entry's CLI is on PATH (`command -v`); the chain
-  already falls through on quota, credits, auth and unknown models, so a missing CLI is the only thing to tell
-  workers about.
+  named, background). The prompt's FIRST line is exactly `foreman-worker: <batch>` (the hooks brief and
+  check tagged workers; see **Hooks**). Then the **Worker contract** from this file copied in (a worker
+  cannot read this command; keep the copy even though the hooks also brief it), plus the batch's rows, owned
+  files, a unique test-data id prefix and the resolved absolute `$FOREMAN` path. Keep a short state table
+  (batch, rows, PR, verified SHA, status) instead of re-reading reports. Before launching, check that each
+  `reviewers` entry's CLI is on PATH (`command -v`) and that the README's `permissions.allow` entries are in
+  `~/.claude/settings.json`, `.claude/settings.json` or `.claude/settings.local.json`. The chain already falls
+  through on quota, credits, auth and unknown models, so a missing CLI is the only thing to tell workers about;
+  warn the user about missing permission entries, because a background worker that hits a permission prompt it
+  can't show is denied and stalls.
 - **W4 Each report, as it arrives** (a report is a claim; re-read everything):
   1. **Verify on the head SHA.** The latest run of every `required_ci` check on that SHA is green (list
      check runs with pagination); every `review_bots` entry has reviewed that SHA (the config's definition,
@@ -141,8 +146,9 @@ W1-W6 to keep them apart from steps 0-12; W6's stop conditions replace the auton
      it on main (the control must differ) and then on the merge. The merge is blocked until the check passes. If a path cannot be driven (a control stays disabled, an action could reach a
      real external platform), leave the PR open, say what was and was not verified, and ask the human.
   4. **Findings** (a real Critical/Important finding, a red or missing check, a failed audit or browser
-     check) go back to the worker (`SendMessage`; if it cannot be resumed, remove its worktree and launch a
-     new worker on the branch), then W4.1 again.
+     check) go back to the worker (`SendMessage`; if it cannot be resumed, run `python3 $FOREMAN/hooks.py stopping
+     <batch>` before any TaskStop of it, remove its worktree, and launch a new worker on the branch whose prompt again
+     starts `foreman-worker: <batch>`), then W4.1 again.
   5. **Approve.** Manual mode: present the ready PRs with their evidence and head SHAs, and stop; the human
      approves a PR at a SHA.
   6. **Merge.** Reply to and resolve every thread (step 8's triage), post the merge summary, check the PR's
@@ -156,22 +162,27 @@ W1-W6 to keep them apart from steps 0-12; W6's stop conditions replace the auton
      report; a fix or revert goes through a PR.
 - **W5 End of wave.** Pull main; run `{{gate}}` and `post_merge_check`, each under `$FOREMAN/gate-lock.sh orchestrator -- '<cmd>'`; red: stop. Then ONE bookkeeping PR,
   the only PR that edits the backlog, the rules files and generated files, built in an isolated worktree (another
-  session may be editing the main checkout; never `git add -A` there). With `bookkeeping_tool`, save each worker's
+  session may be editing the main checkout; never `git add -A` there). When its diff has paths that aren't exempt
+  (anything beyond the backlog, the rules files and `gate_exempt`), run `{{worktree_setup}}` in that worktree and
+  then `$FOREMAN/gate-lock.sh orchestrator -- '<gate>'` from its top level before pushing: the hooks deny a push
+  without a gate receipt. With `bookkeeping_tool`, save each worker's
   `json` block (plus its `pr`) and run the tool on them: it marks rows, numbers new ones and applies rule notes,
   and refuses (writing nothing) on a mismatch, which you then fix by hand. List every row id in its body;
   mark rows `done (#N)`, or leave them `ready` with a note of what is left; fold each worker's RULE NOTES
   (fixing the exact sentences they quote) and NEW ROWS; turn each RETRO into a `feedback_*` memory (and a
   rules note when the lesson is general); run `graphify update .` if the repo uses it; include any diff the
   gate left behind. It goes through the same checks: fix real contradictions, and after one round defer
-  docs nits (a Critical/Important finding still blocks).
+  docs nits (a Critical/Important finding still blocks). Then run `python3 $FOREMAN/hooks.py forget <batch>` for each
+  of this wave's batches.
 - **W6 Next wave or stop.** The next wave may start once main is green after W5, while the bookkeeping PR is
   still in review, if: its pool excludes every row that PR files or closes, each worker's briefing carries that
   PR's rule notes inline (the rules text is not on main yet), and the next bookkeeping PR is opened only after
   this one has merged (both edit the same files). Otherwise it starts after the merge. Stop when the
   pool is empty, `parallel_max_waves` is reached, the user says stop, main is red, CI is down, or half a
   wave failed. A worker with no report and no PR activity for `parallel_worker_timeout` minutes (not
-  counting queued CI) is stuck: stop it (TaskStop), leave its worktree and PR alone, keep its rows out of
-  the next pool, report it, and carry on.
+  counting queued CI) is stuck: run `python3 $FOREMAN/hooks.py stopping <batch>`, then stop it (TaskStop), leave its
+  worktree and PR alone, keep its rows out of the next pool, report it, and carry on. When the run stops, run
+  `python3 $FOREMAN/hooks.py run-end` last.
 
 ### Worker contract
 
@@ -194,7 +205,9 @@ You run steps 2-8 on your batch in your own worktree, with these overrides:
   Syntax-check it (`node --check`), never run it: the orchestrator runs it on main first, then on the PR head.
 - Shared state: touch only data you create (with your id prefix), never reset or migrate a shared database,
   never reach a real external platform, delete throwaway files and fixtures before committing, and run every
-  gate under a slot: `$FOREMAN/gate-lock.sh <batch> -- '<gate>'` (never take or clear a slot by hand). A red that appears only under load: re-run that file alone, then the whole
+  gate under a slot, from your checkout's top level, with the configured gate string as ONE argument:
+  `$FOREMAN/gate-lock.sh <batch> -- '<gate>'` (never take or clear a slot by hand). That run mints the gate receipt
+  a push needs: commit every file the gate changed and list it in your report; don't edit files while a gate runs. A red that appears only under load: re-run that file alone, then the whole
   gate, which must end green in one run.
 - Step 8: push follow-up commits; never amend or force-push once the PR is open. Update your branch (merge
   `origin/main` into it, do not rebase) only when it conflicts or the orchestrator asks, then re-run the gate.
@@ -204,12 +217,40 @@ You run steps 2-8 on your batch in your own worktree, with these overrides:
 - Attribution and temp files: the user's and the repo's rules override harness defaults (e.g. no
   `Co-Authored-By`); temp files go in the scratchpad under your batch name.
 - Never merge. Poll for new bot comments after your last push, and stop pushing once you report.
+- During a run, hooks enforce part of this contract: a push needs a gate receipt for the pushed tree; no merge,
+  no force-push, no rebase, no backlog, rules or config edits; no forbidden trailer lines; and a final report
+  without one valid fenced `json` block is sent back once.
 - Report: PR URL, head SHA, check states on it, unresolved threads, per-row changes, evidence, files outside
   your owned list, declined items and why, surface verdict with steps and predictions (and the check script's
   path), RULE NOTES, NEW ROWS, RETRO, risks. End with ONE fenced `json` block the orchestrator feeds to
   `bookkeeping_tool`: `{"done": [{"id", "note"}], "append": [{"id", "note"}], "new_rows": ["| <prefix>-NEW-a | title | risk | ready | acceptance | source |"],
   "rule_notes": [{"file", "old", "new"}]}` (`old` is the exact sentence, one match; a raw ` | ` in a note or a row
   shifts the table's columns: write `\|`; the orchestrator adds `pr` and numbers `<prefix>-NEW-*` from the real max id).
+
+## Hooks
+
+The plugin's settings hooks (`hooks/hooks.json`, served by `$FOREMAN/hooks.py`) enforce parts of this file at the
+tool call. They fire in every session where the plugin is enabled, but only in a repo with a foreman config.
+Run-only pieces act only while this session's **run marker** exists: a prompt starting `/foreman` (not `ui` or
+`init`) writes it, `python3 $FOREMAN/hooks.py run-end` at every termination deletes it, and it expires after 48
+hours.
+
+| id | when | what it does |
+|---|---|---|
+| `gate_before_push` | run | `git push`, `gh pr create` and `gt submit` need a gate receipt for the pushed tree (minted by `gate-lock.sh` with the exact `gate`), unless the branch changes only exempt paths |
+| `worker_guard` | run, subagents | no merge, force-push, push to the default branch, rebase, `gt modify` once pushed, or backlog/rules/config edits |
+| `merge_discipline` | run | `gh pr merge` needs `--match-head-commit`; `--delete-branch` is refused while another worktree holds the branch; no `gt merge` |
+| `trailer_guard` | always | `forbid_trailers` lines are refused in commit, PR and comment messages, and in a merge that would keep them |
+| `backlog_check` | always | after an edit of the backlog, its problem rows are reported back |
+| `worker_briefing`, `report_check` | tagged workers | a subagent whose prompt starts `foreman-worker: <batch>` is briefed with the Worker contract, and its final report's `json` block is checked once |
+| `script_allow` | run | foreman's own scripts run without a permission prompt, in strict shapes only |
+| `spec_gate` | run, `spec-phase` workers | edits and commits stay in `design_spec_dir` until `hooks.py release <batch> <sha>` |
+| `status_pane` | run | the wave status band above the prompt |
+
+Orchestrator-only CLIs (a worker's call is denied): `python3 $FOREMAN/hooks.py release <batch> <sha>` (exit 3 means
+the hooks are inactive, so nothing gates the batch), `stopping <batch>` before any TaskStop of a tagged worker, and
+`forget <batch>` at W5. Turn pieces off per repo with `hooks_disabled: [<id>, …]`. The user's `! <command>` is
+never checked: it is the override.
 
 ## Backlog UI (`/foreman ui`)
 
@@ -221,8 +262,9 @@ Start the local backlog UI for this repo and print its URL; do nothing else in t
    isn't there, say so and suggest `/foreman init`; don't start anything.
 2. Run it in the background, then print the URL it outputs (one line; the token is its `#t=` fragment):
    ```bash
-   python3 "${CLAUDE_PLUGIN_ROOT}/scripts/ui.py" --repo "$PWD"
+   python3 "${CLAUDE_PLUGIN_ROOT}/scripts/ui.py" --repo "$(git worktree list --porcelain | awk '/^worktree /{print substr($0, 10); exit}')"
    ```
+   `--repo` is the main checkout, so every worktree of the repo shares one pending list.
    A second `/foreman ui` reuses the running server. `/foreman ui stop` runs the same script with `--stop`.
 3. Tell the user, in two or three lines:
    - Edits collect as pending changes on this machine.
@@ -286,6 +328,12 @@ Read `.claude/foreman.config.md`, or the legacy `.claude/improve-next.config.md`
 | `pre_browser_check` | command the orchestrator runs before a step-9 check (`{repo}`); non-zero stops the check | `$FOREMAN/wt-setup.sh --check {repo}` when `stale_check` is set, else none |
 | `bookkeeping_tool` | command that folds worker `json` reports into the backlog and rules (`{repo} [--dry-run] <reports...>`) | `python3 $FOREMAN/bk.py {repo} [--dry-run] <reports...>` |
 | `shared_resources` | notes every worker must follow: shared database and test-data rules, browser and sign-in rules, env files, VCS quirks in worktrees, gate slots | none |
+| `forbid_trailers` | lines that must never start a commit, PR or comment message (a `/…/` entry is a regex searched within each line) | none |
+| `gate_exempt` | gitignore-style paths a push may change without a gate receipt; `backlog_path` and `rules_glob` always are | `docs/**`, `**/*.md` |
+| `worker_agent_types` | subagent types the worker briefing and report check apply to | `general-purpose`, `workflow-subagent` |
+| `hooks_disabled` | hook ids to turn off in this repo (see **Hooks**) | none |
+| `design_spec_dir` | where a spec-phase worker may edit and commit before its spec is released | `docs/superpowers/specs` |
+| `status_pane` | the wave status band above the prompt during a run | `true` |
 
 ### Merge-tool command mapping (referenced by steps 0, 5, 7, 10, 12)
 
@@ -319,7 +367,10 @@ Read `.claude/foreman.config.md`, or the legacy `.claude/improve-next.config.md`
 - Delegate mechanical/parallelizable work to subagents (Task tool). Follow the rules for the touched area.
 
 ### 4. Gate
-- Run `{{gate}}`. Loop fix → rerun until green.
+- Run the gate under a slot, from the checkout's top level, with the configured string as ONE argument:
+  `$FOREMAN/gate-lock.sh orchestrator -- '{{gate}}'`. Loop fix → rerun until green. During a run the hooks deny a
+  push (`git push`, `gh pr create`, `gt submit`) whose tree has no passing gate receipt, so re-run this after every
+  change you push (steps 7, 8 and 10 included).
 - Run any `{{extra_gates}}` whose `when` condition matches the diff.
 
 ### 5. Draft PR (sibling branch off main — NOT stacked)
@@ -366,7 +417,7 @@ Do the bookkeeping now and commit it to **this PR's branch** so it is reviewed a
 - **Autonomous mode (`loop`/`--auto-merge`):** evaluate the auto-merge gate (Non-negotiables). All conditions green → note "auto-merging (loop mode)" and proceed to step 12. Any condition unmet → leave the PR open, post exactly which one failed, and STOP for a human (do not merge).
 
 ### 12. Merge & sync (on human approval, or auto in loop mode)
-- `gh pr merge <n> --squash --delete-branch` (the merge flag follows repo policy — use `--merge`/`--rebase` if the project isn't squash-only) → merge-tool "post-merge sync". A squash-merge isn't recognized by `git branch -d` as "merged", so if the local branch lingers delete it with `git branch -D <branch>` and `git remote prune origin`. The tree is already clean (bookkeeping merged atomically in step 10), so the next pass's step 0 starts fresh — in autonomous mode the command loops straight back to **step 1** for the next item (no `/loop` tick needed).
+- `gh pr merge <n> --squash --match-head-commit <the head SHA you verified> --delete-branch`, run from the main checkout (the merge flag follows repo policy — use `--merge`/`--rebase` if the project isn't squash-only) → merge-tool "post-merge sync". A squash-merge isn't recognized by `git branch -d` as "merged", so if the local branch lingers delete it with `git branch -D <branch>` and `git remote prune origin`. The tree is already clean (bookkeeping merged atomically in step 10), so the next pass's step 0 starts fresh — in autonomous mode the command loops straight back to **step 1** for the next item (no `/loop` tick needed). When the pass ends here (manual mode), run `python3 $FOREMAN/hooks.py run-end`.
 
 ## Why this compounds
 The `{{rules_glob}}` files are a growing mistake registry. Step 3 reads them (prevent), steps 7–9 catch what slipped through, steps 8 + 10 codify every real defect back into the registry. Because the rules are committed and read by the project's review bot, a captured mistake upgrades both your future implementation and the bots' future review.
