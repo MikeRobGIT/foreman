@@ -157,9 +157,11 @@ class Repo:
                 i = bl.find(op['id'])
                 if i is None:
                     raise ValueError(f'{op["id"]} is not in the backlog')
+                if op['op'] == 'status' and bl.lines[i].status == 'done' and op['to'] != 'ready':
+                    raise ValueError(f'{op["id"]} is done; it can only go back to ready')
                 op = {**op, 'base': bl.lines[i].raw}
             _, results = self.replay(ops + [op])
-            if results[-1]['result'] == 'invalid':
+            if results[-1]['result'] != 'applied':
                 raise ValueError(results[-1]['reason'])
             ops.append(op)
             self.save_ops(ops)

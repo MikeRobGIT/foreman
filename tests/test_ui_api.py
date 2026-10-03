@@ -182,6 +182,19 @@ class ServerTest(unittest.TestCase):
         self.assertEqual(status, 409)
         self.assertEqual(len(self.f.request('GET', '/api/backlog')[1]['ops']), 1)
 
+    def test_an_op_that_already_conflicts_is_refused(self):
+        status, data, _ = self.f.request('POST', '/api/ops', {'op': 'move', 'id': 'IB-2', 'to': {'before': 'IB-77'}})
+        self.assertEqual(status, 400)
+        self.assertIn('IB-77 is no longer in the backlog', data['error'])
+        self.assertEqual(self.f.request('GET', '/api/backlog')[1]['ops'], [])
+
+    def test_a_done_row_only_goes_back_to_ready(self):
+        status, data, _ = self.f.request('POST', '/api/ops', {'op': 'status', 'id': 'IB-3', 'to': 'deferred', 'reason': ''})
+        self.assertEqual(status, 400)
+        self.assertIn('IB-3 is done', data['error'])
+        status, _, _ = self.f.request('POST', '/api/ops', {'op': 'status', 'id': 'IB-3', 'to': 'ready', 'reason': ''})
+        self.assertEqual(status, 200)
+
     def test_invalid_add_is_refused_up_front(self):
         status, data, _ = self.f.request('POST', '/api/ops', {'op': 'add', 'title': 'x', 'risk': 'huge', 'status': 'ready', 'reason': '', 'acceptance': '', 'source': '', 'insert': 'top'})
         self.assertEqual(status, 400)

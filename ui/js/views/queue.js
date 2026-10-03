@@ -10,10 +10,10 @@ export function detailHtml(r, positionText) {
     <div class="chips"><span class="risk ${esc(r.risk)}">${esc(r.risk)}</span><span class="st ${esc(r.status)}">${esc(r.status_text)}</span>${opt}<span>· from ${inline(r.source)}</span></div>
     <div class="actions">
       <button class="primary" data-act="edit">Edit <kbd>e</kbd></button>
-      ${r.status === 'ready' ? '<button data-act="top">Move to top <kbd>t</kbd></button>' : '<button data-act="ready">Make ready</button>'}
+      ${r.status === 'done' ? '' : `${r.status === 'ready' ? '<button data-act="top">Move to top <kbd>t</kbd></button>' : '<button data-act="ready">Make ready</button>'}
       <button data-act="deferred">Defer <kbd>d</kbd></button>
       <button data-act="blocked">Block… <kbd>b</kbd></button>
-      <button data-act="cancelled">Cancel… <kbd>x</kbd></button>
+      <button data-act="cancelled">Cancel… <kbd>x</kbd></button>`}
     </div>
     <div class="notes">${blocks}</div>`;
 }

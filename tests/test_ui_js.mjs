@@ -63,3 +63,11 @@ test('run() drops a response older than the data it already shows', async () => 
   await run(async () => ({ version: 6, rows: [], ops: [] }));
   assert.equal(state.data.version, 6);
 });
+
+test('a done row offers Edit and no status actions', async () => {
+  globalThis.location = { hash: '', port: '0', pathname: '/', search: '' };
+  const { detailHtml } = await import('../ui/js/views/queue.js');
+  const acts = (r) => [...detailHtml(r, '').matchAll(/data-act="([a-z]+)"/g)].map((m) => m[1]);
+  assert.deepEqual(acts(ROWS[2]), ['edit']);
+  assert.deepEqual(acts({ ...ROWS[2], status: 'deferred', status_text: 'deferred' }), ['edit', 'ready', 'deferred', 'blocked', 'cancelled']);
+});

@@ -19,7 +19,7 @@ export function render(root) {
       <label>Title<input name="title" required value="${esc(v.title)}"></label>
       <div class="three">
         <label>Risk<select name="risk">${r && !RISKS.includes(r.risk) ? `<option value="" selected>${esc(r.risk)} (unchanged)</option>` : ''}${RISKS.map((k) => `<option ${k === v.risk ? 'selected' : ''}>${k}</option>`).join('')}</select></label>
-        <label>Status<select name="status">${r && !STATUSES.includes(r.status) ? `<option value="" selected>${esc(r.status)} (unchanged)</option>` : ''}${STATUSES.map((k) => `<option ${k === v.status ? 'selected' : ''}>${k}</option>`).join('')}</select></label>
+        <label>Status<select name="status">${r && !STATUSES.includes(r.status) ? `<option value="" selected>${esc(r.status)} (unchanged)</option>` : ''}${(r && r.status === 'done' ? [] : STATUSES).map((k) => `<option ${k === v.status ? 'selected' : ''}>${k}</option>`).join('')}</select></label>
         ${r ? '<label>Reason (for blocked or cancelled)<input name="reason"></label>' : '<label>Insert at<select name="insert"><option value="bottom">Bottom of the ready queue</option><option value="top">Top of the ready queue</option></select></label>'}
       </div>
       ${r ? '' : '<label>Reason (for blocked or cancelled)<input name="reason"></label>'}
