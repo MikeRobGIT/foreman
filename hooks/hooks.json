@@ -1,5 +1,6 @@
 {
-  "description": "foreman hooks: gate receipts, worker guard, merge discipline, trailer guard, backlog rows, worker briefing and report check, script allow, spec gate",
+  "description": "foreman hooks: gate receipts, worker guard, merge discipline, trailer guard, backlog rows, worker briefing and report check, script allow, spec gate; plus the wave status mod",
+  "modules": ["./status.mjs"],
   "hooks": {
     "UserPromptSubmit": [
       { "hooks": [{ "type": "command", "command": "python3", "args": ["${CLAUDE_PLUGIN_ROOT}/scripts/hooks.py", "run-start"], "timeout": 10 }] }

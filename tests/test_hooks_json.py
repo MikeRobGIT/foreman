@@ -48,6 +48,10 @@ class HooksJsonTest(unittest.TestCase):
         for sub in set(WANT.values()):
             self.assertIn(sub, hooks.HANDLERS, sub)
 
+    def test_the_mod_is_declared_and_exists(self):
+        self.assertEqual(self.data['modules'], ['./status.mjs'])
+        self.assertTrue(os.path.isfile(os.path.join(ROOT, 'hooks', 'status.mjs')))
+
 
 if __name__ == '__main__':
     unittest.main()
