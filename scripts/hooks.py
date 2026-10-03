@@ -464,6 +464,120 @@ def resolve_agent(repo, h):
     return entry
 
 
+# ---- piece 1: gate before push --------------------------------------------------------------------
+
+# pretool prefixes every deny with "foreman: ", so this one doesn't repeat the name
+UNREADABLE = "couldn't read this command. Run the gate, then push with a plain `git push` in its own call"
+
+
+def glob_re(pattern):
+    """A gitignore-style pattern as a regex: `**/` is zero or more directories, `*` stays inside one, a
+    pattern without a slash matches at any depth, and a match on a directory covers what's inside it."""
+    p = pattern.strip()
+    anchored = '/' in p.rstrip('/')
+    p = p.lstrip('/')
+    if p.endswith('/'):
+        p += '**'
+    out, i = '', 0
+    while i < len(p):
+        if p.startswith('**/', i):
+            out, i = out + '(?:.*/)?', i + 3
+        elif p.startswith('**', i):
+            out, i = out + '.*', i + 2
+        elif p[i] == '*':
+            out, i = out + '[^/]*', i + 1
+        elif p[i] == '?':
+            out, i = out + '[^/]', i + 1
+        else:
+            out, i = out + re.escape(p[i]), i + 1
+    return re.compile(('' if anchored else '(?:.*/)?') + out + r'(?:/.*)?\Z')
+
+
+def glob_match(path, pattern):
+    return bool(glob_re(pattern).match(path))
+
+
+def exempt(repo, path, receipt=False):
+    """A path a push may change without a gate: gate_exempt, the backlog, the rules files and, when matching a
+    receipt, worktree_env_files (workers copy them in and never commit them)."""
+    patterns = repo.list('gate_exempt') + [repo.backlog] + repo.rules
+    if receipt:
+        patterns += repo.list('worktree_env_files')
+    return any(glob_match(path, p) for p in patterns)
+
+
+def default_branch(top):
+    head = state.git(top, 'symbolic-ref', '--short', 'refs/remotes/origin/HEAD')
+    return head.strip().split('/', 1)[1] if head and '/' in head else 'main'
+
+
+def changed(top, a, b):
+    """The paths that differ between two trees or commits, or None when git can't say. NUL-separated: without -z
+    git quotes a path with non-ASCII characters, and no pattern would match the quoted form."""
+    out = state.git(top, 'diff', '--name-only', '-z', '--no-renames', a, b)
+    return None if out is None else [p for p in out.split('\0') if p]
+
+
+def receipt_reason(repo, since):
+    r = (f"no passing gate for this tree — run `{HERE}/gate-lock.sh <owner> -- '{repo.get('gate') or '<gate>'}'` "
+         "from the checkout's top level, commit every file the gate changed, then push")
+    if since:
+        r += ("; the gate ran on a different tree: commit these, or restore them (`git checkout -- <path>` for a "
+              "tracked file, delete for an untracked one) and re-run the gate: " + ', '.join(since[:10]))
+    return r
+
+
+def receipt_check(repo, cwd):
+    """None when the tree at `cwd`'s HEAD may be pushed, else the deny reason."""
+    top = state.toplevel(cwd)
+    tree = state.git(top, 'rev-parse', 'HEAD^{tree}') if top else None
+    if not tree:
+        return receipt_reason(repo, None)
+    tree = tree.strip()
+    if any(os.path.exists(os.path.join(d, 'gate', tree)) for d in repo.dirs):
+        return None
+    since = None
+    for d in repo.dirs:
+        last = state.read_json(state.last_path(d, top))
+        names = changed(top, last['tree'], tree) if isinstance(last, dict) and last.get('tree') else None
+        if names is not None:
+            since = [p for p in names if not exempt(repo, p, receipt=True)]
+            if not since:
+                return None
+            break
+    base = state.git(top, 'merge-base', f'origin/{default_branch(top)}', 'HEAD')
+    names = changed(top, base.strip(), 'HEAD') if base else None
+    if names is not None and all(exempt(repo, p) for p in names):
+        return None
+    return receipt_reason(repo, since)
+
+
+def is_push_trigger(c):
+    return (c.prog, c.sub) in (('git', 'push'), ('gh', 'pr create'), ('gt', 'submit'))
+
+
+def gate_before_push(h, sc):
+    gate_in_call = any(s.words and any(os.path.basename(w) == 'gate-lock.sh' for w in s.words) for s in sc.segs)
+    for c in sc.cmds:
+        if not is_push_trigger(c):
+            continue
+        repo = cmd_repo(c, h)
+        if not h.active(repo, 'gate_before_push'):
+            continue
+        h.touch.add(repo)
+        if c.args is None or c.cwd is None or gate_in_call:
+            h.deny(UNREADABLE)
+        elif c.sub == 'push' and shellscan.push_info(c.args, default_branch(c.cwd))[0]:
+            continue
+        else:
+            why = receipt_check(repo, c.cwd)
+            if why:
+                h.deny(why)
+
+
+BASH_PIECES[1] = gate_before_push
+
+
 # ---- pretool / posttool ---------------------------------------------------------------------------
 
 def pretool(h):
