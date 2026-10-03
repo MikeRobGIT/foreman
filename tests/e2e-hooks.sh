@@ -41,7 +41,8 @@ export PATH=$T/bin:$PATH
 
 git init -q --bare -b main "$T/origin.git"
 git clone -q "$T/origin.git" "$T/repo" 2>/dev/null
-cd "$T/repo" && git symbolic-ref HEAD refs/heads/main
+cd "$T/repo" || exit 1
+git symbolic-ref HEAD refs/heads/main
 mkdir -p .claude
 printf -- '---\ngate: echo gated\nforbid_trailers: [Co-Authored-By]\n---\n' >.claude/foreman.config.md
 printf '# Backlog\n\n| IB-1 | Shipped already | low | done (#1) | x | s |\n' >.claude/improvement-backlog.md
@@ -77,8 +78,10 @@ sid = sys.argv[1]
 for p in glob.glob(os.path.expanduser(f'~/.claude/projects/*/{sid}/subagents/agent-*.jsonl')):
     for l in open(p):
         d = json.loads(l)
-        if d.get('type') == 'assistant' and 'foreman worker briefing (batch e2e1)' in json.dumps(d.get('message', {}).get('content', '')):
-            sys.exit(0)
+        if d.get('type') == 'assistant':
+            content = json.dumps(d.get('message', {}).get('content', ''))
+            if 'foreman worker briefing (batch e2e1)' in content or 'You run steps 2-8' in content:
+                sys.exit(0)
 sys.exit(1)
 PY
 }

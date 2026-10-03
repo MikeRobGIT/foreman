@@ -14,8 +14,6 @@ record lands where the hooks look and is bound to this session:
 
 Every hook fails open on its own errors (stderr note, exit 0), except piece 1's undeterminable diff.
 """
-import contextlib
-import io
 import json
 import os
 import re
@@ -1455,17 +1453,17 @@ class _CaptureStdout:
     """Captures writes to stdout while forwarding them to the original stdout."""
     def __init__(self, original):
         self.original = original
-        self.buffer = []
+        self.chunks = []
 
     def write(self, s):
-        self.buffer.append(s)
+        self.chunks.append(s)
         return self.original.write(s)
 
     def flush(self):
         return self.original.flush()
 
     def getvalue(self):
-        return ''.join(self.buffer)
+        return ''.join(self.chunks)
 
     def __getattr__(self, name):
         return getattr(self.original, name)
@@ -1503,7 +1501,10 @@ def main(argv):
                 fn(Hook(inp))
             finally:
                 sys.stdout = old_stdout
-            trace(event, inp, capture.getvalue())
+                try:
+                    trace(event, inp, capture.getvalue())
+                except Exception:
+                    pass
     except Exception as e:  # fail open
         print(f'foreman hook error: {type(e).__name__}: {e}', file=sys.stderr)
 
