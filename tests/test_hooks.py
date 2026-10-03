@@ -835,6 +835,12 @@ class GateBeforePushTest(Case):
         self.assertIsNone(self.fx.bash('gh pr create --fill'))
         self.assertIsNone(self.fx.bash('gt submit'))
 
+    def test_gh_pr_new_is_gh_pr_create(self):
+        self.fx.commit('app.py', 'print(2)\n')
+        self.assertIn('no passing gate for this tree', self.fx.bash('gh pr new --fill'))
+        self.fx.gate()
+        self.assertIsNone(self.fx.bash('gh pr new --fill'))
+
     def test_an_older_receipt_still_matches_its_tree(self):
         self.fx.commit('app.py', 'print(2)\n')
         self.fx.gate()
@@ -2245,6 +2251,7 @@ class SpecGateTest(Case):
     def test_pushes_are_denied_before_release(self):
         self.assertIn("isn't released yet", self.fx.bash('git push -u origin HEAD', agent='a1', cwd=self.wt))
         self.assertIn("isn't released yet", self.fx.bash('gh pr create --fill', agent='a1', cwd=self.wt))
+        self.assertIn("isn't released yet", self.fx.bash('gh pr new --fill', agent='a1', cwd=self.wt))   # gh's alias
         self.assertIn("isn't released yet", self.fx.bash('gt submit', agent='a1', cwd=self.wt))
 
     def test_after_release_everything_passes(self):
@@ -2278,6 +2285,20 @@ class SpecGateTest(Case):
         self.assertIn('this commit would include app.py', why)
         self.assertNotIn('spec draft', why)
 
+    def test_the_first_value_letter_of_a_cluster_takes_the_rest_of_it_not_the_next_word(self):
+        # `-mtest` is `-m test`: the word after it is a pathspec
+        for cmd in ('git commit -q -mtest app.py', 'git commit -mspec app.py', 'git commit -qmtest app.py',
+                    'git commit -sm spec app.py'):
+            self.assertIn('this commit would include app.py', self.fx.bash(cmd, agent='a1', cwd=self.wt), cmd)
+
+    def test_an_attached_message_is_not_a_flag_cluster(self):
+        # `-mupdate` holds an `a`, but it is a message: it must not read as `-a`
+        self.commit_spec()
+        git(self.wt, 'add', self.spec())
+        write(os.path.join(self.wt, 'app.py'), 'print(2)\n')   # modified, not staged
+        self.assertIsNone(self.fx.bash('git commit -mupdate', agent='a1', cwd=self.wt))
+        self.assertIn('app.py', self.fx.bash('git commit -a -mupdate', agent='a1', cwd=self.wt))
+
     def test_a_non_ascii_path_in_the_spec_dir_is_inside_it(self):
         write(self.spec('café.md'), '# spec\n')
         git(self.wt, 'add', '-A')
@@ -2304,6 +2325,56 @@ class SpecGateTest(Case):
         os.symlink(self.wt, link)
         self.assertIsNone(self.fx.bash('git commit -m s docs/superpowers/specs/plan.md', agent='a1', cwd=link))
         self.assertIn('this commit would include app.py', self.fx.bash('git commit -m s app.py', agent='a1', cwd=link))
+
+    OWN_CALL = 'commit in its own call (after `git add <spec path>`), so foreman can see what it commits'
+
+    def test_a_commit_after_anything_but_cd_and_git_add_is_denied(self):
+        # same-call writers that the staged/-a read can't see: the commit runs after they do
+        for cmd in ("echo 'x' > app.py && git commit -am spec",
+                    "python3 -c \"open('gen.py', 'w').write('x = 1')\" && git add -A && git commit -m spec",
+                    'git rm app.py && git commit -m x', 'git mv app.py docs/superpowers/specs/app.py && git commit -m x',
+                    'git stage app.py && git commit -m x', 'git apply --cached p.patch && git commit -m x',
+                    'git cherry-pick -n abc1234 && git commit -m x', 'git merge --squash other && git commit -m x',
+                    'git status && git commit -m x', 'git add -A | cat; git commit -m x',
+                    "echo 'x' > app.py && gt create -a -m x", 'git commit -m a && git commit -m b',
+                    'echo "$(git commit -m x)"', 'msg=$(git commit -m x)'):   # a commit that isn't its own segment
+            self.assertIn(self.OWN_CALL, self.fx.bash(cmd, agent='a1', cwd=self.wt) or '', cmd)
+
+    def test_cd_pushd_and_git_add_may_come_before_the_commit(self):
+        write(self.spec(), '# spec\n')
+        git(self.wt, 'add', self.spec())
+        for cmd in ('git commit -m x', f'git add {self.spec()} && git commit -m x', f'cd {self.wt} && git commit -m x',
+                    f'pushd {self.wt} && git commit -m x', f'(cd {self.wt} && git commit -m x)',
+                    f'cd {self.wt}; git add {self.spec()}; git commit -m x'):
+            self.assertIsNone(self.fx.bash(cmd, agent='a1', cwd=self.fx.work if cmd.startswith(('cd', 'pushd', '(')) else self.wt),
+                              cmd)
+
+    def test_every_git_add_in_the_call_counts_as_staged_even_inside_a_substitution(self):
+        why = self.fx.bash('git commit -m "$(git add app.py; echo x)"', agent='a1', cwd=self.wt)
+        self.assertIn('this commit would include app.py', why)
+
+    def test_pathspec_from_file_is_unknowable(self):
+        for cmd in ('git commit --pathspec-from-file=paths.txt -m x', 'git commit --pathspec-from-file paths.txt -m x'):
+            self.assertIn("foreman couldn't tell what this commit would include",
+                          self.fx.bash(cmd, agent='a1', cwd=self.wt), cmd)
+
+    def test_gt_update_stages_tracked_files_like_all_minus_untracked(self):
+        self.commit_spec()   # the spec is tracked and modified
+        write(os.path.join(self.wt, 'new.py'), 'x = 1\n')   # untracked
+        for cmd in ('gt create -u -m wip', 'gt modify --update', 'gt modify -um wip'):
+            self.assertIsNone(self.fx.bash(cmd, agent='a1', cwd=self.wt), cmd)
+        write(os.path.join(self.wt, 'app.py'), 'print(2)\n')   # tracked and modified
+        for cmd in ('gt create -u -m wip', 'gt modify --update', 'gt modify -um wip'):
+            self.assertIn('this commit would include app.py', self.fx.bash(cmd, agent='a1', cwd=self.wt), cmd)
+
+    def test_a_git_failure_reading_the_staged_paths_is_couldnt_tell(self):
+        gitdir = git(self.wt, 'rev-parse', '--absolute-git-dir').strip()
+        with open(os.path.join(gitdir, 'index'), 'w') as f:
+            f.write('not an index')
+        for cmd in ('git commit -m x', 'git commit -a -m x', 'gt create -a -m x'):
+            why = self.fx.bash(cmd, agent='a1', cwd=self.wt)
+            self.assertIn("foreman couldn't tell what this commit would include", why, cmd)
+            self.assertIn(self.OWN_CALL, why, cmd)
 
     def test_all_stages_untracked_files_for_gt_and_git_add_but_not_for_git_commit(self):
         write(os.path.join(self.wt, 'new.py'), 'x = 1\n')   # untracked, nothing tracked is modified

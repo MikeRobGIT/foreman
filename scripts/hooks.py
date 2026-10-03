@@ -565,7 +565,7 @@ def receipt_check(repo, cwd):
 
 
 def is_push_trigger(c):
-    return (c.prog, c.sub) in (('git', 'push'), ('gh', 'pr create'), ('gt', 'submit'))
+    return (c.prog, c.sub) in (('git', 'push'), ('gh', 'pr create'), ('gh', 'pr new'), ('gt', 'submit'))
 
 
 def gate_before_push(h, sc):
@@ -1232,6 +1232,7 @@ GIT_COMMIT_VALUE_OPTS = ('-m', '--message', '-F', '--file', '-C', '--reuse-messa
                          '--template', '--author', '--date', '--cleanup', '--fixup', '--squash', '--trailer',
                          '--pathspec-from-file')
 COMMITS = (('git', 'commit'), ('gt', 'create'), ('gt', 'modify'))
+OWN_CALL = 'commit in its own call (after `git add <spec path>`), so foreman can see what it commits'
 
 
 def gated_batch(h, repo):
@@ -1256,19 +1257,29 @@ def in_spec_dir(repo, rel):
     return rel == d or rel.startswith(d + '/')
 
 
+class Unreadable(Exception):
+    """git couldn't say which paths a commit would include."""
+
+
+def git_names(top, *args):
+    out = state.git(top, *args)
+    if out is None:
+        raise Unreadable(' '.join(args))
+    return out.split('\0')
+
+
 def diff_names(top, *args):
     """Top-level-relative paths of `git diff --name-only`. NUL-separated: without -z git quotes a path with
     non-ASCII characters, and the quoted form is never inside a directory. --no-renames: a move into the spec
     directory would otherwise name only its new path, hiding the file it deleted."""
-    return [p for p in (state.git(top, 'diff', '--name-only', '-z', '--no-renames', *args) or '').split('\0') if p]
+    return [p for p in git_names(top, 'diff', '--name-only', '-z', '--no-renames', *args) if p]
 
 
 def changed_paths(top, everything):
     """Top-level-relative paths: modified tracked files, plus untracked ones when `everything`."""
     if not everything:
         return diff_names(top)
-    toks = (state.git(top, 'status', '--porcelain', '-uall', '-z', '--no-renames') or '').split('\0')
-    return [t[3:] for t in toks if len(t) > 3]
+    return [t[3:] for t in git_names(top, 'status', '--porcelain', '-uall', '-z', '--no-renames') if len(t) > 3]
 
 
 def under(top, cwd, path):
@@ -1277,24 +1288,36 @@ def under(top, cwd, path):
 
 
 def commit_words(args):
-    """`-am msg` as `-a -m msg`: a short-flag cluster ending in an option that takes a value."""
+    """`git commit`'s words with each short-flag cluster split as git reads it, left to right: the first letter that
+    takes a value takes the rest of the cluster as that value (`-mtest` is `-m test`), or the next word when it
+    ends the cluster (`-am msg` is `-a -m msg`)."""
     out = []
     for a in args:
-        if re.match(r'^-[A-Za-z]{2,}$', a) and '-' + a[-1] in GIT_COMMIT_VALUE_OPTS:
-            out += ['-' + a[1:-1], '-' + a[-1]]
-        else:
+        k = None
+        if re.match(r'^-[A-Za-z]+$', a):
+            k = next((i for i, ch in enumerate(a) if i and '-' + ch in GIT_COMMIT_VALUE_OPTS), None)
+        if k is None:
             out.append(a)
+        else:
+            out += (['-' + a[1:k]] if k > 1 else []) + ['-' + a[k]] + ([a[k + 1:]] if a[k + 1:] else [])
     return out
 
 
-def commit_paths(c, sc, top):
-    """The paths a `git commit` / `gt create|modify` would commit, or None when they can't be told."""
-    if c.args is None or c.cwd is None:
-        return None
+def alone(c, sc):
+    """True when nothing but `cd`, `pushd` and `git add` runs before the top-level command c in its call. Anything
+    else (a redirect, a script, `git rm`, `git mv`, `git apply --cached`, ...) may write files or stage paths after
+    this hook has read the tree, so a commit that follows it can't be judged."""
+    k = next((i for i, s in enumerate(sc.segs) if (s.start, s.end) == (c.start, c.end)), None)
+    if k is None:
+        return False
+    adds = {(a.start, a.end) for a in sc.cmds if (a.prog, a.sub) == ('git', 'add')}
+    return all(s.words == [] or (bool(s.words) and (s.words[0] in ('cd', 'pushd') or (s.start, s.end) in adds))
+               for s in sc.segs[:k])
+
+
+def would_commit(c, sc, top):
     paths = set(diff_names(top, '--cached'))
-    for a in sc.cmds:   # an earlier `git add` in the same command stages its paths
-        if a is c:
-            break
+    for a in sc.cmds:   # every `git add` in the call stages its paths, one inside a substitution too
         if (a.prog, a.sub) == ('git', 'add') and a.args is not None and a.cwd:
             named = [p for p in positionals(a.args, ('--pathspec-from-file', '--chmod')) if p]
             if has_flag(a.args, ('-A', '--all')) or '.' in named or not named:
@@ -1303,11 +1326,24 @@ def commit_paths(c, sc, top):
     if c.prog == 'gt':
         if has_flag(c.args, ('--all', '-a')):
             paths |= set(changed_paths(top, everything=True))
+        elif has_flag(c.args, ('--update', '-u')):
+            paths |= set(changed_paths(top, everything=False))
         return paths
     args = commit_words(c.args)
+    if any(a == '--pathspec-from-file' or a.startswith('--pathspec-from-file=') for a in args):
+        return None   # the paths are in a file
     if has_flag(args, ('--all', '-a')):
         paths |= set(changed_paths(top, everything=False))
     return paths | {under(top, c.cwd, p) for p in positionals(args, GIT_COMMIT_VALUE_OPTS)}
+
+
+def commit_paths(c, sc, top):
+    """The paths a `git commit` / `gt create|modify` would commit, or None when they can't be told: a path file, or
+    a git that failed (nothing changed would be a guess)."""
+    try:
+        return would_commit(c, sc, top)
+    except Unreadable:
+        return None
 
 
 def spec_gate(h, sc):
@@ -1325,10 +1361,13 @@ def spec_gate(h, sc):
         if push:
             h.deny(spec_reason(batch) + " (the spec phase doesn't push)")
             continue
-        top = state.toplevel(c.cwd) if c.cwd else None
+        top = state.toplevel(c.cwd) if c.cwd and c.args is not None else None
+        if top and not alone(c, sc):
+            h.deny(spec_reason(batch) + '; ' + OWN_CALL)
+            continue
         paths = commit_paths(c, sc, top) if top else None
         if paths is None:
-            h.deny(spec_reason(batch) + "; foreman couldn't tell what this commit would include")
+            h.deny(spec_reason(batch) + "; foreman couldn't tell what this commit would include; " + OWN_CALL)
             continue
         outside = sorted(p for p in paths if not in_spec_dir(repo, p))
         if outside:
