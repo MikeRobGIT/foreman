@@ -534,6 +534,16 @@ check "pre-check: ...and has every section" test -z "$(missing "$T/spec-filled.m
 grep -vx '## Risks' "$T/spec-filled.md" >"$T/spec-norisks.md"
 check "pre-check names a missing section" test "$(missing "$T/spec-norisks.md")" = 'missing section: ## Risks'
 
+echo "## spec-phase config defaults"
+nc() { FOREMAN_CONFIG=/nonexistent python3 "$root/scripts/cfg.py" "$T" "$@"; }
+check "default design_spec_dir" test "$(nc design_spec_dir)" = docs/superpowers/specs
+check "default spec_review_rounds" test "$(nc spec_review_rounds)" = 3
+check "default spec_phase_timeout" test "$(nc spec_phase_timeout)" = 60
+check "e2e's spec_dir is a different key (no default)" test -z "$(nc spec_dir)"
+printf -- '---\nspec_review_rounds: 2\n---\n' >"$T/sr.md"
+check "a config value wins over the default" test "$(FOREMAN_CONFIG=$T/sr.md python3 "$root/scripts/cfg.py" "$T" spec_review_rounds)" = 2
+check "template: the spec-phase keys, once each, with their defaults" test "$(grep -cE '^(design_spec_dir: docs/superpowers/specs|spec_review_rounds: 3|spec_phase_timeout: 60) ' "$root/templates/foreman.config.md")" = 3
+
 echo "## backlog.py + ui.py"
 check "test_backlog.py" python3 "$root/tests/test_backlog.py"
 check "test_ui_api.py" python3 "$root/tests/test_ui_api.py"

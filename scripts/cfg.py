@@ -119,6 +119,8 @@ DEFAULTS = {
     'worker_agent_types': ['general-purpose', 'workflow-subagent'],
     'hooks_disabled': [],
     'design_spec_dir': 'docs/superpowers/specs',
+    'spec_review_rounds': '3',
+    'spec_phase_timeout': '60',
     'status_pane': 'true',
 }
 
