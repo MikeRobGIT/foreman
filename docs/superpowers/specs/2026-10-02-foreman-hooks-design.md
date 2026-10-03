@@ -5,7 +5,13 @@ Status: draft for review, revision 4 (2026-10-02). The findings so far:
 - revision 2: 2 Critical, 3 Important, 6 Minor, plus 8 partials;
 - revision 3: 1 Critical, 4 Important, 8 Minor.
 
-Revision 4 makes the scan anchor on any git/gh/gt word, keeps quoted newlines and heredocs from splitting commands, makes the run and release controls orchestrator-only, and makes the spec gate opt-in per batch. Branch `feat/hooks`. Target version 0.4.0. This depends on the parallel spec-phase design (`feat/spec-phase`, see Interactions).
+Revision 4 made the scan anchor on any git/gh/gt word, kept quoted newlines and heredocs from splitting commands, made the run and release controls orchestrator-only, and made the spec gate opt-in per batch. Its review found 2 Important and 8 Minor issues. Revision 5:
+- restricts receipt matching to the files that were untracked when the receipt was minted;
+- classifies `gh api` by method and path;
+- pins the heredoc, tag and batch-name rules;
+- lists the remaining scan gaps as accepted limits.
+
+Branch `feat/hooks`. Target version 0.4.0, which ships first. The parallel spec phase (`feat/spec-phase`, 0.5.0) relies on these hooks for enforcement; see Interactions.
 
 ## Purpose
 
@@ -76,7 +82,7 @@ The user approved the spec gate on 2026-10-02. It enforces the spec-phase rule "
 - No `WorktreeCreate`, no plan-mode warning, no `prompt`- or `agent`-type hooks, and no mod-registered tools.
 - No enforcement of anything the user runs. Hooks see only Claude's tool calls; `! <command>` is the user's override.
 - No guarding of Bash-driven writes to the backlog or rules files (a `python3 -c` that edits them). `bk.py` validates its own writes.
-- No defence against deliberate obfuscation (`eval`, base64). These are guardrails.
+- No defence against deliberate obfuscation (`eval` of built strings, base64), and no detection of commands fed to a shell's stdin (`echo 'git push' | bash`, `bash -s <<<'…'`). These are guardrails against mistakes.
 
 ## Architecture
 
@@ -97,7 +103,9 @@ Every handler is `type: command`, in exec form: `python3 ${CLAUDE_PLUGIN_ROOT}/s
 - **SessionEnd** → `run-end`.
 - **PreToolUse** with matcher `Bash` and **no `if:`** → `pretool`. On a Bash command that names no `git`, `gh` or `gt`, the script returns within milliseconds of its own start. It does no git work for those.
 - **PreToolUse** with matcher `Edit|Write|MultiEdit|NotebookEdit` → `pretool`.
-- **PostToolUse** with matcher `Edit|Write|MultiEdit` → `posttool`. Also matcher `Bash` → `posttool`, which acts only on the main session's `hooks.py run-end` and exits at once otherwise.
+- **PostToolUse** with matcher `Edit|Write|MultiEdit` → `posttool`. Also matcher `Bash` → `posttool`.
+  - Before any import or the common path, the Bash handler checks for no `agent_id` and for `hooks.py run-end` in the command text, and exits at once otherwise. That is one `json.load` per Bash call.
+  - The `hooks.py` CLIs always exit 0 for `run-end`, so PostToolUse fires whether or not it fires on a non-zero exit (the plan probes this as P8).
 - **SubagentStart** → `subagent-start`.
 - **SubagentStop** → `subagent-stop`.
 - **PermissionRequest** with matcher `Bash` → `permission`.
@@ -115,7 +123,7 @@ Two review rounds showed that parsing Bash keeps missing forms. Detection is the
 1. **Heredocs first:**
    - Find each `<<[-~]? *['"]?WORD['"]?` and its body, up to the line equal to `WORD`. `<<<` is a here-string, not a heredoc.
    - A heredoc whose command is a shell (`bash`, `sh` or `zsh`, with any options, including `-s`) is scanned recursively as commands.
-   - Every other heredoc body is blanked and attributed to the segment holding its `<<`. Piece 4 reads it from there.
+   - Every other heredoc body is blanked. For piece 4 it belongs to EVERY candidate whose text span contains it, including one nested in `$(…)`. The Claude Code forms `git commit -m "$(cat <<'EOF' … EOF)"` and `gh pr create --body "$(cat <<'EOF' … EOF)"` are therefore checked through their heredoc. A test covers each, with an inner `"two words"` and a footer.
 2. **Recursion:** scan recursively, once per level:
    - the argument of a shell's `-[a-z]*c[a-z]*` option (`-c`, `-lc`, `-ec`, …);
    - `eval`'s arguments;
@@ -126,7 +134,8 @@ Two review rounds showed that parsing Bash keeps missing forms. Detection is the
 4. **Split** the blanked text into segments at:
    - `;`, `&&`, `||`, `|`, `|&` and `&`;
    - newlines;
-   - `(`, `)`, `{` and `}`;
+   - `(` and `)`;
+   - `{` and `}` only when they stand alone as words (so `repos/{owner}/{repo}/…` stays one word);
    - the words `then`, `do`, `else`, `elif`, `if`, `while`, `until`, `!` and `time`.
 
    A `cd` inside `( … )` scopes only to the end of that group.
@@ -137,9 +146,15 @@ Two review rounds showed that parsing Bash keeps missing forms. Detection is the
    - **Assignments and `env`:** a `VAR=` assignment or an `env` anywhere before the candidate is recorded, because piece 8 needs it.
 6. **Classify each candidate, using `shlex.split` words** from the original text of the candidate's segment:
    - **`git`:** skip global options (`-C <p>`, `-c <k=v>`, `--git-dir=…`, `--work-tree=…`, `--no-pager`, other `-x`/`--x`); the next word is the subcommand.
-   - **`gh`:** skip global flags (`-R <repo>`, `--repo <repo>`) before and after `pr`; then `gh pr <verb>`. Also `gh api` with a path matching `pulls/\d+/merge`, or a body containing `mergePullRequest`, classifies as **`gh pr merge`**.
-   - **`gt`:** `gt <verb>`.
-   - **Effective directory:** from the last preceding in-scope `cd <p>`, then `git -C <p>`. Unknown with `--git-dir` or `--work-tree`.
+   - **`gh`:** skip global flags (`-R <repo>`, `--repo <repo>`) before and after `pr`; then `gh pr <verb>`.
+     - **`gh api`** is a **merge** when its method isn't GET, meaning an explicit `-X`/`--method` other than GET, or any `-f`, `-F`, `--field`, `--raw-field` or `--input` (which make gh default to POST). In addition, either:
+       - its path matches `pulls/[^/]+/merge`, `/merges\b` or `git/refs/`, with `$VAR` and `{placeholder}` segments matching `[^/]+`; or
+       - its path is `graphql` and the query contains `mergePullRequest` or `enablePullRequestAutoMerge`.
+     - **A subagent's non-GET `graphql` call** whose query comes from a file (`-F query=@…`, `--input`), so it can't be read, is a merge too, failing closed.
+     - **A GET** of `pulls/N/merge` ("is it merged?") is not a merge.
+   - **`gt`:** `gt <verb>`, with Graphite's built-in aliases resolved: `s` and `ss` mean `submit`, `m` means `modify`, `c` means `create`.
+   - **`git pull`** with `--rebase` or `-r` counts as a **rebase** for piece 2.
+   - **Effective directory:** from the last preceding in-scope `cd <p>` or `pushd <p>`, then `git -C <p>`. It is unknown with `--git-dir` or `--work-tree`, or with a `GIT_DIR=` or `GIT_WORK_TREE=` assignment.
    - **Arguments:** from `shlex.split`. If that fails, they are unknown.
 7. **On failure** (unbalanced quotes, an unterminated heredoc), pieces 1–4 regex-scan the raw text (`\bgit\b[^\n]*\bpush\b`, `\bgh\b[^\n]*\bmerge\b`, `\bgt\s+(submit|merge|modify)\b`, …). Every match is treated as a command with unknown arguments. Piece 8 gives no decision.
 
@@ -219,7 +234,10 @@ Two review rounds showed that parsing Bash keeps missing forms. Detection is the
 - **When none holds:**
   - The push is denied: "foreman: no passing gate for this tree — run `<plugin>/scripts/gate-lock.sh <owner> -- '<gate>'` from the checkout's top level, commit every file the gate changed, then push."
   - When a last receipt exists, the reason also lists up to 10 paths changed since it, so a gate that reformats files outside the batch is visible.
-- **When the diff can't be determined** (no `origin/<default>`, a failing git, unknown arguments, or an unknown effective directory), the push is denied with the same reason. This is the stated fail-closed exception.
+- **When the diff can't be determined** (no `origin/<default>`, or a failing git), the push is denied with the receipt reason. This is the stated fail-closed exception.
+- **When the command can't be read** (unknown arguments, an unknown effective directory, or the step-7 fallback), the push is denied with its own reason: "foreman couldn't read this command. Run the gate, then push with a plain `git push` in its own call."
+  - A `gate-lock.sh … && git push` in one call is denied the same way, because the receipt doesn't exist yet when `pretool` runs.
+  - shlex words are built from the text with comments blanked, so `git push -u origin HEAD  # note` reads cleanly.
 - **Refspecs** are read from the segment's arguments:
   - **a delete** (`--delete`, `-d`, or a refspec starting with `:`) is allowed;
   - **a `+` refspec** is a force push (piece 2).
@@ -233,7 +251,10 @@ Two review rounds showed that parsing Bash keeps missing forms. Detection is the
     - there was no `--name`;
     - the exit code is 0.
     Extra gates never mint, because their `when:` can't be checked.
-  - **Matching:** a receipt matches a push when `HEAD^{tree}` differs from the receipt tree only by paths ABSENT from HEAD. Those are untracked files the gate saw and nobody committed: scratch files, or leftovers from before the gate. Any other difference means the gate didn't see this code.
+  - **Matching:** the receipt records `untracked_at_mint`, the untracked, non-ignored paths that went into its tree.
+    - It matches a push when `HEAD^{tree}` differs from the receipt tree only by paths that are in `untracked_at_mint` and absent from HEAD: scratch files nobody committed.
+    - Any other difference denies. That includes a tracked file deleted after the gate, and a new file the gate saw that `git commit -am` left out.
+    - The reason lists the paths: "the gate ran with these files; commit them, or delete them and re-run the gate". Paths matching `gate_exempt` are ignored.
   - **The tree** is that of the working copy at the end:
     1. copy the checkout's real index (`git rev-parse --git-path index`) to a temp file;
     2. run `GIT_INDEX_FILE=<temp> git add -A -- . ':!<new untracked paths>'`;
@@ -272,7 +293,7 @@ Two review rounds showed that parsing Bash keeps missing forms. Detection is the
   - **With unknown arguments,** the segment's raw text.
 - **Files:** a file path resolves against the effective directory; absolute paths are used as given. A file that doesn't exist yet (written earlier in the same command) is read from the heredoc that writes it if there is one, and otherwise skipped with a stderr note.
 - **Rule:** deny when a line of the message starts with a `forbid_trailers` entry after any non-word characters: `(?im)^[^\w\n]*<re.escape(entry)>`, case-insensitive. That catches `🤖 Generated with …`. Mentions inside a sentence don't count.
-  - An entry written as `/…/` is a full-line regex instead, e.g. `/Generated with \[Claude Code\]/`. That avoids false denies such as `- Generated with the seed script`. vacancy-vibe's switch-over uses the regex form for that entry.
+  - An entry written as `/…/` is a regex searched within each line of the message (not a full-line match), e.g. `/Generated with \[Claude Code\]/`. That still catches the `🤖 ` prefix. That avoids false denies such as `- Generated with the seed script`. vacancy-vibe's switch-over uses the regex form for that entry.
 - **`gh pr merge`** with any method (`--squash`, `--merge` or `--rebase`) lands the PR's commit messages unless a body replaces them.
   - The hook reads the commits from piece 3's shared `gh pr view` call. It verifies the field names (`messageHeadline`, `messageBody`) in the plan.
   - It denies when any commit message has a forbidden line and no `--body`/`--body-file` replaces it (squash), or for merge and rebase, which always keep them. The reason names the commit.
@@ -287,21 +308,21 @@ Two review rounds showed that parsing Bash keeps missing forms. Detection is the
 
 ### 6. Worker briefing (SubagentStart)
 
-- **Who gets it:** `agent_type` must be in `worker_agent_types`, default `["general-purpose", "workflow-subagent"]`. The subagent's prompt must also begin with the worker tag `foreman-worker: <batch>`, optionally followed by ` spec-phase`, read from the input or the transcript (P2).
+- **Who gets it:** `agent_type` must be in `worker_agent_types`, default `["general-purpose", "workflow-subagent"]`. The first line of the subagent's prompt must match `^foreman-worker: ([A-Za-z0-9_-]+)( spec-phase)?\s*$`, read from the input or the transcript (P2). A first line that starts with `foreman-worker:` and contains `spec-phase` in any other form still counts as spec-phase, with a stderr note.
   - With no readable tag, there is no briefing. Revision 1's "brief every worker-type subagent" fallback is dropped.
   - Workers then still get the contract the way they do today, in the dispatch prompt. SKILL.md keeps it there until P2 is confirmed.
   - The briefing does not need a run marker: the tag is the proof of a foreman worker.
 - **Content,** as `additionalContext`:
   - the `### Worker contract` section read from the installed `SKILL.md`, rendered:
     - `$FOREMAN` becomes the absolute path of the plugin's `scripts` directory. It's never left as a variable, because the Bash tool doesn't have it, and piece 8 gives no decision on `${`.
-    - `{{key}}` takes the config value, or the SKILL.md default-table value when the config lacks it;
+    - `{{key}}` is rendered first, from the config value or the SKILL.md default-table value when the config lacks it. `$FOREMAN` is rendered after, so defaults like `$FOREMAN/wt-setup.sh {worktree}` come out absolute;
     - `<prefix>` becomes `id_prefix`;
     - `<batch>` comes from the tag.
 
-    `<scratch>` and `<worktree>` stay as written, followed by a one-line legend: "<scratch> = your scratchpad dir; <worktree> = your current checkout's top level".
+    `<scratch>` and `<worktree>` stay as written, followed by a one-line legend: "<scratch> = your scratchpad dir; <worktree> and {worktree} = your current checkout's top level; {repo} = the main checkout".
   - then `gate`, `forbid_trailers` and `shared_resources`.
   - Cap: 8 KB. Over the cap, `shared_resources` is truncated first, never the contract.
-- **The briefing records `agent_id → {batch, spec}`** as one file per agent, `state_dir/batches/<session_id>/agents/<agent_id>`, written atomically (temp file plus rename). `spec` is true when the tag ends with ` spec-phase`. Workers launched in one message can't lose each other's entries. Piece 10 needs it. Batch names are dated, `<YYYYMMDD>-w<n><x>` (spec-phase W2), so they're unique across invocations, and the map isn't keyed by session. Entries are pruned with the batch files.
+- **The briefing records `agent_id → {batch, spec}`** as one file per agent, `state_dir/batches/<session_id>/agents/<agent_id>`, written atomically (temp file plus rename). `spec` is true when the tag carries ` spec-phase`. Workers launched in one message can't lose each other's entries. Piece 10 needs it. Batch names are `<YYYYMMDD-HHMM>-w<n><x>` (spec-phase W2), unique across invocations and `/loop` ticks. Entries are pruned with the batch files.
 - **Dispatch prompts keep:** the batch, rows, owned files, test-data id prefix, the resolved plugin path, and W6's inline rule notes from an unmerged bookkeeping PR.
 
 ### 7. Report check (SubagentStop)
@@ -309,10 +330,13 @@ Two review rounds showed that parsing Bash keeps missing forms. Detection is the
 - **Same who-test as piece 6.** The tag comes from the first user message in `agent_transcript_path`. With no tag, the stop is allowed.
 - **When `stop_hook_active` is true,** the stop is allowed. The check blocks at most once per stop.
 - **Spec-phase batches** (piece 6 recorded `spec: true`) with no valid release:
-  - a stop whose last message has a line starting with `SPEC READY ` is allowed;
+  - **Spec-ness** comes from the tag (read again from the transcript), so it holds even without piece 6's map (P2).
+  - a stop is allowed when its last message has a line starting with `SPEC READY `. That is the same rule the orchestrator uses: the first such line.
   - any other stop is blocked once: "you're in the spec phase: finish the spec and end with `SPEC READY <worktree> <branch> <spec path> <sha>` as the first line".
   - After release, `SPEC READY` no longer skips the check.
-- **A stopping batch** (the file `batches/<session_id>/<batch>.stopped` exists, written by `hooks.py stopping <batch>` before a TaskStop) is always allowed to stop (P7).
+- **A stopping batch** is always allowed to stop (P7). That means the file `batches/<session_id>/<batch>.stopped` exists.
+  - Like `release`, `pretool` writes it from its own hook input when the main session runs `hooks.py stopping <batch>`, and the script exits 1 if it's missing.
+  - SKILL.md runs it before every TaskStop of a tagged worker: parking, W6's stuck worker, and W4.4's replacement.
 - **Otherwise,** it takes the last fenced `json` block in `last_assistant_message`:
   - **Missing:** block with "end your report with ONE fenced json block in the worker contract's format, even if empty".
   - **Invalid JSON:** block, quoting the parse error.
@@ -339,7 +363,10 @@ Only Bash is considered. Anything that doesn't match every rule below gets no de
   - **`review.sh [--spec <path>] <base> <logfile>`:** the effective directory is a worktree of this repo. Both scripts read config from that worktree's MAIN checkout, never from the directory itself. Otherwise a planted config could run any `worktree_install` or `custom` reviewer command. The scripts keep honouring `FOREMAN_CONFIG` for tests, which is safe because an env prefix gets no decision here.
   - **`bk.py`:** subagents only with `--dry-run`.
   - **`hooks.py`:** only `run-end`, `release <batch> <sha>` or `stopping <batch>`, and only for the main session (no `agent_id`). Piece 8 never allows `hooks.py` for a subagent.
-- **Argument charset** for every allowed script: each argument matches `[A-Za-z0-9._/@~^+:=-]+`, and none starts with `-` except the scripts' own options (`--`, `--check`, `--spec`, `--dry-run`). The one exception is gate-lock's gate argument, which must equal the config value exactly.
+- **Argument charset** for every allowed script:
+  - no argument contains a quote, `$`, backtick, `\`, `;`, `|`, `&`, `<`, `>` or a control character;
+  - spaces are allowed, because the scripts quote their arguments;
+  - none starts with `-`, except the scripts' own options (`--`, `--check`, `--spec`, `--dry-run`). The one exception is gate-lock's gate argument, which must equal the config value exactly.
 - **The config file is write-protected for subagents** by piece 2.
 - **On a match:** `{"hookSpecificOutput":{"hookEventName":"PermissionRequest","decision":{"behavior":"allow"}}}`.
 - **Other commands:** the README gives a `permissions.allow` snippet for the rest of the worker contract:
@@ -379,7 +406,8 @@ Only Bash is considered. Anything that doesn't match every rule below gets no de
     - the staged paths come from `git diff --cached --name-only` in the effective directory;
     - with `-a`/`--all`, the modified tracked files count too;
     - with a pathspec, `-i` or `-o`, the named paths count too;
-    - `gt create -a` and `gt modify -a` are judged the same way.
+    - `gt create -a`/`--all` and `gt modify -a`/`--all` are judged the same way;
+    - a `git add <paths>` (or `-A`/`.`, which means every changed path) earlier in the same command counts as staged for a later `git commit` in that command.
 
     This catches code written through Bash, which the Edit rule can't see.
   - `git push`, `gh pr create` and `gt submit`. The spec phase doesn't push.
@@ -401,6 +429,7 @@ Only Bash is considered. Anything that doesn't match every rule below gets no de
 | `gate_exempt` | `["docs/**", "**/*.md"]` | gitignore-style patterns a push may touch without a gate receipt; `backlog_path` and `rules_glob` are always exempt (piece 1) |
 | `worker_agent_types` | `["general-purpose", "workflow-subagent"]` | subagent types eligible for pieces 6 and 7 |
 | `hooks_disabled` | `[]` | piece ids to turn off in this repo |
+| `design_spec_dir` | `docs/superpowers/specs` | read by piece 10; the default lives in `cfg.py` from 0.4.0, and the spec phase documents the key |
 | `status_pane` | `true` | piece 9 |
 | (none new) | | piece 10 reads `design_spec_dir` (spec-phase design) |
 
