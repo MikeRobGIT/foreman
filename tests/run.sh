@@ -475,6 +475,28 @@ check "codex review mode unchanged: review --base <base>" bash -c "grep -qx revi
 check "...no exec there" bash -c "! grep -qx exec '$CODEX_ARGS'"
 check "...review text from stdout" grep -q 'app/x.ts:3' "$T/out/cx2.log"
 check "codex.sh is marked reads-repo" grep -q '^# foreman: reads-repo' "$root/reviewers/codex.sh"
+chain 60 30 200 codex >"$T/chain.md"; PATH=$F:$PATH sv --spec "docs/my specs/d.md" "$fork" "$T/out/cx3.log"
+check "codex spec mode with no model/effort lands" grep -q '^codex' "$T/out/cx3.log.reviewer"
+chain 60 30 200 codex >"$T/chain.md"; PATH=$F:$PATH sv "$fork" "$T/out/cx4.log"
+check "codex review mode with no model/effort lands" grep -q '^codex' "$T/out/cx4.log.reviewer"
+cat >"$F/codex" <<'EOF'
+#!/bin/bash
+printf '%s\n' "$@" >"$CODEX_ARGS"; cat >"$CODEX_ARGS.stdin"
+echo 'ERROR: {"type":"error","status":429,"error":{"message":"usage limit exceeded"}}' >&2
+exit 1
+EOF
+chmod +x "$F/codex"
+cat >"$F/codex" <<'EOF'
+#!/bin/bash
+printf '%s\n' "$@" >"$CODEX_ARGS"; cat >"$CODEX_ARGS.stdin"
+out=""; prev=""
+for a in "$@"; do [ "$prev" = -o ] && out=$a; prev=$a; done
+if [ -n "$out" ]; then echo '- [P2] `Change` misses a writer. Verdict: revise' >"$out"; else echo '- [P2] app/x.ts:3 review'; fi
+exit 0
+EOF
+chmod +x "$F/codex"
+chain 60 30 200 codex >"$T/chain.md"; PATH=$F:$PATH sv --spec "docs/my specs/d.md" "$fork" "$T/out/cx5.log"
+check "codex: --color is followed by never" bash -c "grep -A1 -x -- --color '$CODEX_ARGS' | grep -qx never"
 unset CODEX_ARGS
 cd "$T"
 echo "## backlog.py + ui.py"

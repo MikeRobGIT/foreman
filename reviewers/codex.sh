@@ -13,10 +13,10 @@ args=()
 [ -n "$effort" ] && args+=(-c "model_reasoning_effort=\"$effort\"")
 err='^ERROR: \{"type":"error".*(not supported|newer version|usage limit|rate.?limit|quota|credits|unauthorized|status":(401|403|429))'
 if [ "${FOREMAN_REVIEW_MODE:-}" = spec ]; then
-  run_tool "$err" '' "$prompt" codex "${args[@]}" --sandbox read-only exec --ephemeral --color never -o "$log" -
+  run_tool "$err" '' "$prompt" codex ${args[@]+"${args[@]}"} --sandbox read-only exec --ephemeral --color never -o "$log" -
   rc=$?; [ $rc = 0 ] || exit $rc
 else
-  run_tool "$err" '' /dev/null codex "${args[@]}" --sandbox read-only review --base "$base"
+  run_tool "$err" '' /dev/null codex ${args[@]+"${args[@]}"} --sandbox read-only review --base "$base"
   rc=$?; [ $rc = 0 ] || exit $rc
   cp "$OUT" "$log"
 fi
