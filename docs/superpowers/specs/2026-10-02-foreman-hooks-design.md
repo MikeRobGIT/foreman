@@ -96,7 +96,7 @@ scripts/wt-setup.sh, scripts/review.sh   read config from the main checkout (pie
 
 Every handler is `type: command`, in exec form: `python3 ${CLAUDE_PLUGIN_ROOT}/scripts/hooks.py <event>`. `timeout` is 10, or 30 for SubagentStop.
 - **UserPromptSubmit** and **UserPromptExpansion** → `run-start`. Both are registered and handled idempotently (P1).
-- **SessionEnd** → `run-end`.
+- **SessionEnd** → `session-end`, which deletes the session's run marker only for reason `clear` or `logout` (P5). Not `run-end`: that CLI verb never reads stdin (a Bash call may hold it open), so it can't see the reason.
 - **PreToolUse** with matcher `Bash` and **no `if:`** → `pretool`. On a Bash command that names no `git`, `gh` or `gt`, the script returns within milliseconds of its own start. It does no git work for those.
 - **PreToolUse** with matcher `Edit|Write|MultiEdit|NotebookEdit` → `pretool`.
 - **PostToolUse** with matcher `Edit|Write|MultiEdit` → `posttool`. Also matcher `Bash` → `posttool`.
