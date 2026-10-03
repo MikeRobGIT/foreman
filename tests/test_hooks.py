@@ -2085,6 +2085,42 @@ class ScriptAllowTest(ScriptAllowBase):
         os.symlink(os.path.dirname(SCRIPTS), os.path.join(home, 'foreman'))
         self.assertTrue(self.allowed(f"~/foreman/scripts/gate-lock.sh w1 -- 'echo gated'"))
 
+    def test_a_quoted_tilde_path_is_literal(self):
+        """The shell expands `~` only when it is bare, so a quoted one runs `./~/...`, never the plugin."""
+        os.symlink(os.path.dirname(SCRIPTS), os.path.join(self.fx.env['HOME'], 'foreman'))
+        write(os.path.join(self.wt, '~', 'foreman', 'scripts', 'review.sh'), '#!/bin/sh\necho decoy\n')
+        args = 'origin/main /tmp/r.log'
+        self.assertTrue(self.allowed(f'~/foreman/scripts/review.sh {args}', cwd=self.wt))
+        self.assertTrue(self.allowed(f'bash ~/foreman/scripts/review.sh {args}', cwd=self.wt))
+        for exe in ("'~/foreman/scripts/review.sh'", '"~/foreman/scripts/review.sh"', "'~'/foreman/scripts/review.sh"):
+            self.assertFalse(self.allowed(f'{exe} {args}', cwd=self.wt), exe)
+            self.assertFalse(self.allowed(f'bash {exe} {args}', cwd=self.wt), exe)
+        # a bare copy of the path later in the command doesn't make the quoted executable bare
+        self.assertFalse(self.allowed(f"'~/foreman/scripts/review.sh' ~/foreman/scripts/review.sh /tmp/r.log", cwd=self.wt))
+        # a quoted word is still compared literally: the real path, quoted, is the real script
+        self.assertTrue(self.allowed(f"'{SCRIPTS}/review.sh' {args}", cwd=self.wt))
+
+    def test_an_executable_the_shell_would_expand_is_refused(self):
+        """`$HOME` and globs expand in the shell; the hook must not take a same-named decoy for the plugin."""
+        os.symlink(os.path.dirname(SCRIPTS), os.path.join(self.wt, '$HOME'))
+        for decoy in ('s*', 's?ripts', '[s]cripts', '{scripts,x}'):   # each names the plugin when taken literally
+            os.symlink(SCRIPTS, os.path.join(self.wt, decoy))
+        args = 'origin/main /tmp/r.log'
+        self.assertFalse(self.allowed(f'$HOME/scripts/review.sh {args}', cwd=self.wt))
+        self.assertFalse(self.allowed(f'./s*/review.sh {args}', cwd=self.wt))
+        self.assertFalse(self.allowed(f'./s?ripts/review.sh {args}', cwd=self.wt))
+        self.assertFalse(self.allowed(f'./[s]cripts/review.sh {args}', cwd=self.wt))
+        self.assertFalse(self.allowed(f'./{{scripts,x}}/review.sh {args}', cwd=self.wt))
+
+    def test_an_interpreter_must_match_the_script(self):
+        gate = f"{GATE_LOCK} w1 -- 'echo gated'"
+        for cmd in (f'bash {HOOKS} run-end', f'sh {HOOKS} run-end', f'python3 {SCRIPTS}/wt-setup.sh {self.wt}',
+                    f'python3 {gate}', f'bash {SCRIPTS}/bk.py {self.fx.work} /tmp/r.json'):
+            self.assertFalse(self.allowed(cmd), cmd)
+        for cmd in (f'python3 {HOOKS} run-end', f'{HOOKS} run-end', f'bash {gate}', f'sh {gate}', gate,
+                    f'bash {SCRIPTS}/wt-setup.sh {self.wt}', f'{SCRIPTS}/bk.py {self.fx.work} /tmp/r.json'):
+            self.assertTrue(self.allowed(cmd), cmd)
+
     def test_hooks_py_for_the_main_session_only(self):
         self.assertTrue(self.allowed(f'python3 {HOOKS} run-end'))
         self.assertTrue(self.allowed(f'python3 {HOOKS} release w1a abc1234'))

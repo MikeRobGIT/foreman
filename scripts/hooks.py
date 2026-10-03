@@ -1133,6 +1133,15 @@ SCRIPTS = ('gate-lock.sh', 'wt-setup.sh', 'review.sh', 'bk.py', 'hooks.py')
 OWN_OPTS = ('--', '--check', '--spec', '--dry-run')
 BAD_TEXT = re.compile(r'[\n\r`<>]|\$\(|\$\{')
 BAD_ARG = re.compile(r'[\'"$`\\;|&<>\x00-\x1f\x7f]')
+INTERPRETERS = {'python3': '.py', 'bash': '.sh', 'sh': '.sh'}   # a script runs bare or under its own interpreter
+EXPANDS = re.compile(r'[$*?\[{]')   # the shell expands these in a bare word, so the word isn't the path it names
+
+
+def bare_word(command, seg, word):
+    """True when `word` is written without quotes as the segment's first word, or right after an interpreter:
+    the only place the shell expands a leading `~`."""
+    raw = command[seg.start:seg.end]
+    return re.match(r'\s*(?:(?:python3|bash|sh)\s+)?' + re.escape(word), raw) is not None
 
 
 def plain(arg):
@@ -1183,11 +1192,17 @@ def script_allowed(h, command):
     cd = segs[0] if cmd is not segs[0] else None
     if any(s.sep not in (None, '(', ')') for s in sc.segs if s is not cd):
         return False
-    words = cmd.words[1:] if cmd.words[0] in ('python3', 'bash', 'sh') else cmd.words
+    interp = cmd.words[0] if cmd.words[0] in INTERPRETERS else None
+    words = cmd.words[1:] if interp else cmd.words
     name = os.path.basename(words[0]) if words else ''
-    if name not in SCRIPTS or cmd.cwd is None:
+    if name not in SCRIPTS or cmd.cwd is None or EXPANDS.search(words[0]):
         return False
-    exe = os.path.join(cmd.cwd, os.path.expanduser(words[0]))   # a relative path is the shell's, not the hook's
+    if interp and not name.endswith(INTERPRETERS[interp]):
+        return False
+    exe = words[0]
+    if exe.startswith('~') and bare_word(command, cmd, exe):   # a quoted `~` stays literal, as in the shell
+        exe = os.path.expanduser(exe)
+    exe = os.path.join(cmd.cwd, exe)   # a relative path is the shell's, not the hook's
     if not same_file(exe, os.path.join(HERE, name)):
         return False
     repo = repo_at(cmd.cwd)
