@@ -1,6 +1,9 @@
 # Parallel mode: spec before code — design
 
-Status: draft for review, revision 3 (2026-10-02). Revision 1 drew 2 Critical, 10 Important and 4 Minor findings; revision 2 drew 7 Important and 9 Minor ones. All are addressed below. Branch `feat/spec-phase`. The companion hooks design (`feat/hooks`, piece 10 "spec gate") enforces this design's "no code before release".
+Status: draft for review, revision 4 (2026-10-02). The findings so far, all addressed below:
+- revision 1: 2 Critical, 10 Important, 4 Minor;
+- revision 2: 7 Important, 9 Minor;
+- revision 3: 4 Important, 11 Minor. Branch `feat/spec-phase`. The companion hooks design (`feat/hooks`, piece 10 "spec gate") enforces this design's "no code before release".
 
 ## Purpose
 
@@ -44,7 +47,14 @@ A batch in the spec phase ends **released** or **parked**, never anything else.
 |---|---|---|
 | `spec_review_rounds` | 3 | rounds without a pass: park |
 | `spec_phase_timeout` | 60 min | **worker time** in the spec phase: launch to the first `SPEC READY`, plus each revision from findings to the next `SPEC READY`. Review time doesn't count. Exceeded: park ("spec phase timed out") |
-| one review round | chain: its own per-adapter timeouts; read-only reviewer: 20 min | reviewer late: re-dispatch once, then the round doesn't count |
+| one review round | chain: its own per-adapter timeouts (`review.sh` exit 2, a hard error, counts as exhausted); read-only reviewer: 20 min | reviewer late: re-dispatch once, then the round doesn't count |
+
+**The clock.** Only notifications wake the orchestrator, so the bounds are driven by timers.
+- **Timestamps:** the state table records `launched`, `spec_ready` and `findings_sent` (epoch seconds, from `date +%s`). Worker time is (first `spec_ready` − `launched`) plus each (next `spec_ready` − `findings_sent`), and the time since the last `findings_sent` while the worker is still revising.
+- **Timers:** the orchestrator arms a background timer per batch: a `sleep <remaining worker time>` run in the background, which wakes it when it exits. It also arms one per running reviewer, 20 minutes.
+  - It re-arms the batch timer at each findings message and disarms it at `SPEC READY`.
+  - On every wake, it checks every bound for every batch, not just the one that woke it.
+- "The bounds guarantee this" in W3.6 rests on these timers.
 | pre-check bounces | 2 | park ("spec incomplete after 2 bounces") |
 | rounds that don't count (a reviewer failed) | 1 | park ("review could not run") |
 | W6 silence | `parallel_worker_timeout` | park ("worker stuck"); the silence clock restarts at every findings or release message |
@@ -54,7 +64,7 @@ A batch in the spec phase ends **released** or **parked**, never anything else.
 ## The flow
 
 ```
-W2 pick + batch (batches named <YYYYMMDD>-w<n><x>)
+W2 pick + batch (batches named <YYYYMMDD-HHMM>-w<n><x>)
 W3 launch workers (prompt: tag, rows, owned files, prefix, plugin path, template path, design_spec_dir)
    worker: SPEC PHASE ─► commit spec ─► "SPEC READY <abs worktree> <branch> <path> <sha>" ─► idle
 W3.5 spec review (per batch, as it arrives)
@@ -93,7 +103,8 @@ This replaces Worker contract Step 2.
    - The build phase continues on this same branch; it creates no new one.
    - If a parked spec for these rows already exists in `design_spec_dir`, start from it: revise it rather than writing a new one.
 5. Report with `SPEC READY <absolute worktree path> <branch> <spec path> <sha>` as the FIRST line of the final message, followed by up to five summary lines, and stop. Edit and commit nothing outside `design_spec_dir` until released.
-6. **On findings:** revise as a new commit, never an amend, and report `SPEC READY` again. Each finding is answered under **Review responses**, either fixed or declined with the reason. The next round rules on every response.
+6. **A stop without `SPEC READY`** (a question, a context limit, an error) is resumed once by the orchestrator: "finish the spec; questions go under Open questions; end with `SPEC READY` as the first line". It counts as a pre-check bounce. The hooks' report check (piece 7) asks a not-yet-released spec-phase worker for `SPEC READY`, not for a json report.
+7. **On findings:** revise as a new commit, never an amend, and report `SPEC READY` again. Each finding is answered under **Review responses**, either fixed or declined with the reason. The next round rules on every response.
 
 ### `templates/spec.md` (new)
 
@@ -112,7 +123,9 @@ Sections, in order:
 - **Surface:** app surface yes or no. If yes, the planned browser check's claims and its control on main.
 - **Risks:** what could go wrong, and how the change or the tests cover it.
 - **Open questions:** product decisions the code can't answer. Write "None" when there are none.
-- **Review responses:** filled in from round 2 on.
+- **Review responses:** the template's text is "None — round 1"; filled in from round 2 on.
+
+A worker reusing a parked spec (step 4) deletes its `Status: parked` line and its old Review responses first.
 
 A section may read "None — <reason>". The template marks every blank with `⟦FILL: …⟧`, and the pre-check greps only for `⟦FILL`. Code samples with `<T>` or `TODO` never trigger it.
 
@@ -128,7 +141,7 @@ Each `SPEC READY` is handled as it arrives, independently of other batches. The 
      - extend the owned files when no other batch owns the file;
      - otherwise re-batch, or park ("scope conflict").
 2. **One round is pinned to one SHA.** The worker is not resumed while a round runs, and results for an older SHA are discarded.
-   - **a. The cross-model chain** runs in the background (`run_in_background`), so other batches keep moving: `cd <worktree> && $FOREMAN/review.sh --spec <spec path> <fork base> <scratch>/<batch>-spec-r<r>.log`.
+   - **a. The cross-model chain** runs in the background (`run_in_background`), so other batches keep moving: `( cd <worktree> && $FOREMAN/review.sh --spec <spec path> <fork base> <scratch>/<batch>-spec-r<r>.log )`. The subshell keeps the orchestrator's own working directory unchanged. Hooks piece 8 allows one paren wrap.
    - **b. When the chain exits** (landed or exhausted), dispatch the **read-only reviewer** in the background: `subagent_type: Explore`, `model: opus`, a tool-restricted type. It gets:
      - the spec, the rows, the `rules_glob` files and the worktree path;
      - the chain's log, if one landed;
@@ -144,7 +157,7 @@ Each `SPEC READY` is handled as it arrives, independently of other batches. The 
      - the opus one from (b);
      - a second, `subagent_type: Explore` with `model: sonnet`.
 
-     Both get the same prompt, without a chain log. The round passes only if neither verdict has a Critical or Important finding. The Agent tool offers only Claude models, so this is a second Claude view, not a second model family. The run report marks the batch "no cross-model review". The fix is a second repo-reading adapter in the chain (vacancy-vibe's planned chain has opencode after codex).
+     Both get the same prompt, without a chain log. The round passes only if neither verdict has a Critical or Important finding. The two verdicts are combined into one findings list, with duplicates removed by section and evidence. That list is what goes to the worker and what round r+1 rules on. The Agent tool offers only Claude models, so this is a second Claude view, not a second model family. The run report marks the batch "no cross-model review". The fix is a second repo-reading adapter in the chain (vacancy-vibe's planned chain has opencode after codex).
 3. **Verdict:**
    - **Pass:** no Critical or Important finding in the merged verdict, or in either reviewer's verdict in case 2c. Before releasing a pass, the orchestrator grep-verifies the evidence for every chain P1 or P2 that the reviewer rejected. A rejection it can't confirm turns the pass into a revise.
    - **Revise:** the orchestrator spot-checks the merged findings (it doesn't re-verify every one; the reviewer already did), then sends them in one `SendMessage`, with the Minor ones listed as optional.
@@ -156,6 +169,7 @@ Each `SPEC READY` is handled as it arrives, independently of other batches. The 
 
 - **Arguments:** proper option parsing, `review.sh [--spec <spec path>] <base> <logfile>`. In spec mode, `FOREMAN_REVIEW_MODE=spec` and the prompt is `templates/spec-review-prompt.md`, with `{spec_path}` and `{base}` filled.
 - **The base** is always the **fork base**. Every round's diff is therefore the whole current spec, not the revision delta.
+- **Killing the chain:** `review.sh` gains `trap 'kill -TERM -- -$pid' TERM INT`, so killing the chain at parking also stops the running adapter's process group.
 - **Spec-capable adapters:** in spec mode only adapters that read the repo are used, marked by a `# foreman: reads-repo` line.
   - The plan verifies each one: codex (via `exec`), claude, opencode (plan agent), muse (if its read tools work under `--disable-shell`).
   - Others (prime-agent with `--no-tools`, and diff-in-prompt agy, hermes, openclaw and pi) exit 10, meaning fall through, in spec mode.
@@ -166,7 +180,7 @@ Each `SPEC READY` is handled as it arrives, independently of other batches. The 
 ### `templates/spec-review-prompt.md` (new)
 
 - **The task:** review the design spec at `{spec_path}`, committed on top of `{base}`, for a change that has not been written yet.
-- **First,** from its Rows and Change sections, list the symbols, columns, statuses and files the change touches, and `git grep` every caller and writer. Only then compare with the spec's list.
+- **First,** from its Rows and Change sections, list the symbols, columns, statuses and files the change touches, and find every caller and writer (`git grep`, or your Grep tool). Only then compare with the spec's list.
 - **What to find:**
   - missed callers or writers, including writes whose client or role would be refused;
   - wrong claims about current behaviour;
@@ -181,7 +195,7 @@ Each `SPEC READY` is handled as it arrives, independently of other batches. The 
 ## Orchestrator: release (new W3.6)
 
 - **Release** has two steps:
-  1. Run `python3 $FOREMAN/hooks.py release <batch> <sha>`. The hooks' `pretool` records it, bound to this session. If `scripts/hooks.py` doesn't exist (the hooks not installed), skip this step. If it exits non-zero, don't send the message: report the failure and retry once. A released worker that the spec gate still denies would otherwise stall.
+  1. Run `python3 $FOREMAN/hooks.py release <batch> <sha>`. The hooks' `pretool` records it, bound to this session. If `scripts/hooks.py` doesn't exist (the hooks not installed), skip this step. The script exits 1 unless the release file now exists (it checks both state dirs). On exit 1, don't send the message: retry once. If the retry also fails, park the batch ("release could not be recorded"), unless `spec_gate` is in `hooks_disabled`. A released worker that the spec gate still denies would otherwise stall.
   2. `SendMessage`: "Spec approved at `<sha>` (round r). Minor findings to answer in the PR body: <list or none>. Implement it: Worker contract steps 3-8, on this same branch."
 - **`--auto-merge`:** a passed batch is released at once.
 - **Manual mode:**
@@ -192,7 +206,11 @@ Each `SPEC READY` is handled as it arrives, independently of other batches. The 
   - **Neither:** parked ("not released by the human").
 - **Parking:**
   1. Kill the round's chain and reviewer if they're running. Stop the worker (TaskStop).
-  2. Copy the spec, including uncommitted edits, to `$(git rev-parse --git-common-dir)/foreman/parked/`, which outlives the session's scratch.
+  2. Copy every spec path to `$(git rev-parse --git-common-dir)/foreman/parked/<batch>/`, which outlives the session's scratch. Copy committed and uncommitted ones alike, including a park before the first `SPEC READY`, when the state table has no spec path yet:
+     - `git -C <wt> status --porcelain --untracked-files=all -- <design_spec_dir>`;
+     - `git -C <wt> diff --name-only <fork base or origin/<default>> HEAD -- <design_spec_dir>`.
+
+     W5 uses these copies, or writes "no spec" in the row note when there are none.
   3. Name the branch and SHA in the run report.
   4. `git worktree remove --force`. This is a stated exception to W1's no-`--force` rule: the spec is already copied, and nothing else is pending. The local branch keeps the commit until W5.
 
@@ -214,12 +232,15 @@ This is the Worker contract's current steps 3–8, plus:
   - touched files are inside the outline, or are test files the spec's Tests section names, or are files the report lists as changed by the gate (formatters), or are covered by a deviation;
   - the batch's spec file is allowed in the diff.
 - **New W4.2b, spec reviewer:** the orchestrator dispatches a read-only reviewer (`Explore`, opus). SKILL.md has none in W4 today. It gets the spec, the PR diff and the deviations. It checks the code against the spec, reports unlisted deviations, and rules on each listed one.
+  - **Gate-changed files:** it confirms that each file the report lists as gate-changed has formatting-only hunks and is owned by no other batch. Anything else is an unlisted deviation.
+  - **Its findings and rulings are part of the auto-merge gate:** a Critical or Important finding, or a deviation ruled unacceptable, blocks auto-merge like any other review finding.
+  - **If it fails or times out (20 min),** it's re-dispatched once. If it fails again, the PR isn't auto-merged and goes to the human.
 - **Deviations are judged, not just listed:**
   - **The W4.2b reviewer** rules on each deviation: acceptable, or a finding.
   - **`--auto-merge`:** its ruling stands.
   - **Manual mode:** the human sees the deviations at W4.5.
   - **A deviation that adds a file outside the outline, or changes a row's acceptance,** gets one spec round before merge.
-    - The round skips W3.5's pre-checks. It reviews the spec's deviations section against the diff from the release SHA to the head.
+    - The round skips W3.5's pre-checks. It reviews the spec's deviations section against `git diff $(git merge-base origin/<default> <head>) <head>`, minus the spec file. That excludes main's changes merged in at contract step 8.
     - A failure becomes a W4.4 finding sent back to the worker. It never parks a built PR.
 
 ## W5 and W6 additions
@@ -230,15 +251,15 @@ This is the Worker contract's current steps 3–8, plus:
 - **W6:**
   - rows parked during this invocation are excluded from later waves' pools.
   - **W2 rule for later invocations:**
-    - a row whose note contains `spec parked (open question)` stays excluded until the human edits that note away;
-    - any other `spec parked (` row is eligible, and its worker starts from the committed parked spec (step 4).
+    - a row whose note contains `spec parked (open question)` or `spec parked (not released by the human)`, or two `spec parked (` notes, stays excluded until the human edits the note away;
+    - any other `spec parked (` row is eligible once more, and its worker starts from the committed parked spec (step 4).
   - a worker waiting after `SPEC READY`, or awaiting release, isn't silent. Its clock restarts at each findings or release message.
 
 ## SKILL.md changes
 
 - **Non-negotiables:** "Parallel mode: no code before the batch's spec is released."
 - **W1:** a worktree whose batch was parked is removed at parking; its branch is deleted after W5 commits the spec. `SPEC READY` is not a final report.
-- **W2:** batches are named `<YYYYMMDD>-w<n><x>` (e.g. `20261002-w1a`), which is unique across invocations. Add the parked-row rule.
+- **W2:** batches are named `<YYYYMMDD-HHMM>-w<n><x>`, where the time is the invocation's start (e.g. `20261002-1530-w1a`). That is unique across invocations, including repeated `/loop` ticks in one session. Add the parked-row rule.
 - **W3:** the prompt gains the `foreman-worker: <batch>` tag (hooks), the absolute `templates/spec.md` path, `design_spec_dir`, and "the batch starts with the spec phase". Add the state-table columns.
 - **Step 0.5 table:** add `design_spec_dir`, `spec_review_rounds` and `spec_phase_timeout` with their defaults.
 - **W3.5 and W3.6:** new, as above.
@@ -247,6 +268,11 @@ This is the Worker contract's current steps 3–8, plus:
 - **W4.5 (manual):** the human sees the deviations, with W4.2b's rulings, beside the PR.
 - **W4.4:** the "new worker on the branch" fallback runs `git switch <local branch>` (the spec phase hasn't pushed) and passes the spec path.
 - **W5 and W6:** as above. W6's stuck-worker text says a stuck spec-phase worker is parked.
+- **W1:** state the parking exception to "never `--force`" (W3.6 step 4).
+- **Worker contract step 5** (`git switch -c` then `git add -A`): in parallel mode, the build phase stays on the spec branch, which already exists. It commits with explicit paths, or `git add -A` only after the spec phase.
+- **W3.5 scope grants:** the orchestrator tells the worker in the next message: "owned files now also include <file>".
+- **Notification:** use the session's push-notification tool if one exists, otherwise a plain message. The checkpoint question uses multi-select. With more than 4 batches it's split into several questions, or the human answers in text.
+- **Comments at the checkpoint** come as free text, on the question's notes or in a reply. The follow-up checkpoint offers only release or park, with no second comment round.
 - **Worker contract:**
   - **Step 2** becomes the spec phase, as in "Worker: spec phase".
   - **"Own only your files"** also allows "and your batch's spec file".
@@ -260,7 +286,7 @@ This is the Worker contract's current steps 3–8, plus:
 |---|---|---|
 | `design_spec_dir` | `docs/superpowers/specs` | where batch specs are committed. Distinct from `e2e.spec_dir` |
 | `spec_review_rounds` | `3` | rounds without a pass before a batch parks |
-| `spec_phase_timeout` | `120` | minutes from launch to a pass before a batch parks |
+| `spec_phase_timeout` | `60` | minutes of **worker time** in the spec phase before a batch parks (see End states and bounds) |
 
 `templates/foreman.config.md` documents them. The prompt placeholder is `{spec_path}`, which avoids `e2e.run`'s `{spec}`.
 
