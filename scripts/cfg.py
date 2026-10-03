@@ -113,8 +113,19 @@ def parse(text):
     return data
 
 
-def config_path(repo):
-    env = os.environ.get('FOREMAN_CONFIG')
+DEFAULTS = {
+    'forbid_trailers': [],
+    'gate_exempt': ['docs/**', '**/*.md'],
+    'worker_agent_types': ['general-purpose', 'workflow-subagent'],
+    'hooks_disabled': [],
+    'design_spec_dir': 'docs/superpowers/specs',
+    'status_pane': 'true',
+}
+
+
+def config_path(repo, use_env=True):
+    """use_env=False (the hooks) ignores FOREMAN_CONFIG, so a stray env var can't switch hooks on or off."""
+    env = os.environ.get('FOREMAN_CONFIG') if use_env else None
     if env:
         return env if os.path.exists(env) else None
     for name in ('foreman.config.md', 'improve-next.config.md'):
@@ -124,14 +135,17 @@ def config_path(repo):
     return None
 
 
-def load(repo):
-    p = config_path(repo)
+def load(repo, use_env=True):
+    p = config_path(repo, use_env)
     return parse(open(p).read()) if p else {}
 
 
 def get(repo, key, default=None):
+    """The key's value; when the config lacks it, `default`, else the key's DEFAULTS entry."""
     v = load(repo).get(key)
-    return default if v is None else v
+    if v is None:
+        return default if default is not None else DEFAULTS.get(key)
+    return v
 
 
 def chain(repo):

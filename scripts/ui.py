@@ -10,7 +10,6 @@ a temporary worktree. Binds 127.0.0.1 only; every request needs a local Host, an
 the session token in an X-Foreman-Token header (the page reads it from the printed URL's #t= fragment).
 """
 import argparse
-import hashlib
 import http.server
 import json
 import os
@@ -32,6 +31,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 import backlog  # noqa: E402
 import cfg  # noqa: E402
+import state  # noqa: E402
 
 UI_DIR = os.path.realpath(os.path.join(HERE, '..', 'ui'))
 MIME = {'.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8',
@@ -54,20 +54,15 @@ class Stale(Exception):
     pass
 
 
-def home():
-    return os.environ.get('FOREMAN_HOME', os.path.expanduser('~/.claude/foreman'))
-
-
 class Repo:
     def __init__(self, path):
         self.path = os.path.realpath(path)
         self.backlog_path = cfg.get(self.path, 'backlog_path', '.claude/improvement-backlog.md')
         self.prefix = cfg.get(self.path, 'id_prefix', 'IB')
         self.origin = self.git('remote', 'get-url', 'origin', check=False).strip()
-        self.key = hashlib.sha1(f'{self.origin}\n{self.path}'.encode()).hexdigest()[:12]
-        self.state = os.path.join(home(), self.key)
-        os.makedirs(self.state, mode=0o700, exist_ok=True)
-        os.chmod(self.state, 0o700)
+        self.key = state.repo_key(self.path)
+        self.state = state.state_dir(self.path)
+        state.ensure(self.state)
         for name in ('pending.json', 'ui.json'):
             if os.path.exists(os.path.join(self.state, name)):
                 os.chmod(os.path.join(self.state, name), 0o600)
