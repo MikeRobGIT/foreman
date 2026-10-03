@@ -12,7 +12,8 @@ record lands where the hooks look and is bound to this session:
   hooks.py forget <batch>          drop the batch's hook state (W5)
   exit 0 = recorded, 1 = the record is missing, 3 = hooks inactive (no fresh run marker); run-end always 0
 
-Every hook fails open on its own errors (stderr note, exit 0), except piece 1's undeterminable diff.
+Every hook fails open on its own errors (stderr note, exit 0). Three cases fail closed: an undeterminable push diff,
+a push or merge command the scan can't read, and a spec-phase commit whose contents can't be told.
 """
 import json
 import os
