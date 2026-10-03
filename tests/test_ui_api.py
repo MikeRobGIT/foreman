@@ -1,5 +1,7 @@
 # tests/test_ui_api.py
+import contextlib
 import http.client
+import io
 import json
 import os
 import re
@@ -535,7 +537,13 @@ class ProcessTest(unittest.TestCase):
     def start(self):
         script = os.path.join(HERE, '..', 'scripts', 'ui.py')
         p = subprocess.Popen([sys.executable, script, '--repo', self.f.work, '--no-open'], stdout=subprocess.PIPE, text=True)
-        self.addCleanup(lambda: (subprocess.run([sys.executable, script, '--repo', self.f.work, '--stop'], capture_output=True), p.wait(30)))
+
+        def stop():
+            stopper = subprocess.Popen([sys.executable, script, '--repo', self.f.work, '--stop'], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            p.wait(30)  # reaps the server: --stop waits for it to be gone, and a zombie still counts as alive
+            stopper.wait(40)
+            p.stdout.close()
+        self.addCleanup(stop)
         url = p.stdout.readline().strip()
         return url, int(re.search(r':(\d+)/', url).group(1)), re.search(r'[?#]t=(.+)$', url).group(1)
 
@@ -576,14 +584,72 @@ class ProcessTest(unittest.TestCase):
             if os.path.exists(self.f.gh_log) and 'pr create' in open(self.f.gh_log).read():
                 break
             time.sleep(0.05)
-        subprocess.run([sys.executable, script, '--repo', self.f.work, '--stop'], capture_output=True)
-        time.sleep(0.5)
+        stopper = subprocess.Popen([sys.executable, script, '--repo', self.f.work, '--stop'], stdout=subprocess.PIPE, text=True)
+        self.addCleanup(lambda: stopper.poll() is None and stopper.kill())
+        time.sleep(1)
+        self.assertIsNone(stopper.poll(), '--stop returned while the server was still finishing the publish')
         write(block, '')
-        p.wait(30)
+        p.wait(30)  # reaps the server, so the stopper sees it gone
         t.join(30)
+        self.assertEqual(stopper.communicate(timeout=40)[0].strip(), 'stopped')
+        self.assertEqual(stopper.returncode, 0)
         self.assertNotIn('backlog/ui-', git(self.f.work, 'branch', '--list'))
         self.assertEqual(len(git(self.f.work, 'worktree', 'list').splitlines()), 1)
         self.assertFalse(os.path.exists(os.path.join(self.f.server.repo.state, 'ui.json')))
+
+    def test_a_server_that_exits_leaves_a_ui_json_naming_another_pid(self):
+        script = os.path.join(HERE, '..', 'scripts', 'ui.py')
+        p = subprocess.Popen([sys.executable, script, '--repo', self.f.work, '--no-open'], stdout=subprocess.PIPE, text=True)
+        self.addCleanup(lambda: (p.poll() is None and p.kill(), p.stdout.close()))
+        p.stdout.readline()
+        info = os.path.join(self.f.server.repo.state, 'ui.json')
+        other = self.dead_pid()
+        write(info, json.dumps({'pid': other, 'port': 1, 'url': 'http://127.0.0.1:1/#t=x'}))
+        p.terminate()
+        p.wait(30)
+        with open(info) as f:
+            self.assertEqual(json.load(f)['pid'], other)
+
+    @staticmethod
+    def dead_pid():
+        gone = subprocess.Popen(['true'])
+        gone.wait()
+        return gone.pid
+
+    def dummy_server(self, ignore_sigterm):
+        code = 'import signal,time\n' + ('signal.signal(signal.SIGTERM, signal.SIG_IGN)\n' if ignore_sigterm else '') + 'print(1, flush=True)\ntime.sleep(60)'
+        p = subprocess.Popen([sys.executable, '-c', code], stdout=subprocess.PIPE, text=True)
+        self.addCleanup(lambda: (p.kill(), p.wait(), p.stdout.close()))
+        p.stdout.readline()
+        info = os.path.join(self.f.server.repo.state, 'ui.json')
+        write(info, json.dumps({'pid': p.pid, 'port': 1, 'url': 'http://127.0.0.1:1/#t=x'}))
+        return p, info
+
+    def test_stop_gives_up_on_a_server_that_will_not_exit_and_keeps_its_ui_json(self):
+        p, info = self.dummy_server(ignore_sigterm=True)
+        t0 = time.time()
+        msg = ui.stop(info, p.pid, wait=0.5)
+        self.assertGreaterEqual(time.time() - t0, 0.5)
+        self.assertIn(f'pid {p.pid}', msg)
+        self.assertTrue(ui.alive(p.pid))
+        self.assertTrue(os.path.exists(info))
+
+    def test_stop_waits_for_the_server_and_removes_its_ui_json(self):
+        p, info = self.dummy_server(ignore_sigterm=False)
+        threading.Thread(target=p.wait, daemon=True).start()  # a zombie still answers kill(pid, 0)
+        with contextlib.redirect_stdout(io.StringIO()) as out:
+            self.assertIsNone(ui.stop(info, p.pid))
+        self.assertEqual(out.getvalue().strip(), 'stopped')
+        self.assertFalse(ui.alive(p.pid))
+        self.assertFalse(os.path.exists(info))
+
+    def test_stop_leaves_a_ui_json_that_names_a_newer_server(self):
+        p, info = self.dummy_server(ignore_sigterm=False)
+        threading.Thread(target=p.wait, daemon=True).start()
+        write(info, json.dumps({'pid': self.dead_pid(), 'port': 1, 'url': 'http://127.0.0.1:1/#t=y'}))
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertIsNone(ui.stop(info, p.pid))
+        self.assertTrue(os.path.exists(info))
 
 
 if __name__ == '__main__':

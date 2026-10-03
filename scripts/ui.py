@@ -517,6 +517,30 @@ def alive(pid):
         return False
 
 
+def remove_info(info, pid):
+    """Remove ui.json only while it still names `pid`: a server started since then owns the file."""
+    try:
+        with open(info) as f:
+            if json.load(f).get('pid') == pid:
+                os.remove(info)
+    except (OSError, ValueError):
+        pass
+
+
+def stop(info, pid, wait=35):
+    """SIGTERM the server and wait for it to exit: it may be finishing a publish (up to 30 s), and a server
+    started meanwhile would share its pending.json. Returns a message if it outlives `wait`; ui.json stays then."""
+    if alive(pid):
+        os.kill(pid, signal.SIGTERM)
+        deadline = time.time() + wait
+        while alive(pid):
+            if time.time() > deadline:
+                return f'the server (pid {pid}) is still running {wait} s after SIGTERM, probably finishing a publish; run --stop again later'
+            time.sleep(0.1)
+        print('stopped')
+    remove_info(info, pid)
+
+
 def main():
     ap = argparse.ArgumentParser(description='foreman backlog UI')
     ap.add_argument('--repo', default='.')
@@ -528,11 +552,8 @@ def main():
     info = info_path(repo)
     running = json.load(open(info)) if os.path.exists(info) else None
     if a.stop:
-        if running and alive(running['pid']):
-            os.kill(running['pid'], signal.SIGTERM)
-            print('stopped')
-        if os.path.exists(info):
-            os.remove(info)
+        if running:
+            sys.exit(stop(info, running['pid']))
         return
     if running and alive(running['pid']):
         print(running['url'])
@@ -548,8 +569,7 @@ def main():
         server.serve_forever()
     finally:
         shutdown(server.repo)
-        if os.path.exists(info):
-            os.remove(info)
+        remove_info(info, os.getpid())
 
 
 if __name__ == '__main__':
