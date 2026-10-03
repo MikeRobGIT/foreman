@@ -2299,6 +2299,12 @@ class SpecGateTest(Case):
         self.assertIn('this commit would include app.py',
                       self.fx.bash('git add -A && git commit -m move', agent='a1', cwd=self.wt))
 
+    def test_a_cwd_reached_through_a_symlink_is_judged_by_its_real_path(self):
+        link = os.path.join(self.fx.tmp, 'link')   # macOS /tmp and /var are such links
+        os.symlink(self.wt, link)
+        self.assertIsNone(self.fx.bash('git commit -m s docs/superpowers/specs/plan.md', agent='a1', cwd=link))
+        self.assertIn('this commit would include app.py', self.fx.bash('git commit -m s app.py', agent='a1', cwd=link))
+
     def test_all_stages_untracked_files_for_gt_and_git_add_but_not_for_git_commit(self):
         write(os.path.join(self.wt, 'new.py'), 'x = 1\n')   # untracked, nothing tracked is modified
         for cmd in ('gt create -a -m wip', 'gt modify --all', 'git add -A && git commit -m wip'):
