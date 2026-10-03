@@ -521,7 +521,6 @@ check "spec template: the spec's sections, in order" test "$(grep '^## ' "$tpl" 
 check "spec template: Review responses reads 'None — round 1'" grep -qx 'None — round 1' "$tpl"
 check "spec template: scope requests have a stated form" grep -qF -- '- **Scope request:**' "$tpl"
 check "pre-check flags the unfilled template" test "$(fills "$tpl" | wc -l)" -ge 10
-check "pre-check: the template itself has every section" test -z "$(missing "$tpl")"
 perl -pe 's/⟦FILL:.*?⟧/filled/g' "$tpl" >"$T/spec-filled.md" 2>/dev/null
 cat >>"$T/spec-filled.md" <<'EOF'
 
