@@ -273,10 +273,10 @@ Only Bash is considered, and anything not matching every rule below gets no deci
 - **Who:** a subagent (`agent_id` present) whose id is in the map from piece 6, during a run, whose batch has no release file `state_dir/batches/<batch>.released`.
 - **Unmapped ids fail open:** an `agent_id` with no map entry (no tag, or P2 failed) passes, and so does any call outside a run.
 - **Denied before release:**
-  - Edit-family calls whose target, resolved in its own checkout, is outside that checkout's `spec_dir`;
-  - `git commit` when any staged path is outside `spec_dir`, judged from `git diff --cached --name-only` in the effective directory. With `-a`/`--all`, the modified tracked files (`git diff --name-only`) count as staged too. This catches code written through Bash, which the Edit rule can't see.
+  - Edit-family calls whose target, resolved in its own checkout, is outside that checkout's `design_spec_dir`;
+  - `git commit` when any staged path is outside `design_spec_dir`, judged from `git diff --cached --name-only` in the effective directory. With `-a`/`--all`, the modified tracked files (`git diff --name-only`) count as staged too. This catches code written through Bash, which the Edit rule can't see.
   - `git push`, `gh pr create` and `gt submit`. The spec phase doesn't push.
-- **Allowed before release:** reading anything, running anything else (tests, `git grep`), and editing and committing inside `spec_dir`.
+- **Allowed before release:** reading anything, running anything else (tests, `git grep`), and editing and committing inside `design_spec_dir`.
 - **Reason:** "foreman: batch <b>'s spec isn't released yet. Finish the spec, report `SPEC READY <path> <sha>`, and wait for the orchestrator's release."
 - **Release:** at W3.6, before its `SendMessage`, the orchestrator runs `python3 $FOREMAN/hooks.py release <batch> <sha>`. That writes `state_dir/batches/<batch>.released` = `{"sha", "time"}`. In manual mode this happens only for the batches the human approved at the checkpoint.
 - **After release** the gate is silent. Later spec edits are W4's concern: its byte-identical check, or a listed deviation.
@@ -291,7 +291,7 @@ Only Bash is considered, and anything not matching every rule below gets no deci
 | `worker_agent_types` | `["general-purpose", "workflow-subagent"]` | subagent types eligible for pieces 6 and 7 |
 | `hooks_disabled` | `[]` | piece ids to turn off in this repo |
 | `status_pane` | `true` | piece 9 |
-| (none new) | | piece 10 reads `spec_dir` from the spec-phase design |
+| (none new) | | piece 10 reads `design_spec_dir` (spec-phase design) |
 
 `templates/foreman.config.md` documents them. vacancy-vibe sets `forbid_trailers: [Co-Authored-By, Claude-Session, Generated with]` at switch-over.
 
@@ -356,7 +356,7 @@ These are guardrails, not a security boundary. Piece 8 is the only piece that gr
     - no decision for gate-lock with a non-gate command or `--name`, for wt-setup on a non-worktree directory, and for bk.py without `--dry-run` from a subagent.
   - **Run marker:** `/loop … /foreman`, `ui`/`init` skipped, `SessionEnd` reasons, `hooks.py run-end`, and the 48-hour expiry.
   - **Piece 10:**
-    - a mapped, unreleased worker is denied an Edit outside `spec_dir` and allowed one inside it;
+    - a mapped, unreleased worker is denied an Edit outside `design_spec_dir` and allowed one inside it;
     - `git commit` with a staged code file is denied; with only the spec staged it is allowed; `git commit -a` with a modified code file is denied;
     - `git push` and `gh pr create` are denied before release;
     - after `hooks.py release` everything passes;
