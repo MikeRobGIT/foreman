@@ -513,6 +513,28 @@ chain 60 30 200 codex >"$T/chain.md"; PATH=$F:$PATH sv --spec "docs/my specs/d.m
 check "codex: --color is followed by never" bash -c "grep -A1 -x -- --color '$CODEX_ARGS' | grep -qx never"
 unset CODEX_ARGS
 cd "$T"
+echo "## templates/spec.md and the W3.5 pre-check"
+tpl=$root/templates/spec.md
+fills() { grep -n '⟦FILL' "$1"; }
+missing() { grep '^## ' "$tpl" | while IFS= read -r h; do grep -qxF "$h" "$1" || echo "missing section: $h"; done; }
+check "spec template: the spec's sections, in order" test "$(grep '^## ' "$tpl" 2>/dev/null | tr '\n' '|')" = '## Rows|## Current behaviour|## Change|## Callers and writers checked|## Rules that apply|## Tests|## Implementation outline|## Surface|## Risks|## Open questions|## Review responses|'
+check "spec template: Review responses reads 'None — round 1'" grep -qx 'None — round 1' "$tpl"
+check "spec template: scope requests have a stated form" grep -qF -- '- **Scope request:**' "$tpl"
+check "pre-check flags the unfilled template" test "$(fills "$tpl" | wc -l)" -ge 10
+check "pre-check: the template itself has every section" test -z "$(missing "$tpl")"
+perl -pe 's/⟦FILL:.*?⟧/filled/g' "$tpl" >"$T/spec-filled.md" 2>/dev/null
+cat >>"$T/spec-filled.md" <<'EOF'
+
+```ts
+function first<T>(xs: T[]): T { return xs[0] } // TODO: empty input
+```
+A {placeholder} in prose, and <angle brackets>.
+EOF
+check "pre-check: a filled spec with <T>, TODO and {x} is clean" test -z "$(fills "$T/spec-filled.md")"
+check "pre-check: ...and has every section" test -z "$(missing "$T/spec-filled.md")"
+grep -vx '## Risks' "$T/spec-filled.md" >"$T/spec-norisks.md"
+check "pre-check names a missing section" test "$(missing "$T/spec-norisks.md")" = 'missing section: ## Risks'
+
 echo "## backlog.py + ui.py"
 check "test_backlog.py" python3 "$root/tests/test_backlog.py"
 check "test_ui_api.py" python3 "$root/tests/test_ui_api.py"
