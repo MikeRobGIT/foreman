@@ -6,11 +6,11 @@
 
 Reads the backlog from origin/<default branch> (never the working tree), keeps pending edits in
 $FOREMAN_HOME (default ~/.claude/foreman)/<repo-key>/pending.json, and publishes them as a PR from
-a temporary worktree. Binds 127.0.0.1 only; every request needs the session token and a local Host.
+a temporary worktree. Binds 127.0.0.1 only; every request needs a local Host, and every /api request
+the session token in an X-Foreman-Token header (the page reads it from the printed URL's #t= fragment).
 """
 import argparse
 import hashlib
-import http.cookies
 import http.server
 import json
 import os
@@ -345,18 +345,15 @@ class Handler(http.server.BaseHTTPRequestHandler):
         return self.headers.get('Host', '') in (f'127.0.0.1:{p}', f'localhost:{p}')
 
     def token_ok(self):
-        t = self.server.token
-        jar = http.cookies.SimpleCookie(self.headers.get('Cookie', ''))
-        return (jar.get('foreman_t') is not None and jar['foreman_t'].value == t) or self.headers.get('X-Foreman-Token') == t
+        sent = self.headers.get('X-Foreman-Token', '').encode('utf-8', 'surrogateescape')
+        return secrets.compare_digest(sent, self.server.token.encode())
 
-    def send(self, code, body, ctype='application/json', extra=None):
+    def send(self, code, body, ctype='application/json'):
         data = body if isinstance(body, bytes) else json.dumps(body, ensure_ascii=False).encode()
         self.send_response(code)
         self.send_header('Content-Type', ctype)
         self.send_header('Content-Length', str(len(data)))
         self.send_header('Cache-Control', 'no-store')
-        for k, v in (extra or {}).items():
-            self.send_header(k, v)
         self.end_headers()
         self.wfile.write(data)
 
@@ -397,16 +394,11 @@ class Handler(http.server.BaseHTTPRequestHandler):
         u = urllib.parse.urlsplit(self.path)
         q = urllib.parse.parse_qs(u.query)
         if method == 'GET' and u.path == '/':
-            if q.get('t', [''])[0] == self.server.token:
-                cookie = f'foreman_t={self.server.token}; HttpOnly; SameSite=Strict; Path=/'
-                return self.static_index(cookie)
-            if self.token_ok():
-                return self.static_index(None)
-            return self.send(403, b'Open the URL that /foreman ui printed.', 'text/plain; charset=utf-8')
-        if not self.token_ok():
-            return self.send(403, {'error': 'missing or wrong session token'})
+            return self.static('index.html')
         if method == 'GET' and u.path.startswith('/ui/'):
             return self.static(u.path[len('/ui/'):])
+        if not self.token_ok():
+            return self.send(403, {'error': 'missing or wrong session token: open the URL printed by /foreman ui'})
         repo = self.server.repo
         try:
             parts = [p for p in u.path.split('/') if p]
@@ -436,17 +428,13 @@ class Handler(http.server.BaseHTTPRequestHandler):
         except (GitError, PublishError) as e:
             return self.send(502, {'error': str(e)})
 
-    def static_index(self, cookie):
-        with open(os.path.join(UI_DIR, 'index.html'), 'rb') as f:
-            self.send(200, f.read(), 'text/html; charset=utf-8', {'Set-Cookie': cookie} if cookie else None)
-
 
 def make_server(repo_path, port=0):
     server = http.server.ThreadingHTTPServer(('127.0.0.1', port), Handler)
     server.daemon_threads = True
     server.token = secrets.token_urlsafe(24)
     server.repo = Repo(repo_path)
-    return server, f'http://127.0.0.1:{server.server_port}/?t={server.token}'
+    return server, f'http://127.0.0.1:{server.server_port}/#t={server.token}'
 
 
 def info_path(repo):

@@ -111,13 +111,22 @@ class ServerTest(unittest.TestCase):
         status, _, _ = self.f.request('GET', '/api/backlog', host=f'evil.example:{self.f.port}')
         self.assertEqual(status, 403)
 
-    def test_index_sets_cookie(self):
-        status, _, r = self.f.request('GET', f'/?t={self.f.server.token}', token=False)
-        self.assertEqual(status, 200)
-        cookie = r.getheader('Set-Cookie')
-        self.assertIn('foreman_t=', cookie)
-        self.assertIn('HttpOnly', cookie)
-        self.assertIn('SameSite=Strict', cookie)
+    def test_api_needs_the_header_and_nothing_else(self):
+        t = self.f.server.token
+        self.assertEqual(self.f.request('GET', '/api/backlog')[0], 200)
+        self.assertEqual(self.f.request('GET', '/api/backlog', token=False, headers={'X-Foreman-Token': t + 'x'})[0], 403)
+        self.assertEqual(self.f.request('GET', '/api/backlog', token=False, headers={'X-Foreman-Token': '\u00e9'.encode().decode('latin-1')})[0], 403)
+        self.assertEqual(self.f.request('GET', f'/api/backlog?t={t}', token=False)[0], 403)
+        self.assertEqual(self.f.request('GET', '/api/backlog', token=False, headers={'Cookie': f'foreman_t={t}'})[0], 403)
+
+    def test_static_files_need_no_token_and_nothing_sets_a_cookie(self):
+        self.assertIn('/#t=', self.f.url)
+        for path in ('/', '/ui/js/api.js', '/ui/app.css'):
+            status, _, r = self.f.request('GET', path, token=False)
+            self.assertEqual(status, 200, path)
+            self.assertIsNone(r.getheader('Set-Cookie'), path)
+        for method, path in (('GET', '/api/backlog'), ('GET', f'/?t={self.f.server.token}'), ('POST', '/api/ops/undo')):
+            self.assertIsNone(self.f.request(method, path, body={} if method == 'POST' else None)[2].getheader('Set-Cookie'), path)
 
     def test_static_path_traversal_refused(self):
         status, _, _ = self.f.request('GET', '/ui/../scripts/ui.py')

@@ -218,7 +218,7 @@ Start the local backlog UI for this repo and print its URL; do nothing else in t
 1. Check that the config's `backlog_path` (default `.claude/improvement-backlog.md`) exists on `origin`'s
    default branch: `git cat-file -e origin/HEAD:<backlog_path>` after `git fetch -q origin`. If it doesn't,
    say so and suggest `/foreman init`; don't start anything.
-2. Run it in the background, then print the URL it outputs (one line; the token is part of it):
+2. Run it in the background, then print the URL it outputs (one line; the token is its `#t=` fragment):
    ```bash
    python3 "${CLAUDE_PLUGIN_ROOT}/scripts/ui.py" --repo "$PWD"
    ```

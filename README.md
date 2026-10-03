@@ -44,8 +44,9 @@ It reads the backlog from `origin`'s default branch, never your working copy.
   **Publish** replays them onto a fresh branch (`backlog/ui-<date>-<n>`) in a temporary worktree, commits,
   pushes and opens one PR with `gh`. A change whose row changed on main in the meantime is shown as a
   conflict and kept pending, never applied to the new text silently.
-- **Security.** The server binds to `127.0.0.1` only, needs the session token from the printed URL (stored
-  as an `HttpOnly; SameSite=Strict` cookie), and refuses any `Host` other than `127.0.0.1`/`localhost`.
+- **Security.** The server binds to `127.0.0.1` only and refuses any `Host` other than `127.0.0.1`/`localhost`.
+  Every API call needs the session token from the printed URL's `#t=` fragment: the page keeps it in the tab's
+  `sessionStorage` and sends it as a header, never as a cookie. Its state files are readable by you only.
 - **Themes.** Auto follows your system light/dark setting; Light and Dark pin it (remembered per browser).
 - `/foreman ui stop` stops the server. Without `gh`, Publish can't open the PR and Progress shows counts only.
 

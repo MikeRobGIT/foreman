@@ -91,11 +91,11 @@ Section headings in the file (e.g. "## Low risk (ready)") are prose and are not 
 
 ### `scripts/ui.py` (server)
 
-- **Start:** `python3 ui.py --repo <dir> [--port 0] [--no-open]`. It binds `127.0.0.1` on a free port, writes `~/.claude/foreman/<repo-key>/ui.json` (`{port, token, pid}`) and prints the URL `http://127.0.0.1:<port>/?t=<token>`. `<repo-key>` is a short hash of the origin URL plus the repo path.
+- **Start:** `python3 ui.py --repo <dir> [--port 0] [--no-open]`. It binds `127.0.0.1` on a free port, writes `~/.claude/foreman/<repo-key>/ui.json` (`{port, token, pid}`) and prints the URL `http://127.0.0.1:<port>/#t=<token>`. `<repo-key>` is a short hash of the origin URL plus the repo path.
 - A second start for the same repo reuses the live server and prints its URL. `--stop` stops it.
 - **Security:**
-  - The token is a `secrets.token_urlsafe(24)`. After the first load it is set as an `HttpOnly; SameSite=Strict` cookie.
-  - Every `/api/*` request must carry the cookie or an `X-Foreman-Token` header that matches.
+  - The token is a `secrets.token_urlsafe(24)`. It travels in the URL fragment, so it never reaches the server in a request line or a log. The page keeps it in `sessionStorage`, removes the fragment, and sends it as an `X-Foreman-Token` header. There is no cookie.
+  - Every `/api/*` request must carry that header (compared in constant time). The static files (`/`, `/ui/*`) need no token.
   - The `Host` header must be `127.0.0.1:<port>` or `localhost:<port>`, which stops DNS rebinding.
   - A wrong token or host gets a 403.
   - Static files are served only from the plugin's `ui/` directory.
