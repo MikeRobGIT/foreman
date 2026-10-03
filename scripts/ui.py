@@ -289,7 +289,7 @@ class Repo:
     def publish(self):
         if not self.publishing.acquire(blocking=False):
             raise Busy()
-        self._pub = st = {'wt': None, 'branch': None, 'pushed': False}
+        self._pub = st = {'wt': None, 'branch': None, 'pushed': False, 'pr_started': False}
         try:
             ops = self.load_ops()
             if not ops:
@@ -332,13 +332,16 @@ class Repo:
                              + [f'- {backlog.describe(o, mapping)}' for o in applied]
                              + ([f'\nNot included ({len(conflicts)} changed on main since they were made; still pending in the UI):']
                                 + [f'- {backlog.describe(o)}' for o in conflicts] if conflicts else []))
+            with self.cleanup_lock:  # a cleanup that already took the state decided to delete the branch: no PR on it
+                if self._pub is not st:
+                    raise PublishError('the UI was stopped before the PR was created')
+                st['pr_started'] = True  # from here a branch delete could close the PR; a stray branch is harmless
             p = subprocess.run(['gh', 'pr', 'create', '--base', self.branch, '--head', branch, '--title', title, '--body', body],
                                cwd=wt, capture_output=True, text=True)
             if p.returncode:
                 raise PublishError(f'gh pr create: {p.stderr.strip() or p.stdout.strip()}')
             url = (p.stdout.strip().splitlines() or [''])[-1]
             self.settle(applied)
-            st['pushed'] = False  # success: the remote branch stays for the PR
             return {'pr_url': url, 'applied': len(applied), 'conflicts': len(conflicts), 'branch': branch, 'message': ''}
         except FileNotFoundError as e:
             raise PublishError(str(e))
@@ -347,12 +350,14 @@ class Repo:
             self.publishing.release()
 
     def cleanup_publish(self):
-        """Delete what an unfinished publish made: its pushed branch, worktree and local branch. Runs once."""
+        """Delete what an unfinished publish made: its worktree, local branch and, until gh pr create is
+        called, its pushed branch (after that the branch stays: deleting it would close the PR). Runs once."""
         with self.cleanup_lock:
             st, self._pub = self._pub, None
+            delete_remote = bool(st) and st['pushed'] and not st['pr_started']
         if not st:
             return
-        if st['pushed']:
+        if delete_remote:
             self.git('push', '-q', 'origin', '--delete', st['branch'], check=False)
         if st['wt'] and os.path.exists(st['wt']):
             self.git('worktree', 'remove', '--force', st['wt'], check=False)

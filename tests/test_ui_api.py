@@ -361,13 +361,13 @@ class PublishTest(unittest.TestCase):
         after = (open(p).read(), git(self.f.work, 'status', '--porcelain'), git(self.f.work, 'branch', '--show-current'))
         self.assertEqual(before, after)
 
-    def test_publish_failure_cleans_up(self):
+    def test_a_failed_gh_cleans_up_locally_and_keeps_the_remote_branch(self):
         self.f.request('POST', '/api/ops', {'op': 'move', 'id': 'IB-2', 'to': 'top'})
         os.environ['FAKE_GH_FAIL'] = '1'
         status, res, _ = self.f.request('POST', '/api/publish')
         self.assertEqual(status, 502)
         self.assertIn('gh pr create', res['error'])
-        self.assertEqual([b for b in self.remote_branches() if b.startswith('backlog/ui-')], [])
+        self.assertEqual(len([b for b in self.remote_branches() if b.startswith('backlog/ui-')]), 1)
         self.assertNotIn('backlog/ui-', git(self.f.work, 'branch', '--list'))
         self.assertEqual(len(git(self.f.work, 'worktree', 'list').splitlines()), 1)
         status, data, _ = self.f.request('GET', '/api/backlog')
@@ -402,26 +402,64 @@ class PublishTest(unittest.TestCase):
         self.assertEqual([b for b in self.remote_branches() if b.startswith('backlog/ui-')], [])
         self.assertEqual(len(self.f.server.repo.load_ops()), 1)
 
-    def test_shutdown_mid_publish_undoes_it(self):
+    def wait_for_gh(self):
+        for _ in range(200):
+            if os.path.exists(self.f.gh_log) and 'pr create' in open(self.f.gh_log).read():
+                return
+            time.sleep(0.05)
+        self.fail('gh pr create never started')
+
+    def ui_branches(self):
+        return [b for b in self.remote_branches() if b.startswith('backlog/ui-')]
+
+    def test_shutdown_after_gh_started_keeps_the_remote_branch(self):
         repo = self.f.server.repo
         self.f.request('POST', '/api/ops', {'op': 'move', 'id': 'IB-2', 'to': 'top'})
         block = os.path.join(self.f.tmp, 'release-gh')
         os.environ['FAKE_GH_BLOCK'] = block
-        t = threading.Thread(target=lambda: self.f.request('POST', '/api/publish'))
+        result = {}
+        t = threading.Thread(target=lambda: result.update(res=self.f.request('POST', '/api/publish')))
         t.start()
         try:
-            for _ in range(200):
-                if os.path.exists(self.f.gh_log) and 'pr create' in open(self.f.gh_log).read():
-                    break
-                time.sleep(0.05)
-            self.assertIn('backlog/ui-', ' '.join(self.remote_branches()))
+            self.wait_for_gh()
+            self.assertEqual(len(self.ui_branches()), 1)
             ui.shutdown(repo, wait=0)
-            self.assertEqual([b for b in self.remote_branches() if b.startswith('backlog/ui-')], [])
+            self.assertEqual(len(self.ui_branches()), 1)
             self.assertNotIn('backlog/ui-', git(self.f.work, 'branch', '--list'))
             self.assertEqual(len(git(self.f.work, 'worktree', 'list').splitlines()), 1)
         finally:
             write(block, '')
             t.join(30)
+        self.assertEqual(result['res'][0], 200, result['res'][1])
+        self.assertEqual(len(self.ui_branches()), 1)
+
+    def test_a_failing_settle_after_the_pr_exists_keeps_the_remote_branch(self):
+        repo = self.f.server.repo
+        self.f.request('POST', '/api/ops', {'op': 'move', 'id': 'IB-2', 'to': 'top'})
+        with mock.patch.object(ui.Repo, 'settle', side_effect=OSError('disk full')):
+            with self.assertRaises(OSError):
+                repo.publish()
+        self.assertIn('pr create', open(self.f.gh_log).read())
+        self.assertEqual(len(self.ui_branches()), 1)
+        self.assertNotIn('backlog/ui-', git(self.f.work, 'branch', '--list'))
+        self.assertEqual(len(git(self.f.work, 'worktree', 'list').splitlines()), 1)
+
+    def test_a_cleanup_before_gh_starts_deletes_the_branch_and_stops_the_publish(self):
+        repo = self.f.server.repo
+        self.f.request('POST', '/api/ops', {'op': 'move', 'id': 'IB-2', 'to': 'top'})
+        real, forced = ui.backlog.describe, []
+
+        def describe(*args):
+            if not forced:  # the PR body is built after the push and before gh pr create
+                forced.append(True)
+                repo.cleanup_publish()
+            return real(*args)
+        with mock.patch.object(ui.backlog, 'describe', describe):
+            with self.assertRaisesRegex(ui.PublishError, 'stopped before the PR'):
+                repo.publish()
+        self.assertFalse(os.path.exists(self.f.gh_log) and 'pr create' in open(self.f.gh_log).read())
+        self.assertEqual(self.ui_branches(), [])
+        self.assertEqual(len(repo.load_ops()), 1)
 
     def test_concurrent_publish_is_409(self):
         self.f.server.repo.publishing.acquire()
