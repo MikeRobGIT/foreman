@@ -832,9 +832,10 @@ BASH_PIECES[3] = merge_discipline
 # ---- piece 4: trailer guard -----------------------------------------------------------------------
 
 MESSAGE_OPTS = {
-    'git': {'commit': (('-m', '--message'), ('-F', '--file'))},
+    'git': {'commit': (('-m', '--message', '--trailer'), ('-F', '--file')),
+            'merge': (('-m', '--message'), ('-F', '--file'))},
     'gh': {s: (('-t', '--title', '-b', '--body', '--subject'), ('-F', '--body-file'))
-           for s in ('pr create', 'pr edit', 'pr comment', 'pr merge', 'pr review')},
+           for s in ('pr create', 'pr new', 'pr edit', 'pr comment', 'pr merge', 'pr review')},
     'gt': {s: (('-m', '--message'), ()) for s in ('create', 'modify', 'submit')},
 }
 

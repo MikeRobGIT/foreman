@@ -37,6 +37,7 @@ FALLBACK = (
     ('git', 'pull', r'\bgit\b[^\n]*\bpull\b'),
     ('gh', 'pr merge', r'\bgh\b[^\n]*\bmerge\b'),
     ('gh', 'pr create', r'\bgh\b[^\n]*\bcreate\b'),
+    ('gh', 'pr new', r'\bgh\b[^\n]*\bnew\b'),
     ('gh', 'pr comment', r'\bgh\b[^\n]*\bcomment\b'),
     ('gh', 'pr edit', r'\bgh\b[^\n]*\bedit\b'),
     ('gh', 'pr review', r'\bgh\b[^\n]*\breview\b'),

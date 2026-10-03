@@ -1591,6 +1591,23 @@ class TrailerGuardTest(Case):
         for sub in ('comment', 'edit', 'review'):
             self.assertIn('Co-Authored-By', self.fx.bash(f'gh pr {sub} 5 --body "x\nCo-Authored-By: a'), sub)
 
+    def test_a_commit_trailer_option_is_read(self):
+        for command in ('git commit -m x --trailer "Co-Authored-By: a <a@b>"', 'git commit -m x --trailer=Co-Authored-By:a'):
+            self.assertIn('Co-Authored-By', self.fx.bash(command) or '', command)
+
+    def test_a_git_merge_message_is_read(self):
+        msg = os.path.join(self.fx.tmp, 'merge-msg.txt')
+        write(msg, 'Merge main\n\nCo-Authored-By: a\n')
+        for command in ('git merge -m "x\nCo-Authored-By: a" origin/main', 'git merge --message "x\nCo-Authored-By: a" origin/main',
+                        f'git merge -F {msg} origin/main', f'git merge --file {msg} origin/main'):
+            self.assertIn('Co-Authored-By', self.fx.bash(command) or '', command)
+        self.assertIsNone(self.fx.bash('git merge -m "Merge main" origin/main'))
+
+    def test_gh_pr_new_messages_are_read_like_gh_pr_create(self):
+        for command in ('gh pr new --title t --body "x\nCo-Authored-By: a"', 'gh pr new -t "Co-Authored-By: a"',
+                        'gh pr new --title t --body "x\nCo-Authored-By: a'):   # the last one the scan can't read
+            self.assertIn('Co-Authored-By', self.fx.bash(command) or '', command)
+
     def test_every_message_option_of_every_command_is_read(self):
         trailer = 'Co-Authored-By: a'
         msg = os.path.join(self.fx.tmp, 'opt-msg.txt')

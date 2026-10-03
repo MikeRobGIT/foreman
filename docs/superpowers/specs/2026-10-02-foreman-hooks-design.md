@@ -285,8 +285,9 @@ Two review rounds showed that parsing Bash keeps missing forms. Detection is the
 ### 4. Trailer guard (any session in a foreman repo)
 
 - **The message text checked:**
-  - **`git commit`:** the `-m`/`--message` values, plus the file named by `-F`/`--file`.
-  - **`gh pr create|edit|comment|merge|review`:** the `-t`/`--title`, `-b`/`--body` and `--subject` values, plus `-F`/`--body-file`.
+  - **`git commit`:** the `-m`/`--message` and `--trailer` values, plus the file named by `-F`/`--file`.
+  - **`git merge`:** the `-m`/`--message` values, plus the file named by `-F`/`--file`.
+  - **`gh pr create|new|edit|comment|merge|review`:** the `-t`/`--title`, `-b`/`--body` and `--subject` values, plus `-F`/`--body-file`.
   - **`gt create|modify|submit`:** `-m`/`--message`.
   - **Heredoc bodies** belong to the command they feed.
   - **With unknown arguments,** the segment's raw text.
