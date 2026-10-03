@@ -1627,5 +1627,401 @@ class BacklogCheckTest(Case):
         self.assertIn('IB-3: 2 " | " separators, want 5', self.post(self.backlog_path()))
 
 
+def transcript(fx, name, prompt, born=None, path=None):
+    """A subagent transcript whose first user message is `prompt` and whose first entry has time `born`."""
+    path = path or os.path.join(fx.tmp, 'transcripts', name + '.jsonl')
+    stamp = time.strftime('%Y-%m-%dT%H:%M:%S.000Z', time.gmtime(born or time.time()))
+    write(path, json.dumps({'type': 'system', 'timestamp': stamp}) + '\n' +
+          json.dumps({'type': 'user', 'timestamp': stamp, 'message': {'role': 'user', 'content': prompt}}) + '\n')
+    return path
+
+
+def put_worker(fx, agent, prompt):
+    """The worker's transcript where Claude Code keeps it (probe P2): <main transcript minus .jsonl>/subagents/agent-<id>.jsonl."""
+    return transcript(fx, agent, prompt, path=os.path.join(fx.tmp, 'session', 'subagents', f'agent-{agent}.jsonl'))
+
+
+TAGGED = 'foreman-worker: 20261002-1530-w1a\nDo rows IB-1.'
+
+
+class BriefingTest(Case):
+    """Piece 6. SubagentStart has no tag to read (P2), so a tagged worker is briefed on its first PreToolUse."""
+
+    def setUp(self):
+        super().setUp()
+        self.main = os.path.join(self.fx.tmp, 'session.jsonl')
+
+    def call(self, command='git status', agent='a1', agent_type='general-purpose', tool='Bash'):
+        tool_input = {'command': command} if tool == 'Bash' else {'file_path': os.path.join(self.fx.work, 'app.py')}
+        d = self.fx.payload(tool, tool_input, agent=agent)
+        d.update(agent_type=agent_type, transcript_path=self.main)
+        return self.fx.hook('pretool', d)[0]
+
+    def context(self, out):
+        return out['hookSpecificOutput']['additionalContext'] if out else None
+
+    def start(self, agent='a1', agent_type='general-purpose'):
+        d = {'hook_event_name': 'SubagentStart', 'session_id': 'S1', 'cwd': self.fx.work, 'agent_id': agent,
+             'agent_type': agent_type, 'transcript_path': self.main}
+        return self.fx.hook('subagent-start', d)[0]
+
+    def entry(self, agent='a1'):
+        return state.read_json(os.path.join(self.fx.state, 'batches', 'S1', 'agents', agent))
+
+    def test_a_tagged_worker_is_briefed_on_its_first_call_with_the_rendered_contract(self):
+        put_worker(self.fx, 'a1', TAGGED)
+        out = self.call()['hookSpecificOutput']
+        ctx = out['additionalContext']
+        self.assertEqual(out['hookEventName'], 'PreToolUse')
+        self.assertNotIn('permissionDecision', out)
+        self.assertIn('You run steps 2-8 on your batch', ctx)
+        self.assertIn(os.path.join(SCRIPTS, 'wt-setup.sh'), ctx)
+        self.assertIn(f'{SCRIPTS}/gate-lock.sh 20261002-1530-w1a', ctx)
+        self.assertNotIn('$FOREMAN', ctx)
+        self.assertNotIn('{{', ctx)
+        self.assertIn('.claude/rules/*.md', ctx)
+        self.assertIn('/20261002-1530-w1a-review.log', ctx)
+        self.assertIn('| IB-NEW-a | title |', ctx)
+        self.assertNotIn('<batch>', ctx)
+        self.assertNotIn('<prefix>', ctx)
+        self.assertIn('<scratch> = your scratchpad dir', ctx)
+        self.assertIn('Gate (run it under', ctx)
+        self.assertIn('Forbidden trailer lines: Co-Authored-By, Claude-Session, Generated with', ctx)
+        entry = self.entry()
+        self.assertEqual((entry['batch'], entry['spec'], entry['briefed']), ('20261002-1530-w1a', False, True))
+
+    def test_it_is_delivered_once_per_worker(self):
+        put_worker(self.fx, 'a1', TAGGED)
+        put_worker(self.fx, 'a2', TAGGED)
+        self.assertIsNotNone(self.call())
+        self.assertIsNone(self.call())
+        self.assertIsNone(self.call('git log'))
+        self.assertIsNotNone(self.call(agent='a2'))
+
+    def test_a_first_call_that_names_no_git_still_briefs(self):
+        put_worker(self.fx, 'a1', TAGGED)
+        self.assertIn('You run steps 2-8', self.context(self.call('ls -la')))
+        self.assertIsNone(self.call('ls -la'))
+
+    def test_an_edit_call_briefs_too(self):
+        put_worker(self.fx, 'a1', TAGGED)
+        self.assertIn('You run steps 2-8', self.context(self.call(tool='Edit')))
+        self.assertIsNone(self.call(tool='Edit'))
+
+    def test_a_deny_and_the_briefing_arrive_in_one_json(self):
+        self.fx.start_run()
+        put_worker(self.fx, 'a1', TAGGED)
+        out = self.call('gh pr merge 5 --squash')['hookSpecificOutput']
+        self.assertEqual(out['permissionDecision'], 'deny')
+        self.assertIn('workers never merge', out['permissionDecisionReason'])
+        self.assertIn('You run steps 2-8', out['additionalContext'])
+        again = self.call('gh pr merge 5 --squash')['hookSpecificOutput']
+        self.assertEqual(again['permissionDecision'], 'deny')
+        self.assertNotIn('additionalContext', again)
+
+    def test_no_tag_no_briefing(self):
+        put_worker(self.fx, 'a1', 'Do rows IB-1.\nforeman-worker: w1a')
+        self.assertIsNone(self.call())
+        self.assertEqual(self.entry(), {'batch': None})
+        self.assertIsNone(self.call())
+        put_worker(self.fx, 'a2', 'foreman-worker: w1a')
+        self.assertIsNone(self.call(agent='a2', agent_type='Explore'))
+        self.assertIsNone(self.entry('a2'))
+
+    def test_the_worker_agent_types_decide_who_is_briefed(self):
+        write(os.path.join(self.fx.work, '.claude/foreman.config.md'),
+              CONFIG.replace('---\n', '---\nworker_agent_types: [builder]\n', 1))
+        put_worker(self.fx, 'a1', TAGGED)
+        put_worker(self.fx, 'a2', TAGGED)
+        self.assertIsNone(self.call(agent='a1'))
+        self.assertIsNotNone(self.call(agent='a2', agent_type='builder'))
+
+    def test_the_id_prefix_comes_from_the_config(self):
+        write(os.path.join(self.fx.work, '.claude/foreman.config.md'), CONFIG.replace('id_prefix: IB', 'id_prefix: ZZ'))
+        put_worker(self.fx, 'a1', TAGGED)
+        ctx = self.context(self.call())
+        self.assertIn('| ZZ-NEW-a | title |', ctx)
+        self.assertNotIn('IB-NEW', ctx)
+
+    def test_the_main_session_is_never_briefed(self):
+        out, _ = self.fx.hook('pretool', self.fx.payload('Bash', {'command': 'git status'}))
+        self.assertIsNone(out)
+
+    def test_spec_phase_tags(self):
+        put_worker(self.fx, 'a1', 'foreman-worker: w1b spec-phase\nWrite the spec.')
+        put_worker(self.fx, 'a2', 'foreman-worker: w1c (spec-phase)')
+        self.assertIsNotNone(self.call())
+        self.assertIsNotNone(self.call(agent='a2'))
+        self.assertTrue(self.entry()['spec'])
+        self.assertTrue(self.entry('a2')['spec'])
+
+    def test_a_replacement_of_a_released_batch_is_told_so(self):
+        self.fx.start_run()
+        self.fx.bash(f'python3 {HOOKS} release w1a abc1234')
+        put_worker(self.fx, 'a1', 'foreman-worker: w1a')
+        put_worker(self.fx, 'a2', 'foreman-worker: w1a spec-phase')
+        self.assertIn("Your batch's spec is already released (`abc1234`)", self.context(self.call()))
+        self.assertNotIn('already released', self.context(self.call(agent='a2')))
+
+    def test_shared_resources_are_cut_first_at_8_kb(self):
+        long = '\n'.join(['shared_resources:'] + [f'  - rule {i} ' + 'x' * 200 for i in range(60)])
+        write(os.path.join(self.fx.work, '.claude/foreman.config.md'), CONFIG.replace('---\n', '---\n' + long + '\n', 1))
+        put_worker(self.fx, 'a1', 'foreman-worker: w1a')
+        ctx = self.context(self.call())
+        self.assertLessEqual(len(ctx.encode()), 8192)
+        self.assertIn('You run steps 2-8', ctx)
+        self.assertIn('Shared resources:\n- rule 0 ', ctx)
+        self.assertTrue(ctx.endswith('…(truncated)'))
+
+    def test_a_short_shared_resources_list_is_kept_whole(self):
+        write(os.path.join(self.fx.work, '.claude/foreman.config.md'),
+              CONFIG.replace('---\n', '---\nshared_resources:\n  - use the test db\n  - never touch prod\n', 1))
+        put_worker(self.fx, 'a1', 'foreman-worker: w1a')
+        ctx = self.context(self.call())
+        self.assertTrue(ctx.endswith('Shared resources:\n- use the test db\n- never touch prod'))
+
+    def test_briefing_disabled_still_records_the_map(self):
+        write(os.path.join(self.fx.work, '.claude/foreman.config.md'),
+              CONFIG.replace('---\n', '---\nhooks_disabled: [worker_briefing]\n', 1))
+        put_worker(self.fx, 'a1', 'foreman-worker: w1a spec-phase')
+        self.assertIsNone(self.call())
+        self.assertTrue(self.entry()['spec'])
+        self.assertFalse(self.entry()['briefed'])
+        self.assertIsNone(self.start())
+
+    def test_subagent_start_briefs_a_worker_whose_transcript_already_exists(self):
+        put_worker(self.fx, 'a1', TAGGED)
+        out = self.start()['hookSpecificOutput']
+        self.assertEqual(out['hookEventName'], 'SubagentStart')
+        self.assertIn('You run steps 2-8', out['additionalContext'])
+        self.assertTrue(self.entry()['briefed'])
+        self.assertIsNone(self.call())   # the first PreToolUse does not brief again
+        self.assertIsNone(self.start())
+
+    def test_subagent_start_before_the_transcript_exists_does_nothing_then_the_first_call_briefs(self):
+        self.assertIsNone(self.start())   # probe P2: at SubagentStart the worker's transcript is not there yet
+        self.assertIsNone(self.entry())
+        put_worker(self.fx, 'a1', TAGGED)
+        self.assertIn('You run steps 2-8', self.context(self.call()))
+
+    def test_subagent_start_skips_other_agent_types(self):
+        put_worker(self.fx, 'a1', TAGGED)
+        self.assertIsNone(self.start(agent_type='Explore'))
+        self.assertIsNone(self.entry())
+
+
+class BriefingClaimTest(InProcess):
+    def setUp(self):
+        super().setUp()
+        self.main = os.path.join(self.fx.tmp, 'session.jsonl')
+        put_worker(self.fx, 'a1', 'foreman-worker: w1a')
+
+    def worker(self):
+        return self.hook(agent_id='a1', agent_type='general-purpose', transcript_path=self.main)
+
+    def test_a_parallel_call_that_read_the_entry_before_the_flag_cannot_brief_again(self):
+        stale = {'batch': 'w1a', 'spec': False, 'briefed': False}
+        with mock.patch.object(hooks, 'resolve_agent', return_value=stale):
+            first = hooks.take_briefing(self.worker(), self.repo)
+            second = hooks.take_briefing(self.worker(), self.repo)
+        self.assertIn('You run steps 2-8', first)
+        self.assertIsNone(second)
+
+    def test_a_briefed_worker_is_not_rendered_again(self):
+        self.assertIsNotNone(hooks.take_briefing(self.worker(), self.repo))
+        with mock.patch.object(hooks, 'briefing', side_effect=AssertionError('rendered again')):
+            self.assertIsNone(hooks.take_briefing(self.worker(), self.repo))
+
+    def test_forget_drops_the_claim_with_the_entry(self):
+        self.assertIsNotNone(hooks.take_briefing(self.worker(), self.repo))
+        agents = os.path.join(self.fx.state, 'batches', 'S1', 'agents')
+        self.assertEqual(sorted(os.listdir(agents)), ['a1', 'a1.briefed'])
+        hooks.forget(self.repo, 'S1', 'w1a')
+        self.assertEqual(os.listdir(agents), [])
+
+    def test_a_briefing_that_cannot_render_keeps_the_deny_and_is_retried(self):
+        self.put_marker('S1')
+        payload = self.fx.payload('Bash', {'command': 'gh pr merge 5 --squash'}, agent='a1')
+        payload['transcript_path'] = self.main
+
+        def pretool():
+            out, err = io.StringIO(), io.StringIO()
+            with mock.patch.object(sys, 'stdin', io.StringIO(json.dumps(payload))), \
+                    contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+                hooks.main(['hooks.py', 'pretool'])
+            return json.loads(out.getvalue())['hookSpecificOutput'], err.getvalue()
+
+        with mock.patch.dict(os.environ, {'PATH': self.fx.env['PATH']}), \
+                mock.patch.object(hooks, 'SKILL', os.path.join(self.fx.tmp, 'missing.md')):
+            out, err = pretool()
+        self.assertEqual(out['permissionDecision'], 'deny')
+        self.assertNotIn('additionalContext', out)
+        self.assertIn('foreman hook error: FileNotFoundError', err)
+        with mock.patch.dict(os.environ, {'PATH': self.fx.env['PATH']}):
+            out, err = pretool()   # nothing was claimed, so the next call briefs
+        self.assertEqual(out['permissionDecision'], 'deny')
+        self.assertIn('You run steps 2-8', out['additionalContext'])
+
+
+GOOD = 'Report.\n\n```json\n{"done": [{"id": "IB-1", "note": "shipped"}], "append": [], "new_rows": [], "rule_notes": []}\n```\n'
+
+
+class ReportCheckTest(Case):
+    def stop(self, msg, prompt='foreman-worker: w1a\nrows', agent='a1', active=False, born=None, cwd=None):
+        d = {'hook_event_name': 'SubagentStop', 'session_id': 'S1', 'cwd': cwd or self.fx.work, 'agent_id': agent,
+             'agent_type': 'general-purpose', 'agent_transcript_path': transcript(self.fx, agent, prompt, born),
+             'last_assistant_message': msg, 'stop_hook_active': active}
+        out, self.err = self.fx.hook('subagent-stop', d)
+        return out['reason'] if out else None
+
+    def test_missing_block(self):
+        self.assertIn('end your report with ONE fenced json block', self.stop('All done, PR #5.'))
+
+    def test_invalid_json(self):
+        self.assertIn('does not parse', self.stop('x\n```json\n{"done": [}\n```\n'))
+
+    def test_wrong_shape(self):
+        self.assertIn('bad "done" field', self.stop('x\n```json\n{"done": ["IB-1"]}\n```\n'))
+
+    def test_a_block_bookkeeping_would_refuse(self):
+        why = self.stop('x\n```json\n{"done": [{"id": "IB-99", "note": "x"}]}\n```\n')
+        self.assertIn('bookkeeping would refuse your json block: IB-99: 0 rows match', why)
+
+    def test_a_valid_block_and_ignored_rule_notes(self):
+        self.assertIsNone(self.stop(GOOD))
+        notes = GOOD.replace('"rule_notes": []', '"rule_notes": [{"file": ".claude/rules/none.md", "old": "a", "new": "b"}]')
+        self.assertIsNone(self.stop(notes))
+
+    def test_last_json_block_wins(self):
+        self.assertIsNone(self.stop('Draft:\n```json\n{"done": [}\n```\n\n' + GOOD + '\nThanks.'))
+        self.assertIn('does not parse', self.stop(GOOD + '\nCorrected:\n```json\n{oops}\n```'))
+
+    def test_stop_hook_active_and_untagged_workers_pass(self):
+        self.assertIsNone(self.stop('no block', active=True))
+        self.assertIsNone(self.stop('no block', prompt='just a helper'))
+
+    def test_other_agent_types_pass(self):
+        d = {'hook_event_name': 'SubagentStop', 'session_id': 'S1', 'cwd': self.fx.work, 'agent_id': 'a1',
+             'agent_type': 'Explore', 'agent_transcript_path': transcript(self.fx, 'a1', 'foreman-worker: w1a'),
+             'last_assistant_message': 'no block', 'stop_hook_active': False}
+        self.assertIsNone(self.fx.hook('subagent-stop', d)[0])
+
+    def test_the_check_can_be_disabled(self):
+        write(os.path.join(self.fx.work, '.claude/foreman.config.md'),
+              CONFIG.replace('---\n', '---\nhooks_disabled: [report_check]\n', 1))
+        self.assertIsNone(self.stop('no block'))
+
+    def test_spec_phase_stops(self):
+        prompt = 'foreman-worker: w1b spec-phase\nspec'
+        self.assertIsNone(self.stop('Preface line.\nSPEC READY /wt b docs/s.md abc1234\nsummary', prompt=prompt))
+        self.assertIn("you're in the spec phase", self.stop('A question for you?', prompt=prompt))
+        self.assertIn("you're in the spec phase", self.stop('I will end with SPEC READY /wt b s.md abc when done', prompt=prompt))
+        self.fx.start_run()
+        self.fx.bash(f'python3 {HOOKS} release w1b abc1234')
+        self.assertIn('end your report with ONE fenced json block', self.stop('SPEC READY /wt b s.md abc', prompt=prompt))
+
+    def test_stopping_lets_the_stopped_worker_through_but_not_a_later_replacement(self):
+        self.fx.start_run()
+        state.write_json(os.path.join(self.fx.state, 'batches', 'S1', 'agents', 'a1'),
+                         {'batch': 'w1a', 'spec': False, 'time': time.time() - 60})
+        self.fx.bash(f'python3 {HOOKS} stopping w1a')
+        self.assertIsNone(self.stop('stopped mid-work', agent='a1'))
+        time.sleep(0.01)
+        state.write_json(os.path.join(self.fx.state, 'batches', 'S1', 'agents', 'a2'),
+                         {'batch': 'w1a', 'spec': False, 'time': time.time()})
+        self.assertIn('fenced json block', self.stop('stopped mid-work', agent='a2'))
+        self.assertIsNone(self.stop('unmapped, older transcript', agent='a3', born=time.time() - 120))
+        self.assertIn('fenced json block', self.stop('unmapped, newer transcript', agent='a4', born=time.time() + 120))
+
+    def test_an_entry_without_a_time_falls_back_to_the_transcript(self):
+        self.fx.start_run()
+        self.fx.bash(f'python3 {HOOKS} stopping w1a')
+        for agent, born, allowed in (('a1', time.time() - 120, True), ('a2', time.time() + 120, False)):
+            state.write_json(os.path.join(self.fx.state, 'batches', 'S1', 'agents', agent), {'batch': None})
+            why = self.stop('stopped mid-work', agent=agent, born=born)
+            self.assertEqual(why is None, allowed, agent)
+
+    def test_the_stop_file_of_another_batch_does_not_count(self):
+        self.fx.start_run()
+        self.fx.bash(f'python3 {HOOKS} stopping w2b')
+        self.assertIn('fenced json block', self.stop('x', born=time.time() - 120))
+
+    def test_bookkeeping_is_checked_in_the_workers_own_checkout(self):
+        wt = os.path.join(self.fx.tmp, 'wt')
+        git(self.fx.work, 'worktree', 'add', '-q', wt, '-b', 'w1a')
+        write(os.path.join(wt, '.claude/improvement-backlog.md'), BACKLOG + '| IB-99 | Extra | low | ready | C | s |\n')
+        report = 'x\n```json\n{"done": [{"id": "IB-99", "note": "x"}]}\n```\n'
+        self.assertIsNone(self.stop(report, cwd=wt))
+        self.assertIn('IB-99: 0 rows match', self.stop(report))
+
+    def test_a_bk_crash_is_allowed_with_a_warning(self):
+        write(os.path.join(self.fx.work, '.claude/improvement-backlog.md'), '# Backlog\n')
+        self.assertIsNone(self.stop(GOOD))
+        self.assertIn('report check skipped (bk.py exit 1)', self.err)
+
+
+class ReportProblemTest(InProcess):
+    def test_a_bk_that_takes_too_long_is_allowed_with_a_warning(self):
+        seen = {}
+
+        def slow(argv, **kw):
+            seen.update(argv=argv, timeout=kw.get('timeout'))
+            raise subprocess.TimeoutExpired(argv, kw.get('timeout'))
+
+        err = io.StringIO()
+        with mock.patch.object(hooks.subprocess, 'run', slow), contextlib.redirect_stderr(err):
+            self.assertIsNone(hooks.report_problem(GOOD, self.fx.work))
+        self.assertEqual(seen['timeout'], 20)
+        self.assertEqual(seen['argv'][2:5], [self.fx.work, '--dry-run', '--no-fetch'])
+        self.assertIn('report check skipped (bk.py timed out)', err.getvalue())
+        self.assertFalse(os.path.exists(seen['argv'][-1]))   # the temp report is removed
+
+
+class ShapeProblemTest(unittest.TestCase):
+    OK = {'done': [{'id': 'IB-1', 'note': 'n'}], 'append': [{'id': 'IB-2', 'note': 'n'}],
+          'new_rows': ['| IB-NEW-a | t | low | ready | a | s |'], 'rule_notes': [{'file': 'f', 'old': 'o', 'new': 'n'}]}
+
+    def test_a_good_report_and_an_empty_one(self):
+        self.assertIsNone(hooks.shape_problem(self.OK))
+        self.assertIsNone(hooks.shape_problem({}))
+
+    def test_each_field_names_itself(self):
+        for field, bad in (('done', 'IB-1'), ('done', ['IB-1']), ('done', [{'id': 'IB-1'}]), ('done', [{'id': 1, 'note': 'n'}]),
+                           ('append', {'id': 'IB-1', 'note': 'n'}), ('append', [{'note': 'n'}]),
+                           ('new_rows', 'x'), ('new_rows', [5]),
+                           ('rule_notes', [{'file': 'f', 'old': 'o'}]), ('rule_notes', [{'file': 'f', 'old': 'o', 'new': 3}]),
+                           ('rule_notes', ['x'])):
+            self.assertEqual(hooks.shape_problem(dict(self.OK, **{field: bad})), field, (field, bad))
+
+    def test_a_block_that_is_not_an_object(self):
+        for bad in ([], 'x', None, 5):
+            self.assertEqual(hooks.shape_problem(bad), 'the block', bad)
+
+
+class BkNoFetchTest(unittest.TestCase):
+    def test_no_fetch_skips_the_ui_branch_fetch(self):
+        fx = Fx()
+        try:
+            rep = os.path.join(fx.tmp, 'r.json')
+            write(rep, json.dumps({'pr': 0, 'done': [{'id': 'IB-1', 'note': 'x'}]}))
+            git(fx.work, 'remote', 'set-url', 'origin', os.path.join(fx.tmp, 'gone.git'))
+
+            def trace(*flags):
+                """What git traced while bk.py ran, with `flags` before the report."""
+                path = os.path.join(fx.tmp, f'trace{len(flags)}.txt')
+                p = subprocess.run([sys.executable, os.path.join(SCRIPTS, 'bk.py'), fx.work, '--dry-run', *flags, rep],
+                                   capture_output=True, text=True, env=dict(fx.env, GIT_TRACE=path))
+                self.assertIn('dry run: ok', p.stdout)
+                with open(path) as f:
+                    return f.read()
+
+            self.assertIn('git fetch', trace())   # the control: a fetch shows in the trace when bk.py makes one
+            quiet = trace('--no-fetch')
+            self.assertTrue(quiet.strip())        # git did run, so an absent fetch means something
+            self.assertNotIn('fetch', quiet)
+        finally:
+            fx.close()
+
+
 if __name__ == '__main__':
     unittest.main()

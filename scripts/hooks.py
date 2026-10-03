@@ -936,13 +936,206 @@ def backlog_check(h, ti):
 POST_EDIT[5] = backlog_check
 
 
+# ---- worker tags (pieces 6 and 7) -----------------------------------------------------------------
+
+FENCE = re.compile(r'```json[ \t]*\r?\n(.*?)```', re.S)
+SKILL = os.path.join(HERE, '..', 'skills', 'foreman', 'SKILL.md')
+BRIEF_CAP = 8192
+CUT = ' …(truncated)'
+
+
+def is_worker(repo, h):
+    return h.inp.get('agent_type') in repo.list('worker_agent_types')
+
+
+# ---- piece 6: worker briefing ---------------------------------------------------------------------
+
+def section(text, heading):
+    m = re.search(rf'^{re.escape(heading)}\n(.*?)(?=^#{{1,3}} |\Z)', text, re.S | re.M)
+    return m.group(1).strip() if m else ''
+
+
+def default_table(text):
+    """{key: default} from SKILL.md's Step 0.5 table, preferring the default's first backticked span."""
+    out = {}
+    for line in text.splitlines():
+        cells = line.strip().strip('|').split(' | ')
+        m = re.fullmatch(r'\s*`(\w+)`\s*', cells[0]) if len(cells) == 3 else None
+        if m:
+            code = re.search(r'`([^`]+)`', cells[2])
+            out[m.group(1)] = code.group(1) if code else cells[2].strip()
+    return out
+
+
+def briefing(repo, batch, spec, sid):
+    with open(SKILL, encoding='utf-8') as f:
+        skill = f.read()
+    defaults = default_table(skill)
+
+    def key(m):
+        v = repo.cfg.get(m.group(1))
+        v = defaults.get(m.group(1), m.group(0)) if v is None else v
+        return ', '.join(map(str, v)) if isinstance(v, list) else str(v)
+
+    text = re.sub(r'\{\{(\w+)\}\}', key, section(skill, '### Worker contract'))
+    text = (text.replace('$FOREMAN', HERE).replace('<prefix>', str(repo.get('id_prefix', 'IB')))
+            .replace('<batch>', batch))
+    text += ('\n\n<scratch> = your scratchpad dir; <worktree> and {worktree} = your current checkout\'s top level; '
+             '{repo} = the main checkout')
+    head = ['# foreman worker briefing (batch ' + batch + ')', text, '',
+            f"Gate (run it under {HERE}/gate-lock.sh {batch} -- '<gate>'): {repo.get('gate') or '(none configured)'}",
+            'Forbidden trailer lines: ' + (', '.join(map(str, repo.list('forbid_trailers'))) or 'none')]
+    rel = released(repo, sid, batch)
+    if not spec and rel:
+        head.append(f"Your batch's spec is already released (`{rel.get('sha')}`): skip the spec phase and continue "
+                    'the build phase on the existing branch.')
+    out = '\n'.join(head) + '\n'
+    items = repo.list('shared_resources')
+    shared = '\n'.join(['', 'Shared resources:'] + [f'- {s}' for s in items]) if items else ''
+    if shared and len((out + shared).encode()) > BRIEF_CAP:
+        cut = BRIEF_CAP - len(out.encode()) - len(CUT.encode())
+        shared = shared.encode()[:max(cut, 0)].decode('utf-8', 'ignore') + CUT
+    return out + shared
+
+
+def take_briefing(h, repo):
+    """The briefing for a tagged worker, once: None when the agent has no tag, was briefed already or briefing is
+    off. SubagentStart and the worker's first PreToolUse both call it, because the tag can't be read at
+    SubagentStart (probe P2); whichever sees the worker first delivers. A `.briefed` file made with O_EXCL is the
+    claim: two parallel first calls both read `briefed: false`, and only one creates it."""
+    entry = resolve_agent(repo, h)
+    if not entry or not entry.get('batch') or entry.get('briefed') or repo.disabled('worker_briefing'):
+        return None
+    text = briefing(repo, entry['batch'], bool(entry.get('spec')), h.sid)
+    path = os.path.join(repo.dirs[0], 'batches', h.sid, 'agents', h.agent)
+    state.ensure(os.path.dirname(path))
+    try:
+        fd = os.open(path + '.briefed', os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+    except FileExistsError:
+        return None
+    with os.fdopen(fd, 'w') as f:
+        json.dump({'batch': entry['batch']}, f)   # a batch name, so `forget` drops the claim with the entry
+    state.write_json(path, dict(entry, briefed=True))
+    return text
+
+
+def worker_briefing(h):
+    repo = repo_at(h.cwd) if h.agent else None
+    return take_briefing(h, repo) if repo and is_worker(repo, h) else None
+
+
+def subagent_start(h):
+    ctx = worker_briefing(h)
+    if ctx:
+        print(json.dumps({'hookSpecificOutput': {'hookEventName': 'SubagentStart', 'additionalContext': ctx}}))
+
+
+HANDLERS['subagent-start'] = subagent_start
+
+
+# ---- piece 7: report check ------------------------------------------------------------------------
+
+def shape_problem(rep):
+    """The first field of a worker's json report that bk.py would crash on, or None."""
+    if not isinstance(rep, dict):
+        return 'the block'
+    for k in ('done', 'append'):
+        v = rep.get(k, [])
+        if not (isinstance(v, list) and all(isinstance(x, dict) and isinstance(x.get('id'), str)
+                                            and isinstance(x.get('note'), str) for x in v)):
+            return k
+    v = rep.get('new_rows', [])
+    if not (isinstance(v, list) and all(isinstance(x, str) for x in v)):
+        return 'new_rows'
+    v = rep.get('rule_notes', [])
+    if not (isinstance(v, list) and all(isinstance(x, dict) and all(isinstance(x.get(f), str)
+                                                                    for f in ('file', 'old', 'new')) for x in v)):
+        return 'rule_notes'
+    return None
+
+
+def report_problem(msg, cwd):
+    blocks = FENCE.findall(msg)
+    if not blocks:
+        return "end your report with ONE fenced json block in the worker contract's format, even if empty"
+    try:
+        rep = json.loads(blocks[-1])
+    except ValueError as e:
+        return f'the json block at the end of your report does not parse ({e}); fix it'
+    bad = shape_problem(rep)
+    if bad:
+        return (f'the json block has a bad "{bad}" field: done/append are lists of {{"id", "note"}} strings, '
+                'new_rows a list of row strings, rule_notes a list of {"file", "old", "new"}')
+    rep.pop('rule_notes', None)
+    rep['pr'] = 0
+    top = state.toplevel(cwd) or cwd
+    fd, tmp = tempfile.mkstemp(suffix='.json')
+    try:
+        with os.fdopen(fd, 'w') as f:
+            json.dump(rep, f)
+        env = {k: v for k, v in os.environ.items() if k != 'FOREMAN_CONFIG'}
+        p = subprocess.run([sys.executable, os.path.join(HERE, 'bk.py'), top, '--dry-run', '--no-fetch', tmp],
+                           capture_output=True, text=True, timeout=20, env=env)
+    except subprocess.TimeoutExpired:
+        print('foreman: report check skipped (bk.py timed out)', file=sys.stderr)
+        return None
+    finally:
+        os.remove(tmp)
+    if 'PROBLEMS (nothing written)' in p.stdout:
+        lines = [l.strip() for l in p.stdout.split('PROBLEMS (nothing written):', 1)[1].splitlines() if l.strip()]
+        return 'bookkeeping would refuse your json block: ' + '; '.join(lines)
+    if p.returncode:
+        print(f'foreman: report check skipped (bk.py exit {p.returncode}): {p.stderr.strip()[-300:]}', file=sys.stderr)
+    return None
+
+
+def stopping_allowed(repo, h, batch):
+    """True when `hooks.py stopping <batch>` ran after this worker started (piece 7, probe P7)."""
+    stop = next((s for s in (state.read_json(batch_file(d, h.sid, batch, 'stopped')) for d in repo.dirs)
+                 if isinstance(s, dict)), None)
+    if stop is None:
+        return False
+    entry = agent_entry(repo, h.sid, h.agent)
+    born = (entry or {}).get('time') or transcript_head(h.inp.get('agent_transcript_path') or '')[1]
+    return born is None or float(born) < float(stop.get('time', 0))
+
+
+def subagent_stop(h):
+    if h.inp.get('stop_hook_active'):
+        return
+    repo = repo_at(h.cwd)
+    if not h.active(repo, 'report_check', run_only=False) or not is_worker(repo, h):
+        return
+    tag = worker_tag(transcript_head(h.inp.get('agent_transcript_path') or '')[0])
+    if not tag:
+        return
+    batch, spec = tag
+    if stopping_allowed(repo, h, batch):
+        return
+    msg = h.inp.get('last_assistant_message') or ''
+    if spec and not released(repo, h.sid, batch):
+        if any(line.startswith('SPEC READY ') for line in msg.splitlines()):
+            return
+        why = ("you're in the spec phase: finish the spec and end with `SPEC READY <worktree> <branch> <spec path> "
+               '<sha>` as the first line')
+    else:
+        why = report_problem(msg, h.cwd)
+    if why:
+        print(json.dumps({'decision': 'block', 'reason': 'foreman: ' + why}))
+
+
+HANDLERS['subagent-stop'] = subagent_stop
+
+
 # ---- pretool / posttool ---------------------------------------------------------------------------
 
 def pretool(h):
     tool = h.inp.get('tool_name')
     ti = h.inp.get('tool_input') or {}
     if tool == 'Bash':
-        pretool_bash(h, ti.get('command') or '')
+        command = ti.get('command')
+        if isinstance(command, str) and FAST.search(command):   # a Bash call without git/gh/gt gets here only from a subagent, to be briefed
+            pretool_bash(h, command)
     elif tool in EDIT_TOOLS:
         path = ti.get('file_path') or ti.get('notebook_path')
         if path:
@@ -950,10 +1143,19 @@ def pretool(h):
             repo = repo_at(path)
             for k in sorted(EDIT_PIECES):
                 EDIT_PIECES[k](h, repo, path)
-    if h.denies:   # printed before the touches: a failed touch (stderr, via main) can't drop a deny
-        print(json.dumps({'hookSpecificOutput': {
-            'hookEventName': 'PreToolUse', 'permissionDecision': 'deny',
-            'permissionDecisionReason': 'foreman: ' + '; '.join(dict.fromkeys(h.denies))}}), flush=True)
+    try:
+        briefing_text = worker_briefing(h)   # piece 6: a tagged worker's first call (probe P2)
+    except Exception as e:   # a briefing that fails must not drop the denies below
+        print(f'foreman hook error: {type(e).__name__}: {e}', file=sys.stderr)
+        briefing_text = None
+    if h.denies or briefing_text:   # printed before the touches: a failed touch (stderr, via main) can't drop a deny
+        out = {'hookEventName': 'PreToolUse'}
+        if h.denies:
+            out.update(permissionDecision='deny',
+                       permissionDecisionReason='foreman: ' + '; '.join(dict.fromkeys(h.denies)))
+        if briefing_text:
+            out['additionalContext'] = briefing_text
+        print(json.dumps({'hookSpecificOutput': out}), flush=True)
     for r in h.touch:
         touch_marker(r, h.sid)
 
@@ -1009,8 +1211,8 @@ def main(argv):
             command = command if isinstance(command, str) else ''
         if event == 'posttool' and command is not None and (inp.get('agent_id') or 'hooks.py run-end' not in command):
             return
-        if event == 'pretool' and command is not None and not FAST.search(command):
-            return
+        if event == 'pretool' and command is not None and not inp.get('agent_id') and not FAST.search(command):
+            return   # a subagent's call goes on: its first one carries the briefing (probe P2)
         _load()
         fn = HANDLERS.get(event)
         if fn:
