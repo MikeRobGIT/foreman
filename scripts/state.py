@@ -130,6 +130,20 @@ def outside(paths, nested):
     return {p for p in paths if not any(p.rstrip('/') == n or p.startswith(n + '/') for n in nested)}
 
 
+def not_ignored(top, paths, env):
+    """`paths` minus those git ignores (judged against the index in `env`, which keeps a tracked path in). `git add`
+    refuses a pathspec that names an ignored path, an exclude too ("The following paths are ignored"), which
+    would fail every mint in a checkout that ignores .claude/worktrees/. Git never stages an ignored path anyway."""
+    if not paths:
+        return []
+    p = subprocess.run(['git', 'check-ignore', '-z', '--stdin'], cwd=top, env=env, capture_output=True,
+                       input='\0'.join(paths).encode('utf-8', 'surrogateescape'))
+    if p.returncode > 1:   # 0 = some ignored, 1 = none
+        raise subprocess.CalledProcessError(p.returncode, p.args, p.stdout, p.stderr)
+    ignored = set(p.stdout.decode('utf-8', 'surrogateescape').split('\0'))
+    return [x for x in paths if x not in ignored]
+
+
 def write_tree(top, exclude):
     """The tree of the working copy, from a copy of the real index (keeps force-added files and existing blobs,
     so clean/eol/LFS filters don't re-run on unchanged files). `exclude` goes to the add as `:(exclude)` pathspecs,
@@ -143,8 +157,8 @@ def write_tree(top, exclude):
             shutil.copy2(real, tmp)
         else:
             os.remove(tmp)
-        specs = ['.'] + [f':(exclude,literal){p}' for p in sorted(exclude)]
         env = dict(os.environ, GIT_INDEX_FILE=tmp)
+        specs = ['.'] + [f':(exclude,literal){p}' for p in not_ignored(top, sorted(exclude), env)]
         subprocess.run(['git', 'add', '-A', '--pathspec-from-file=-', '--pathspec-file-nul'], cwd=top, env=env,
                        input='\0'.join(specs).encode('utf-8', 'surrogateescape'), check=True, capture_output=True)
         return subprocess.run(['git', 'write-tree'], cwd=top, env=env, check=True, capture_output=True,

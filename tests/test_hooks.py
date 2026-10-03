@@ -894,6 +894,14 @@ class GateBeforePushTest(Case):
             self.assertIn('no passing gate', self.fx.bash(cmd) or '', cmd)
         self.assertIsNone(self.fx.bash('git push origin :old :older'))   # every refspec deletes
 
+    def test_a_bare_colon_and_a_tag_push_are_not_deletes(self):
+        # `git push origin :` pushes the matching branches; --tags pushes every tag beside the refspecs
+        self.fx.commit('app.py', 'print(2)\n')
+        for cmd in ('git push origin :', 'git push origin :old :', 'git push origin --tags :old',
+                    'git push --tags origin :old', 'git push --follow-tags origin :old'):
+            self.assertIn('no passing gate', self.fx.bash(cmd) or '', cmd)
+        self.assertIsNone(self.fx.bash('git push origin :old'))   # control
+
     def test_a_nested_worktree_committed_as_a_gitlink_is_told_to_untrack_and_ignore_it(self):
         write(os.path.join(self.fx.work, 'app.py'), 'print(2)\n')
         git(self.fx.work, 'worktree', 'add', '-q', os.path.join(self.fx.work, '.claude/worktrees/agent-x'), '-b', 'agent-x')
@@ -1014,9 +1022,9 @@ class ReceiptExactnessTest(Case):
         last = state.read_json(state.last_path(self.fx.state, self.fx.work))
         self.assertEqual((last['tree'], last['artifacts']), (head_tree(self.fx.work), ['coverage/a.txt']))
 
-    def gated_push_passes(self):
+    def gated_push_passes(self, *cmd):
         """Gate the checkout, then expect the receipt to match HEAD (no noise about the nested paths) and the push through."""
-        p = self.fx.gate()
+        p = self.fx.gate(*cmd)
         self.assertEqual((p.returncode, 'part of the gated tree' in p.stderr, 'could not mint' in p.stderr), (0, False, False), p.stderr)
         self.assertTrue(os.path.exists(os.path.join(self.fx.state, 'gate', head_tree(self.fx.work))))
         self.assertIsNone(self.fx.bash('git push -u origin HEAD'))
@@ -1072,6 +1080,35 @@ class ReceiptExactnessTest(Case):
         self.assertIn('new.py', p.stderr)
         self.assertNotIn('.env.local', p.stderr)
         self.assertNotIn('n.md', p.stderr)
+
+    def ignored_worktree_gates(self, ignore_file):
+        # vacancy-vibe's orchestrator checkout ignores .claude/worktrees/ this way; `git add` refuses a pathspec
+        # that names an ignored path, even an exclude
+        self.fx.commit('app.py', 'print(2)\n')
+        if ignore_file == '.gitignore':
+            self.fx.commit('.gitignore', '.claude/worktrees/\n')
+        else:
+            with open(os.path.join(self.fx.work, '.git', 'info', 'exclude'), 'a') as f:
+                f.write('.claude/worktrees/\n')
+        git(self.fx.work, 'worktree', 'add', '-q', os.path.join(self.fx.work, '.claude/worktrees/agent-x'), '-b', 'agent-x')
+        self.gated_push_passes()
+
+    def test_a_worktree_ignored_by_gitignore_does_not_stop_the_mint(self):
+        self.ignored_worktree_gates('.gitignore')
+
+    def test_a_worktree_ignored_by_info_exclude_does_not_stop_the_mint(self):
+        self.ignored_worktree_gates('info/exclude')
+
+    def test_a_path_the_gate_itself_ignores_does_not_stop_the_mint(self):
+        # an embedded repo listed before the gate ran, ignored by the time of the mint
+        gate = 'echo vendor/emb/ >> .git/info/exclude'
+        write(os.path.join(self.fx.work, '.claude/foreman.config.md'), CONFIG.replace('echo gated', gate))
+        self.fx.commit('app.py', 'print(2)\n')
+        emb = os.path.join(self.fx.work, 'vendor', 'emb')
+        os.makedirs(emb)
+        git(emb, 'init', '-q')
+        self.fx.commit('e.txt', 'e\n', cwd=emb)
+        self.gated_push_passes(gate)
 
     def test_a_tracked_gitlink_stays_in_the_receipt(self):
         # a real submodule is in HEAD^{tree}; leaving it out would deny every push in such a repo

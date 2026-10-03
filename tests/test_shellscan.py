@@ -266,6 +266,19 @@ class ClassifyTest(unittest.TestCase):
         self.assertEqual(info('git push origin HEAD:refs/heads/x :old'), (False, False, False))
         self.assertEqual(info('git push --delete origin old HEAD'), (True, False, False))
 
+    def test_push_info_a_bare_colon_or_a_tag_push_is_not_a_delete(self):
+        def info(t):
+            return shellscan.push_info(cmds(t)[0].args, 'main')
+        self.assertEqual(info('git push origin :'), (False, False, False))        # pushes the matching branches
+        self.assertEqual(info('git push origin :old :'), (False, False, False))
+        self.assertEqual(info('git push origin --tags :old'), (False, False, False))   # --tags pushes refs too
+        self.assertEqual(info('git push --tags origin :old'), (False, False, False))
+        self.assertEqual(info('git push --follow-tags origin :old'), (False, False, False))
+        self.assertEqual(info('git push --prune origin :old'), (False, False, False))
+        self.assertEqual(info('git push --all origin :old'), (False, False, False))
+        self.assertEqual(info('git push --no-follow-tags origin :old'), (True, False, False))
+        self.assertEqual(info('git push origin :old'), (True, False, False))
+
     def test_push_info_skips_a_redirect_word_before_the_remote(self):
         def info(t):
             return shellscan.push_info(cmds(t)[0].args, 'main')

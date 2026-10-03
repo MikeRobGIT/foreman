@@ -521,8 +521,9 @@ def scan(text, cwd):
 
 def push_info(args, default):
     """(delete, force, to_default) for `git push <args>`. A delete is `--delete`/`-d`, or every refspec after the
-    remote starting with `:`: `git push origin HEAD :old` also pushes HEAD."""
-    delete = force = to_default = False
+    remote being `:<ref>`: `git push origin HEAD :old` also pushes HEAD, a bare `:` pushes the matching branches,
+    and `--tags`, `--all`, `--follow-tags` and `--prune` push refs beside the refspecs."""
+    delete = force = to_default = pushes_refs = False
     positional, i = [], 0
     while i < len(args):
         a = args[i]
@@ -533,6 +534,8 @@ def push_info(args, default):
             delete = True
         elif a in ('--force', '--mirror') or a.startswith('--force-with-lease'):
             force = True
+        elif a in ('--tags', '--all', '--prune') or a.startswith('--follow-tags'):
+            pushes_refs = True
         elif re.match(r'^-[a-zA-Z]+$', a):
             force = force or 'f' in a
             delete = delete or 'd' in a
@@ -545,7 +548,9 @@ def push_info(args, default):
         dst = ref.lstrip('+').split(':')[-1]
         if dst in (default, f'refs/heads/{default}'):
             to_default = True
-    if positional[1:] and all(ref.startswith(':') for ref in positional[1:]):
+    if pushes_refs:
+        delete = False
+    elif positional[1:] and all(len(ref) > 1 and ref.startswith(':') for ref in positional[1:]):
         delete = True
     return delete, force, to_default
 
