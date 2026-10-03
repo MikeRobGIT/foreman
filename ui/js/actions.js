@@ -1,15 +1,17 @@
 // ui/js/actions.js
 import { api } from './api.js';
-import { set } from './state.js';
+import { state, set } from './state.js';
 import { ask } from './dialogs.js';
 
-async function run(fn) {
+export async function run(fn) {
   set({ busy: true });
   try {
     const data = await fn();
-    if (data && data.rows) set({ data, error: '' });
+    // Responses can land out of order; one older than what is shown would undo a newer change on screen.
+    if (data && data.rows && (!state.data || data.version >= state.data.version)) set({ data, error: '' });
     return data;
   } catch (e) {
+    if (e.status === 409) await load();
     set({ error: e.message });
     return null;
   } finally {
@@ -19,9 +21,10 @@ async function run(fn) {
 
 export const load = (refresh = false) => run(() => api.backlog(refresh));
 export const addOp = (op) => run(() => api.addOp(op));
-export const undo = () => run(() => api.undo());
-export const drop = (i) => run(() => api.drop(i));
-export const rebase = (i) => run(() => api.rebase(i));
+const lastUid = () => (state.data && state.data.ops.length ? state.data.ops[state.data.ops.length - 1].uid : null);
+export const undo = () => run(() => api.undo(lastUid()));
+export const drop = (i, uid) => run(() => api.drop(i, uid));
+export const rebase = (i, uid) => run(() => api.rebase(i, uid));
 export const moveTop = (id) => addOp({ op: 'move', id, to: 'top' });
 export const moveBottom = (id) => addOp({ op: 'move', id, to: 'bottom' });
 export const moveRel = (id, where, anchor) => addOp({ op: 'move', id, to: { [where]: anchor } });

@@ -24,14 +24,14 @@ export function render(root) {
       const bad = r.result !== 'applied';
       return `<div class="op${bad ? ' conflict' : ''}"><span class="k">${bad ? esc(r.result) : esc(o.op)}</span>
         <div>${describe(o)}${bad ? `<div class="bad" style="margin-top:6px">${esc(r.reason)}${r.result === 'conflict' ? ' This change will be skipped.' : ''}</div>` : ''}</div>
-        <div style="display:flex;gap:6px">${bad && o.op !== 'add' && r.result === 'conflict' ? `<button class="btn" data-rebase="${i}" ${state.busy ? 'disabled' : ''}>Re-apply to new text</button>` : ''}<button class="btn" data-drop="${i}" ${state.busy ? 'disabled' : ''}>${bad ? 'Drop' : 'Undo'}</button></div></div>`;
+        <div style="display:flex;gap:6px">${bad && o.op !== 'add' && r.result === 'conflict' ? `<button class="btn" data-rebase="${i}" data-uid="${esc(o.uid)}" ${state.busy ? 'disabled' : ''}>Re-apply to new text</button>` : ''}<button class="btn" data-drop="${i}" data-uid="${esc(o.uid)}" ${state.busy ? 'disabled' : ''}>${bad ? 'Drop' : 'Undo'}</button></div></div>`;
     }).join('') || '<p class="hint">No pending changes.</p>'}
     <div style="display:flex;align-items:center;gap:14px;margin-top:18px">
       <button class="btn primary" id="publish" ${applied && !state.busy && !hasInvalid ? '' : 'disabled'}>${state.busy ? 'Publishing…' : `Publish ${applied} as PR`}</button>
       <span class="hint">Branch <code>backlog/ui-&lt;date&gt;-&lt;n&gt;</code> · commit without trailers</span>
     </div></div>`;
   root.querySelector('#refresh').onclick = () => A.load(true);
-  root.querySelectorAll('[data-drop]').forEach((b) => { b.onclick = () => { if (state.busy) return; A.drop(Number(b.dataset.drop)); }; });
-  root.querySelectorAll('[data-rebase]').forEach((b) => { b.onclick = () => { if (state.busy) return; A.rebase(Number(b.dataset.rebase)); }; });
+  root.querySelectorAll('[data-drop]').forEach((b) => { b.onclick = () => { if (state.busy) return; A.drop(Number(b.dataset.drop), b.dataset.uid); }; });
+  root.querySelectorAll('[data-rebase]').forEach((b) => { b.onclick = () => { if (state.busy) return; A.rebase(Number(b.dataset.rebase), b.dataset.uid); }; });
   root.querySelector('#publish').onclick = () => { set({ published: null }); A.publish(); };
 }

@@ -52,3 +52,14 @@ test('triageList: ready rows untouched for N days, oldest first', () => {
   const now = 2_000_100_000 * 1000;
   assert.deepEqual(triageList(ROWS, 14, now).map((r) => r.id), ['IB-1']);
 });
+
+test('run() drops a response older than the data it already shows', async () => {
+  globalThis.location = { hash: '', port: '0', pathname: '/', search: '' };
+  const { run } = await import('../ui/js/actions.js');
+  const { state } = await import('../ui/js/state.js');
+  state.data = { version: 5, rows: [], ops: [] };
+  await run(async () => ({ version: 4, rows: [{ id: 'stale' }], ops: [] }));
+  assert.equal(state.data.version, 5);
+  await run(async () => ({ version: 6, rows: [], ops: [] }));
+  assert.equal(state.data.version, 6);
+});

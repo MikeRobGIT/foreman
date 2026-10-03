@@ -50,6 +50,10 @@ class PublishError(Exception):
     pass
 
 
+class Stale(Exception):
+    pass
+
+
 def home():
     return os.environ.get('FOREMAN_HOME', os.path.expanduser('~/.claude/foreman'))
 
@@ -72,6 +76,7 @@ class Repo:
         self.ops_lock = threading.Lock()
         self.publishing = threading.Lock()
         self.notice = ''
+        self.version = 0
         self._fetched = None
         self._blame = {}
         self._prs = (0, None)
@@ -102,26 +107,33 @@ class Repo:
     def ops_path(self):
         return os.path.join(self.state, 'pending.json')
 
-    def load_ops(self):
+    def load_store(self):
+        """(version, ops) from one read of pending.json."""
         p = self.ops_path()
         if not os.path.exists(p):
-            return []
+            return self.version, []
         try:
             with open(p, encoding='utf-8') as f:
-                ops = json.load(f)
-            if not isinstance(ops, list):
-                raise ValueError('not a list')
-            return ops
+                data = json.load(f)
+            if not (isinstance(data, dict) and isinstance(data.get('version'), int) and isinstance(data.get('ops'), list)):
+                raise ValueError('not {version, ops}')
         except (ValueError, OSError):
             os.replace(p, f'{p}.bad-{int(time.time())}')
             self.notice = 'pending.json could not be read; it was set aside and the list starts empty'
-            return []
+            return self.version, []
+        # The in-memory floor keeps the version rising even when the file was set aside or deleted.
+        self.version = max(self.version, data['version'])
+        return self.version, data['ops']
+
+    def load_ops(self):
+        return self.load_store()[1]
 
     def save_ops(self, ops):
+        self.version = self.load_store()[0] + 1
         # mkstemp creates the file 0600; the rename keeps a crash from leaving half a file.
         fd, tmp = tempfile.mkstemp(dir=self.state, suffix='.json')
         with os.fdopen(fd, 'w', encoding='utf-8') as f:
-            json.dump(ops, f, indent=1, ensure_ascii=False)
+            json.dump({'version': self.version, 'ops': ops}, f, indent=1, ensure_ascii=False)
         os.replace(tmp, self.ops_path())
 
     def replay(self, ops, upto=None):
@@ -137,6 +149,7 @@ class Repo:
                 n = 1 + max([int(o['tmp'].split('-')[1]) for o in ops if o.get('op') == 'add'] or [0])
                 op = {**op, 'tmp': f'NEW-{n}'}
             backlog.check_op_shape(op)
+            op = {**op, 'uid': secrets.token_hex(8)}
             bl, _ = self.replay(ops)
             if op['op'] != 'add':
                 i = bl.find(op['id'])
@@ -149,25 +162,33 @@ class Repo:
             ops.append(op)
             self.save_ops(ops)
 
-    def undo(self):
-        with self.ops_lock:
-            ops = self.load_ops()
-            if ops:
-                ops.pop()
-                self.save_ops(ops)
+    @staticmethod
+    def expect(ops, i, uid):
+        """The client names the op it saw at position i; anything else means another tab moved the list."""
+        if not (0 <= i < len(ops) and ops[i].get('uid') == uid):
+            raise Stale()
 
-    def drop(self, i):
+    def undo(self, uid):
         with self.ops_lock:
             ops = self.load_ops()
-            if not 0 <= i < len(ops):
-                raise ValueError(f'no pending change #{i}')
+            if not ops and uid is None:
+                return
+            self.expect(ops, len(ops) - 1, uid)
+            ops.pop()
+            self.save_ops(ops)
+
+    def drop(self, i, uid):
+        with self.ops_lock:
+            ops = self.load_ops()
+            self.expect(ops, i, uid)
             ops.pop(i)
             self.save_ops(ops)
 
-    def rebase(self, i):
+    def rebase(self, i, uid):
         with self.ops_lock:
             ops = self.load_ops()
-            if not 0 <= i < len(ops) or ops[i]['op'] == 'add':
+            self.expect(ops, i, uid)
+            if ops[i]['op'] == 'add':
                 raise ValueError(f'change #{i} cannot be re-applied')
             bl, _ = self.replay(ops, upto=i)
             k = bl.find(ops[i]['id'])
@@ -194,7 +215,7 @@ class Repo:
 
     def view(self, force=False):
         sha, _, at = self.fetch(force)
-        ops = self.load_ops()
+        version, ops = self.load_store()
         bl, results = self.replay(ops)
         touched = self.blame(sha)
         pending = {o.get('id') or o.get('tmp') for o, r in zip(ops, results) if r['result'] == 'applied'}
@@ -211,7 +232,7 @@ class Repo:
             elif isinstance(line, backlog.Unparsed):
                 rows.append({'unparsed': str(line)})
         notice, self.notice = self.notice, ''
-        return {'sha': sha, 'branch': self.branch, 'fetched_at': at, 'prefix': self.prefix,
+        return {'version': version, 'sha': sha, 'branch': self.branch, 'fetched_at': at, 'prefix': self.prefix,
                 'rows': rows, 'ops': ops, 'results': results, 'notice': notice}
 
     def merged_prs(self):
@@ -410,19 +431,21 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 repo.add_op(self.body())
                 return self.send(200, repo.view())
             if method == 'POST' and u.path == '/api/ops/undo':
-                repo.undo()
+                repo.undo(self.body().get('uid'))
                 return self.send(200, repo.view())
             if method == 'DELETE' and len(parts) == 3 and parts[:2] == ['api', 'ops']:
-                repo.drop(int(parts[2]))
+                repo.drop(int(parts[2]), self.body().get('uid'))
                 return self.send(200, repo.view())
             if method == 'POST' and len(parts) == 4 and parts[:2] == ['api', 'ops'] and parts[3] == 'rebase':
-                repo.rebase(int(parts[2]))
+                repo.rebase(int(parts[2]), self.body().get('uid'))
                 return self.send(200, repo.view())
             if method == 'POST' and u.path == '/api/publish':
                 return self.send(200, repo.publish())
             return self.send(404, {'error': 'not found'})
         except Busy:
             return self.send(409, {'error': 'a publish is already running'})
+        except Stale:
+            return self.send(409, {'error': 'the pending list changed; reloaded'})
         except (ValueError, KeyError) as e:
             return self.send(400, {'error': str(e)})
         except (GitError, PublishError) as e:

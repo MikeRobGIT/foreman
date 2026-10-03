@@ -17,15 +17,15 @@ async function call(method, path, body) {
     body: body ? JSON.stringify(body) : undefined,
   });
   const data = await res.json().catch(() => ({}));
-  if (!res.ok) throw new Error(data.error || `${method} ${path} failed (${res.status})`);
+  if (!res.ok) throw Object.assign(new Error(data.error || `${method} ${path} failed (${res.status})`), { status: res.status });
   return data;
 }
 export const api = {
   backlog: (refresh) => call('GET', `/api/backlog${refresh ? '?refresh=1' : ''}`),
   addOp: (op) => call('POST', '/api/ops', op),
-  undo: () => call('POST', '/api/ops/undo'),
-  drop: (i) => call('DELETE', `/api/ops/${i}`),
-  rebase: (i) => call('POST', `/api/ops/${i}/rebase`),
+  undo: (uid) => call('POST', '/api/ops/undo', { uid }),
+  drop: (i, uid) => call('DELETE', `/api/ops/${i}`, { uid }),
+  rebase: (i, uid) => call('POST', `/api/ops/${i}/rebase`, { uid }),
   progress: () => call('GET', '/api/progress'),
   publish: () => call('POST', '/api/publish'),
 };

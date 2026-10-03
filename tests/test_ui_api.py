@@ -146,8 +146,41 @@ class ServerTest(unittest.TestCase):
         self.assertEqual([r['id'] for r in data['rows'] if r.get('status') == 'ready'], ['IB-2', 'IB-1'])
         self.assertTrue(data['ops'][0]['base'].startswith('| IB-2 |'))
         self.assertTrue(next(r for r in data['rows'] if r.get('id') == 'IB-2')['pending'])
-        status, data, _ = self.f.request('POST', '/api/ops/undo')
+        status, data, _ = self.f.request('POST', '/api/ops/undo', {'uid': data['ops'][-1]['uid']})
         self.assertEqual(data['ops'], [])
+
+    def test_ops_get_server_uids_and_the_version_grows(self):
+        _, d1, _ = self.f.request('GET', '/api/backlog')
+        _, d2, _ = self.f.request('POST', '/api/ops', {'op': 'move', 'id': 'IB-2', 'to': 'top', 'uid': 'mine'})
+        _, d3, _ = self.f.request('POST', '/api/ops', {'op': 'move', 'id': 'IB-1', 'to': 'top'})
+        self.assertLess(d1['version'], d2['version'])
+        self.assertLess(d2['version'], d3['version'])
+        uids = [o['uid'] for o in d3['ops']]
+        self.assertNotIn('mine', uids)
+        self.assertEqual(len(set(uids)), 2)
+
+    def test_drop_and_rebase_with_a_stale_uid_are_409(self):
+        self.f.request('POST', '/api/ops', {'op': 'move', 'id': 'IB-2', 'to': 'top'})
+        _, data, _ = self.f.request('POST', '/api/ops', {'op': 'move', 'id': 'IB-1', 'to': 'top'})
+        first, second = data['ops']
+        status, res, _ = self.f.request('DELETE', '/api/ops/0', {'uid': second['uid']})
+        self.assertEqual(status, 409)
+        self.assertIn('the pending list changed; reloaded', res['error'])
+        status, _, _ = self.f.request('POST', '/api/ops/1/rebase', {'uid': first['uid']})
+        self.assertEqual(status, 409)
+        self.assertEqual(self.f.request('GET', '/api/backlog')[1]['ops'], data['ops'])
+        status, res, _ = self.f.request('DELETE', '/api/ops/0', {'uid': first['uid']})
+        self.assertEqual(status, 200)
+        self.assertEqual(res['ops'], [second])
+
+    def test_undo_after_another_tabs_undo_is_409(self):
+        self.f.request('POST', '/api/ops', {'op': 'move', 'id': 'IB-2', 'to': 'top'})
+        _, data, _ = self.f.request('POST', '/api/ops', {'op': 'move', 'id': 'IB-1', 'to': 'top'})
+        last = data['ops'][-1]['uid']
+        self.assertEqual(self.f.request('POST', '/api/ops/undo', {'uid': last})[0], 200)
+        status, res, _ = self.f.request('POST', '/api/ops/undo', {'uid': last})
+        self.assertEqual(status, 409)
+        self.assertEqual(len(self.f.request('GET', '/api/backlog')[1]['ops']), 1)
 
     def test_invalid_add_is_refused_up_front(self):
         status, data, _ = self.f.request('POST', '/api/ops', {'op': 'add', 'title': 'x', 'risk': 'huge', 'status': 'ready', 'reason': '', 'acceptance': '', 'source': '', 'insert': 'top'})
