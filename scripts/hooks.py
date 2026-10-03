@@ -14,6 +14,8 @@ record lands where the hooks look and is bound to this session:
 
 Every hook fails open on its own errors (stderr note, exit 0), except piece 1's undeterminable diff.
 """
+import contextlib
+import io
 import json
 import os
 import re
@@ -1449,6 +1451,26 @@ HANDLERS['posttool'] = posttool
 
 # ---- dispatcher -----------------------------------------------------------------------------------
 
+class _CaptureStdout:
+    """Captures writes to stdout while forwarding them to the original stdout."""
+    def __init__(self, original):
+        self.original = original
+        self.buffer = []
+
+    def write(self, s):
+        self.buffer.append(s)
+        return self.original.write(s)
+
+    def flush(self):
+        return self.original.flush()
+
+    def getvalue(self):
+        return ''.join(self.buffer)
+
+    def __getattr__(self, name):
+        return getattr(self.original, name)
+
+
 def main(argv):
     if len(argv) < 2:
         raise SystemExit(__doc__)
@@ -1474,9 +1496,25 @@ def main(argv):
         _load()
         fn = HANDLERS.get(event)
         if fn:
-            fn(Hook(inp))
+            capture = _CaptureStdout(sys.stdout)
+            old_stdout = sys.stdout
+            sys.stdout = capture
+            try:
+                fn(Hook(inp))
+            finally:
+                sys.stdout = old_stdout
+            trace(event, inp, capture.getvalue())
     except Exception as e:  # fail open
         print(f'foreman hook error: {type(e).__name__}: {e}', file=sys.stderr)
+
+
+def trace(event, inp, out):
+    """With FOREMAN_HOOK_LOG=<file>, append every decision a hook printed (the headless end-to-end reads it)."""
+    path = os.environ.get('FOREMAN_HOOK_LOG')
+    if path and out.strip():
+        with open(path, 'a') as f:
+            f.write(json.dumps({'event': event, 'session_id': inp.get('session_id'), 'agent_id': inp.get('agent_id'),
+                                'out': json.loads(out)}) + '\n')
 
 
 if __name__ == '__main__':

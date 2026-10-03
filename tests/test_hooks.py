@@ -2470,5 +2470,19 @@ class SpecGateFirstCallTest(Case):
         self.assertEqual(self.entry()['spec'], True)
 
 
+class HookLogTest(Case):
+    def test_hook_log_records_decisions(self):
+        log = os.path.join(self.fx.tmp, 'hooks.log')
+        self.fx.env['FOREMAN_HOOK_LOG'] = log
+        self.fx.start_run()
+        self.fx.bash('git rebase origin/main', agent='a1')
+        self.fx.bash('ls')
+        with open(log) as f:
+            lines = [json.loads(l) for l in f]
+        self.assertEqual(len(lines), 1)
+        self.assertEqual((lines[0]['event'], lines[0]['agent_id']), ('pretool', 'a1'))
+        self.assertIn('no rebase', lines[0]['out']['hookSpecificOutput']['permissionDecisionReason'])
+
+
 if __name__ == '__main__':
     unittest.main()
