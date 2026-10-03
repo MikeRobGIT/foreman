@@ -55,7 +55,9 @@ It reads the backlog from `origin`'s default branch, never your working copy.
 foreman ships settings hooks (`hooks/hooks.json`, one Python dispatcher: `scripts/hooks.py`) that enforce the worker
 contract and the merge rules at the tool call, plus a wave-status mod. They are guardrails against mistakes, not a
 security boundary. They fire in every session where the plugin is enabled, but only in a repo with a foreman config;
-they fail open on their own errors (the one exception: a push whose diff can't be determined is denied).
+they fail open on their own errors. Three cases fail closed instead: a push whose diff can't be determined; a push or
+merge command the scan can't read ("couldn't read this command", "couldn't read this merge"); and a spec-phase
+worker's commit whose contents can't be told.
 
 Run-only pieces act while the session's **run marker** exists: a prompt starting `/foreman` (or `/loop … /foreman`;
 not `ui` or `init`) writes it, the skill runs `hooks.py run-end` when the run ends, `/clear` and logout delete it,
@@ -63,7 +65,7 @@ and it expires after 48 hours.
 
 | id | applies | what it does |
 |---|---|---|
-| `gate_before_push` | run, everyone | `git push`, `gh pr create` and `gt submit` need a gate receipt for the pushed tree. `gate-lock.sh <owner> -- '<gate>'`, run with the exact configured `gate`, mints one. A branch whose diff touches only `gate_exempt`, the backlog and the rules files needs none. |
+| `gate_before_push` | run, everyone | `git push`, `gh pr create` and `gt submit` need a gate receipt for the pushed tree. `gate-lock.sh <owner> -- '<gate>'`, run with the exact configured `gate`, mints one. A branch whose diff touches only `gate_exempt`, the backlog and the rules files needs none. A push after a commit or merge in the same call is denied: push in its own call. |
 | `worker_guard` | run, subagents | no merge (`gh pr merge`, `gt merge`, merging `gh api` calls), force-push, push to the default branch, rebase, `gt modify` once pushed, or edits of the backlog, the rules files or the foreman config |
 | `merge_discipline` | run, everyone | `gh pr merge` needs `--match-head-commit <sha>`; `--delete-branch` is refused while another worktree holds the branch; no `gt merge` |
 | `trailer_guard` | foreman repo | `forbid_trailers` lines are refused in commit, PR and comment messages, and in a `gh pr merge` that would keep them |
@@ -99,6 +101,7 @@ and stalls. `script_allow` covers foreman's own scripts; add the rest of the wor
 - The hooks see only Claude's tool calls, never yours. Writes to the backlog or rules files through Bash (a `python3 -c` that edits them) aren't guarded; `bk.py` validates its own writes.
 - Commands fed to a shell's stdin (`echo 'git push' | bash`), `eval` of built strings and encoded commands aren't detected.
 - An unquoted `echo git push` is treated as a push (a deliberate false deny).
+- Abbreviated long options (e.g. `git push --forc`) aren't recognised: obfuscation is a non-goal.
 - A push with an explicit refspec source other than HEAD is judged by HEAD's tree.
 - A command the scan can't read (unbalanced quotes, an unterminated heredoc) is judged fail-closed: a push is denied with "couldn't read this command"; push with a plain `git push` in its own call.
 - A resumed session whose id changed, or a build whose subagent ids differ between events, runs some checks fail-open. `docs/superpowers/plans/2026-10-02-foreman-hooks-probes.md` records what was observed.
