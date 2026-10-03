@@ -262,6 +262,7 @@ check "test_state.py" python3 "$root/tests/test_state.py"
 echo "## shellscan.py + hooks.py"
 check "test_shellscan.py" python3 "$root/tests/test_shellscan.py"
 check "test_hooks.py" python3 "$root/tests/test_hooks.py"
+check "test_hooks_json.py" python3 "$root/tests/test_hooks_json.py"
 echo "## ui js"
 if command -v node >/dev/null; then check "test_ui_js.mjs" node --test "$root/tests/test_ui_js.mjs"; else echo "SKIP node not installed"; fi
 
