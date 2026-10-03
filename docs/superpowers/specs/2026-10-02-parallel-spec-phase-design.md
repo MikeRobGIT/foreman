@@ -1,9 +1,6 @@
 # Parallel mode: spec before code — design
 
-Status: draft for review, revision 4 (2026-10-02). The findings so far, all addressed below:
-- revision 1: 2 Critical, 10 Important, 4 Minor;
-- revision 2: 7 Important, 9 Minor;
-- revision 3: 4 Important, 11 Minor. Branch `feat/spec-phase`. The companion hooks design (`feat/hooks`, piece 10 "spec gate") enforces this design's "no code before release".
+Status: ready for user review, revision 6 (2026-10-02). Six independent review rounds; the last (round 6) found no Critical or Important issue. Branch `feat/spec-phase`. The companion hooks design (`feat/hooks`, piece 10 "spec gate") enforces this design's "no code before release".
 
 ## Purpose
 
@@ -61,7 +58,7 @@ A batch in the spec phase ends **released** or **parked**, never anything else.
   - Comment-round intervals are left out, because the comment round is exempt from `spec_phase_timeout`. Its own timer is `parallel_worker_timeout`.
 - **Timers:** for every return to work, the orchestrator starts a background `sleep <remaining worker time>` (Bash `run_in_background`). It starts one per running reviewer too (20 minutes), and one per comment round (`parallel_worker_timeout`).
   - It records each timer's task id. It stops the superseded timer (TaskStop) on disarm, which happens at `SPEC READY`, and on every re-arm. It also stops a superseded reviewer on re-dispatch, and ignores any late verdict from it.
-  - **On every wake** it recomputes every bound for every batch from the timestamps. Then it re-arms a timer for each working batch, and each running reviewer, whose timer has ended. A stray wake is harmless. The timers keep waking the orchestrator for as long as any batch is working, whatever the session's cap.
+  - **On every wake** it recomputes every bound for every batch from the timestamps. Then it re-arms a timer for each working batch, each running reviewer and each comment round whose timer has ended. A stray wake is harmless. The timers keep waking the orchestrator for as long as any batch is working, whatever the session's cap.
 - **Session limits:** in sessions that cap background commands (`-p`, SDK and cloud sessions, which default to 30 min and allow at most 2 h), every timer is `sleep min(remaining, cap − 1 min)`. Re-arming on every wake covers the rest. `timeout` is never used: macOS lacks it.
   - A chain killed at the cap counts as exhausted.
   - At the subagent concurrency limit ("Concurrent subagent limit reached"), a reviewer dispatch is queued and retried at the next wake, not counted as a failure.
