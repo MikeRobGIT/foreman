@@ -475,9 +475,10 @@ check "codex review mode unchanged: review --base <base>" bash -c "grep -qx revi
 check "...no exec there" bash -c "! grep -qx exec '$CODEX_ARGS'"
 check "...review text from stdout" grep -q 'app/x.ts:3' "$T/out/cx2.log"
 check "codex.sh is marked reads-repo" grep -q '^# foreman: reads-repo' "$root/reviewers/codex.sh"
-chain 60 30 200 codex >"$T/chain.md"; PATH=$F:$PATH sv --spec "docs/my specs/d.md" "$fork" "$T/out/cx3.log"
+printf -- '---\nreviewer_timeout_seconds: 60\nreviewer_stall_seconds: 30\nreviewer_max_diff_kb: 200\nreviewers:\n  - { use: codex }\n---\n' >"$T/chain.md"; PATH=$F:$PATH sv --spec "docs/my specs/d.md" "$fork" "$T/out/cx3.log"
 check "codex spec mode with no model/effort lands" grep -q '^codex' "$T/out/cx3.log.reviewer"
-chain 60 30 200 codex >"$T/chain.md"; PATH=$F:$PATH sv "$fork" "$T/out/cx4.log"
+check "...and args contains no -m (empty model)" bash -c "! grep -qx -- -m '$CODEX_ARGS'"
+printf -- '---\nreviewer_timeout_seconds: 60\nreviewer_stall_seconds: 30\nreviewer_max_diff_kb: 200\nreviewers:\n  - { use: codex }\n---\n' >"$T/chain.md"; PATH=$F:$PATH sv "$fork" "$T/out/cx4.log"
 check "codex review mode with no model/effort lands" grep -q '^codex' "$T/out/cx4.log.reviewer"
 cat >"$F/codex" <<'EOF'
 #!/bin/bash
