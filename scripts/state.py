@@ -25,7 +25,7 @@ RECEIPT_TTL = 14 * 86400
 def git(cwd, *args):
     """stdout of a git command, or None when it fails."""
     try:
-        p = subprocess.run(['git', *args], cwd=cwd, capture_output=True, text=True, timeout=10)
+        p = subprocess.run(['git', *args], cwd=cwd, capture_output=True, text=True, errors='surrogateescape', timeout=10)
     except (OSError, subprocess.TimeoutExpired):
         return None
     return p.stdout if p.returncode == 0 else None

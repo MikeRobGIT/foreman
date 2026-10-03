@@ -906,6 +906,16 @@ class GateBeforePushTest(Case):
         self.fx.commit('docs/café.md', 'x\n')
         self.assertIsNone(self.fx.bash('git push -u origin HEAD'))
 
+    def test_a_non_utf8_path_is_judged_not_failed_open(self):
+        # APFS refuses a file name that isn't UTF-8, so the path goes straight into the index
+        blob = git(self.fx.work, 'hash-object', '-w', 'app.py').strip()
+        name = os.fsdecode(b'caf\xe9.py')
+        git(self.fx.work, 'update-index', '--add', '--cacheinfo', f'100644,{blob},{name}')
+        git(self.fx.work, 'commit', '-q', '-m', 'latin-1 name')
+        out, err = self.fx.hook('pretool', self.fx.payload('Bash', {'command': 'git push -u origin HEAD'}))
+        self.assertNotIn('foreman hook error', err)
+        self.assertIn('no passing gate', (out or {}).get('hookSpecificOutput', {}).get('permissionDecisionReason', ''))
+
     def test_exempt_diff_since_the_last_receipt(self):
         self.fx.commit('app.py', 'print(2)\n')
         self.fx.gate()
