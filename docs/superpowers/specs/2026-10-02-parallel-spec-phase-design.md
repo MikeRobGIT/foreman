@@ -46,7 +46,7 @@ A batch in the spec phase ends **released** or **parked**, never anything else.
 | bound | default | when exceeded |
 |---|---|---|
 | `spec_review_rounds` | 3 | rounds without a pass: park |
-| `spec_phase_timeout` | 60 min | **worker time** in the spec phase: launch to the first `SPEC READY`, plus each revision from findings to the next `SPEC READY`. Review time doesn't count. Exceeded: park ("spec phase timed out") |
+| `spec_phase_timeout` | 60 min | **worker time** in the spec phase, as defined in The clock below (review time and orchestrator latency don't count). Exceeded: park ("spec phase timed out") |
 | one review round | chain: its own per-adapter timeouts (`review.sh` exit 2, a hard error, counts as exhausted); read-only reviewer: 20 min | reviewer late: re-dispatch once, then the round doesn't count |
 | pre-check bounces | 2 | park ("spec incomplete after 2 bounces") |
 | rounds that don't count (a reviewer failed) | 1 | park ("review could not run") |
