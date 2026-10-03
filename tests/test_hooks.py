@@ -1158,5 +1158,217 @@ class ScopingTest(Case):
         self.assertGreater(self.fx.marker()['touched'], before)
 
 
+SKILL = os.path.join(HERE, '..', 'skills', 'foreman', 'SKILL.md')
+
+
+class WorkerGuardTest(Case):
+    def setUp(self):
+        super().setUp()
+        self.fx.start_run()
+
+    def test_subagent_denials(self):
+        for cmd, needle in (('gh pr merge 1 --squash --match-head-commit abc1234', 'workers never merge'),
+                            ('gt merge', 'workers never merge'),
+                            ('gh api -X PUT repos/o/r/pulls/1/merge', 'workers never merge'),
+                            ("gh api graphql -f query='mutation { mergePullRequest(input:{}) { clientMutationId } }'",
+                             'workers never merge'),
+                            ('git push --force', 'no force-push'),
+                            ('git push -uf origin HEAD', 'no force-push'),
+                            ('git push --force-with-lease', 'no force-push'),
+                            ('git push --mirror', 'no force-push'),
+                            ('git push origin +feat', 'no force-push'),
+                            ('git push origin HEAD:main', 'no push to main'),
+                            ('git push origin main', 'no push to main'),
+                            ('git rebase origin/main', 'no rebase'),
+                            ('git pull --rebase', 'no rebase')):
+            self.assertIn(needle, self.fx.bash(cmd, agent='a1') or '', cmd)
+
+    def test_every_reason_quotes_a_line_of_the_worker_contract(self):
+        # a reason that quotes words the contract doesn't hold sends the worker to a rule that isn't there
+        with open(SKILL, encoding='utf-8') as f:
+            section = re.search(r'^### Worker contract\n(.*?)^### ', f.read(), re.S | re.M)
+        self.assertTrue(section, 'SKILL.md has no "### Worker contract" section')
+        contract = ' '.join(section.group(1).split())
+        for name in ('NO_MERGE', 'NO_FORCE', 'NO_REBASE', 'NO_BOOKKEEPING', 'NO_PUSH_DEFAULT', 'NO_AMEND'):
+            quoted = re.findall(r'"([^"]+)"', getattr(hooks, name))
+            self.assertTrue(quoted, f'{name} quotes no contract line')
+            for q in quoted:
+                self.assertIn(' '.join(q.split()), contract, name)
+
+    def test_gt_modify_only_once_the_branch_has_an_upstream(self):
+        git(self.fx.work, 'switch', '-q', '-c', 'feat')
+        self.assertIsNone(self.fx.bash('gt modify -a', agent='a1'))
+        git(self.fx.work, 'push', '-q', '-u', 'origin', 'feat')
+        self.assertIn('no gt modify', self.fx.bash('gt modify -a', agent='a1'))
+
+    def test_the_main_session_and_normal_calls_are_not_guarded(self):
+        self.assertIsNone(self.fx.bash('git rebase origin/main'))
+        self.assertIsNone(self.fx.bash('git push --force origin :old'))
+        git(self.fx.work, 'switch', '-q', '-c', 'feat')
+        self.fx.commit('app.py', 'print(2)\n')
+        self.fx.gate()
+        self.assertIsNone(self.fx.bash('git push -u origin HEAD', agent='a1'))
+        self.assertIsNone(self.fx.bash('gh api repos/o/r/pulls/1/merge', agent='a1'))
+
+    def test_no_marker_no_guard(self):
+        self.assertIsNone(self.fx.bash('git rebase origin/main', agent='a1', sid='S2'))
+
+    def test_hooks_disabled_drops_the_piece(self):
+        write(os.path.join(self.fx.work, '.claude/foreman.config.md'),
+              CONFIG.replace('---\n', '---\nhooks_disabled: [worker_guard]\n', 1))
+        self.assertIsNone(self.fx.bash('git rebase origin/main', agent='a1'))
+        self.assertIsNone(self.fx.edit(os.path.join(self.fx.work, '.claude/improvement-backlog.md'), agent='a1'))
+        # piece 3 still judges the same worker's merge
+        self.assertIn('--match-head-commit', self.fx.bash('gh pr merge 5 --squash', agent='a1'))
+
+    def test_bookkeeping_edits(self):
+        for rel in ('.claude/improvement-backlog.md', '.claude/rules/x.md', '.claude/foreman.config.md'):
+            self.assertIn("workers don't edit", self.fx.edit(os.path.join(self.fx.work, rel), agent='a1') or '', rel)
+        self.assertIn("workers don't edit", self.fx.edit('.claude/rules/x.md', tool='Write', agent='a1') or '')
+        self.assertIsNone(self.fx.edit(os.path.join(self.fx.work, 'app.py'), agent='a1'))
+        self.assertIsNone(self.fx.edit(os.path.join(self.fx.work, '.claude/rules/x.md')))
+
+    def test_a_worktrees_own_bookkeeping_files_are_guarded(self):
+        wt = os.path.join(self.fx.tmp, 'wt')
+        git(self.fx.work, 'worktree', 'add', '-q', wt, '-b', 'w1')
+        self.assertIn("workers don't edit", self.fx.edit(os.path.join(wt, '.claude/improvement-backlog.md'),
+                                                         agent='a1', cwd=wt))
+
+    def test_a_worker_in_its_nested_worktree(self):
+        # probe P6: an isolation: worktree worker's cwd is <repo>/.claude/worktrees/agent-<agent_id>, inside the main checkout
+        wt = os.path.join(self.fx.work, '.claude', 'worktrees', 'agent-a1')
+        git(self.fx.work, 'worktree', 'add', '-q', wt, '-b', 'w1')
+        denied = lambda why: self.assertIn("workers don't edit", why or '')   # noqa: E731
+        denied(self.fx.edit(os.path.join(wt, '.claude/improvement-backlog.md'), agent='a1', cwd=wt))
+        denied(self.fx.edit('.claude/rules/new.md', tool='Write', agent='a1', cwd=wt))
+        denied(self.fx.edit(os.path.join(self.fx.work, '.claude/improvement-backlog.md'), agent='a1', cwd=wt))
+        self.assertIsNone(self.fx.edit(os.path.join(wt, 'app.py'), agent='a1', cwd=wt))
+        self.assertIn('no rebase', self.fx.bash('git rebase origin/main', agent='a1', cwd=wt))
+        self.assertIn('no push to main', self.fx.bash('git push origin HEAD:main', agent='a1', cwd=wt))
+
+    def test_new_rules_file_in_missing_dir_is_denied(self):
+        wt = os.path.join(self.fx.tmp, 'wt')
+        git(self.fx.work, 'worktree', 'add', '-q', wt, '-b', 'w1')
+        self.assertFalse(os.path.exists(os.path.join(wt, '.claude/rules')))
+        self.assertIn("workers don't edit", self.fx.edit(os.path.join(wt, '.claude/rules/new.md'), tool='Write',
+                                                         agent='a1', cwd=wt))
+
+
+class MergeDisciplineTest(Case):
+    def setUp(self):
+        super().setUp()
+        self.fx.start_run()
+
+    def pr(self, head, commits=()):
+        write(self.fx.env['FAKE_GH_PR'], json.dumps({'headRefName': head, 'commits': list(commits)}))
+
+    def worktree(self, branch, wt=None):
+        wt = wt or os.path.join(self.fx.tmp, 'wt')
+        git(self.fx.work, 'worktree', 'add', '-q', wt, '-b', branch)
+        self.pr(branch)
+        return wt
+
+    def test_merge_needs_match_head_commit(self):
+        self.assertIn('add `--match-head-commit <sha>`', self.fx.bash('gh pr merge 5 --squash'))
+        self.assertIsNone(self.fx.bash('gh pr merge 5 --squash --match-head-commit abc1234'))
+        self.assertIsNone(self.fx.bash('gh pr merge 5 --squash --match-head-commit=abc1234'))
+
+    def test_an_empty_match_head_commit_pins_nothing(self):
+        for cmd in ('gh pr merge 5 --match-head-commit=', "gh pr merge 5 --match-head-commit ''"):
+            self.assertIn('add `--match-head-commit <sha>`', self.fx.bash(cmd), cmd)
+
+    def test_delete_branch_when_only_the_own_worktree_holds_it(self):
+        git(self.fx.work, 'switch', '-q', '-c', 'feat')
+        self.pr('feat')
+        self.assertIsNone(self.fx.bash('gh pr merge 5 --squash --match-head-commit abc1234 --delete-branch'))
+
+    def test_delete_branch_from_the_worktree_that_holds_it(self):
+        wt = self.worktree('feat2')   # the main checkout holds main; the command runs in the worktree
+        self.assertIsNone(self.fx.bash('gh pr merge 5 --squash --match-head-commit abc1234 -d', cwd=wt))
+
+    def test_delete_branch_when_another_worktree_holds_it(self):
+        wt = self.worktree('feat2')
+        why = self.fx.bash('gh pr merge 5 --squash --match-head-commit abc1234 -d')
+        self.assertIn(f'remove the worktree at {wt} first', why)
+        for flags in ('-sd', '--delete-branch=true', '-d=true'):
+            self.assertIn('remove the worktree', self.fx.bash(f'gh pr merge 5 --match-head-commit abc1234 {flags}'), flags)
+        self.assertIsNone(self.fx.bash('gh pr merge 5 --match-head-commit abc1234 --delete-branch=false'))
+
+    def test_delete_branch_with_the_worktree_nested_in_the_main_checkout(self):
+        wt = self.worktree('feat2', os.path.join(self.fx.work, '.claude', 'worktrees', 'agent-a1'))   # probe P6's layout
+        merge = 'gh pr merge 5 --squash --match-head-commit abc1234 --delete-branch'
+        self.assertIn(f'remove the worktree at {wt} first', self.fx.bash(merge))   # serial step 12, from the main checkout
+        self.assertIsNone(self.fx.bash(merge, cwd=wt))
+
+    def test_delete_branch_is_not_judged_without_a_pr_head(self):
+        self.worktree('feat2')
+        os.remove(self.fx.env['FAKE_GH_PR'])   # the fake answers headRefName "feat", which no worktree holds
+        self.assertIsNone(self.fx.bash('gh pr merge 5 --match-head-commit abc1234 --delete-branch'))
+        self.assertIsNone(self.fx.bash('gh pr merge 5 --match-head-commit abc1234'))   # no -d: no lookup at all
+
+    def test_a_failing_gh_view_allows_the_call_with_a_note(self):
+        self.worktree('feat2')
+        broken = os.path.join(self.fx.tmp, 'broken')
+        write(os.path.join(broken, 'gh'), '#!/bin/sh\nexit 1\n')
+        os.chmod(os.path.join(broken, 'gh'), 0o755)
+        self.fx.env['PATH'] = broken + os.pathsep + self.fx.env['PATH']
+        out, err = self.fx.hook('pretool', self.fx.payload(
+            'Bash', {'command': 'gh pr merge 5 --match-head-commit abc1234 -d'}))
+        self.assertIsNone(out)
+        self.assertIn('gh pr view failed', err)
+        for body in ('[1]', 'null', '"x"'):   # gh answering something that isn't an object counts as failing
+            write(os.path.join(broken, 'gh'), f"#!/bin/sh\necho '{body}'\n")
+            out, err = self.fx.hook('pretool', self.fx.payload(
+                'Bash', {'command': 'gh pr merge 5 --match-head-commit abc1234 -d'}))
+            self.assertEqual((out, 'foreman hook error' in err), (None, False), body)
+
+    def test_gt_merge_is_denied_during_a_run(self):
+        self.assertIn('no gt merge during a run', self.fx.bash('gt merge'))
+        self.assertIsNone(self.fx.bash('gt merge', sid='S2'))
+
+    def test_a_subagent_merge_is_decided_locally(self):
+        why = self.fx.bash('gh pr merge 5 --squash -d', agent='a1')
+        self.assertIn('workers never merge', why)
+        self.assertNotIn('match-head-commit', why)
+        self.assertFalse(os.path.exists(self.fx.env['FAKE_GH_LOG']))
+
+    def test_a_subagent_gt_merge_is_not_told_how_to_merge(self):
+        why = self.fx.bash('gt merge', agent='a1')
+        self.assertIn('workers never merge', why)
+        self.assertNotIn('match-head-commit', why)   # a worker told to `gh pr merge` would read it as leave to merge
+
+    def test_hooks_disabled_drops_the_piece(self):
+        write(os.path.join(self.fx.work, '.claude/foreman.config.md'),
+              CONFIG.replace('---\n', '---\nhooks_disabled: [merge_discipline]\n', 1))
+        self.assertIsNone(self.fx.bash('gh pr merge 5 --squash'))
+        self.assertIsNone(self.fx.bash('gt merge'))
+
+
+class WorktreesTest(InProcess):
+    def test_lists_every_worktree_with_its_branch_ref(self):
+        wt = os.path.join(self.fx.tmp, 'wt')
+        git(self.fx.work, 'worktree', 'add', '-q', '--detach', wt)
+        self.assertEqual(hooks.worktrees(self.fx.work), [(self.fx.work, 'refs/heads/main'), (wt, None)])
+
+    def test_a_failing_git_gives_nothing_with_a_note(self):
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            self.assertEqual(hooks.worktrees(os.path.join(self.fx.tmp, 'missing')), [])
+        self.assertIn('git worktree list failed', err.getvalue())
+
+
+class OptionHelpersTest(unittest.TestCase):
+    def test_opt_values_and_has_flag(self):
+        self.assertEqual(hooks.opt_values(['-am', 'msg'], ('-m', '--message')), ['msg'])
+        self.assertEqual(hooks.opt_values(['-mfoo', '--message=bar', '-m', 'baz'], ('-m', '--message')),
+                         ['foo', 'bar', 'baz'])
+        self.assertEqual(hooks.opt_values(['--', '-m', 'x'], ('-m',)), [])
+        self.assertTrue(hooks.has_flag(['-sd'], ('--delete-branch', '-d')))
+        self.assertFalse(hooks.has_flag(['--squash'], ('--delete-branch', '-d')))
+        self.assertTrue(hooks.has_flag(['--delete-branch=true'], ('--delete-branch', '-d')))
+        self.assertFalse(hooks.has_flag(['--delete-branch=false', '--body=-d', '-bfoo=-d'], ('--delete-branch', '-d')))
+        self.assertEqual(hooks.positionals(['--squash', '-t', 'x', '12'], hooks.GH_MERGE_VALUE_OPTS), ['12'])
+
+
 if __name__ == '__main__':
     unittest.main()

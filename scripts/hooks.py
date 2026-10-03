@@ -590,6 +590,211 @@ def gate_before_push(h, sc):
 BASH_PIECES[1] = gate_before_push
 
 
+# ---- option helpers and the shared `gh pr view` (pieces 3 and 4) ----------------------------------
+
+def opt_values(args, names):
+    """Every value of the options in `names`: `--x v`, `--x=v`, `-x v`, `-xv`, and a short option ending a
+    flag cluster (`-am msg`)."""
+    out, i = [], 0
+    shorts = [n[1] for n in names if len(n) == 2 and n[0] == '-' and n[1] != '-']
+    while i < len(args):
+        a = args[i]
+        if a == '--':
+            break
+        nxt = args[i + 1] if i + 1 < len(args) else None
+        if a in names:
+            if nxt is not None:
+                out.append(nxt)
+            i += 2
+            continue
+        long = next((n for n in names if n.startswith('--') and a.startswith(n + '=')), None)
+        if long:
+            out.append(a[len(long) + 1:])
+        elif re.match(r'^-[A-Za-z]', a) and not a.startswith('--'):
+            k = next((j for j, ch in enumerate(a[1:], 1) if ch in shorts), None)
+            if k is not None:
+                if a[k + 1:]:
+                    out.append(a[k + 1:])
+                elif nxt is not None:
+                    out.append(nxt)
+                    i += 1
+        i += 1
+    return out
+
+
+def has_flag(args, names):
+    """True when a boolean flag in `names` is present, alone, inside a short-flag cluster (`-sd`) or as
+    `--flag=true`; `--flag=false` is not."""
+    shorts = {n[1] for n in names if len(n) == 2 and n[0] == '-' and n[1] != '-'}
+    for a in args:
+        if a == '--':
+            break
+        name, eq, val = a.partition('=')
+        if a in names or (eq and name in names and val.lower() not in ('false', 'f', '0')) \
+                or (re.match(r'^-[A-Za-z]+$', a) and shorts & set(a[1:])):
+            return True
+    return False
+
+
+GH_MERGE_VALUE_OPTS = ('-t', '--subject', '-b', '--body', '-F', '--body-file', '--match-head-commit', '-A',
+                       '--author-email')
+
+
+def positionals(args, value_opts):
+    out, i = [], 0
+    while i < len(args):
+        a = args[i]
+        if a == '--':
+            return out + args[i + 1:]
+        if a in value_opts:
+            i += 2
+            continue
+        if not a.startswith('-'):
+            out.append(a)
+        i += 1
+    return out
+
+
+_pr_cache = {}
+
+
+def pr_view(c):
+    """`gh pr view <n> --json headRefName,commits` for a `gh pr merge` candidate, cached per call; None when gh
+    fails or answers anything but an object (the checks that need it then don't apply)."""
+    n = positionals(c.args, GH_MERGE_VALUE_OPTS)[:1]
+    key = (c.cwd, c.ghrepo, tuple(n))
+    if key not in _pr_cache:
+        argv = ['gh', 'pr', 'view', *n, '--json', 'headRefName,commits'] + (['-R', c.ghrepo] if c.ghrepo else [])
+        try:
+            p = subprocess.run(argv, cwd=c.cwd, capture_output=True, text=True, timeout=4)
+            view = json.loads(p.stdout) if p.returncode == 0 else None
+        except (OSError, ValueError, subprocess.TimeoutExpired):
+            view = None
+        _pr_cache[key] = view if isinstance(view, dict) else None
+        if _pr_cache[key] is None:
+            print('foreman: gh pr view failed; the merge checks that need it are skipped', file=sys.stderr)
+    return _pr_cache[key]
+
+
+def worktrees(cwd):
+    """[(path, branch ref or None)] from `git worktree list --porcelain`; [] when git fails."""
+    listing = state.git(cwd, 'worktree', 'list', '--porcelain')
+    if listing is None:
+        print('foreman: git worktree list failed; the worktree check is skipped', file=sys.stderr)
+    out = []
+    for line in (listing or '').splitlines():
+        if line.startswith('worktree '):
+            out.append([line[len('worktree '):], None])
+        elif line.startswith('branch ') and out:
+            out[-1][1] = line[len('branch '):]
+    return [tuple(w) for w in out]
+
+
+# ---- piece 2: worker guard ------------------------------------------------------------------------
+
+NO_MERGE = 'workers never merge — the worker contract: "Never merge."; report the PR and the orchestrator merges it'
+NO_FORCE = ('no force-push — the worker contract: "never amend or force-push once the PR is open"; push a '
+            'follow-up commit')
+NO_REBASE = 'no rebase — the worker contract: "merge `origin/main` into it, do not rebase"'
+NO_PUSH_DEFAULT = ('no push to {default} — the worker contract: "open the PR ready for review"; push your own '
+                   'branch and open the PR')
+NO_AMEND = ('no gt modify once the branch has an upstream — the worker contract: "never amend or force-push once '
+            'the PR is open"; commit a follow-up instead')
+NO_BOOKKEEPING = ('workers don\'t edit the backlog, the rules files or the foreman config — the worker contract: '
+                  '"Step 10: do not edit the backlog, the rules files or generated files"; report RULE NOTES and '
+                  'NEW ROWS instead')
+
+
+def worker_violation(c):
+    if (c.prog, c.sub) in (('gh', 'pr merge'), ('gt', 'merge')):
+        return NO_MERGE
+    if (c.prog, c.sub) == ('gh', 'api') and shellscan.gh_api_merge(c.args, subagent=True):
+        return NO_MERGE
+    if shellscan.is_rebase(c):
+        return NO_REBASE
+    if (c.prog, c.sub) == ('git', 'push') and c.args is not None:
+        default = default_branch(c.cwd) if c.cwd else 'main'
+        _, force, to_default = shellscan.push_info(c.args, default)
+        if force:
+            return NO_FORCE
+        if to_default:
+            return NO_PUSH_DEFAULT.format(default=default)
+    if (c.prog, c.sub) == ('gt', 'modify') and c.cwd and state.git(c.cwd, 'rev-parse', '--abbrev-ref', '@{u}'):
+        return NO_AMEND
+    return None
+
+
+def worker_guard(h, sc):
+    if not h.agent:
+        return
+    for c in sc.cmds:
+        repo = cmd_repo(c, h)
+        if not h.active(repo, 'worker_guard'):
+            continue
+        why = worker_violation(c)
+        if why:
+            h.touch.add(repo)
+            h.deny(why)
+            c.denied = c.denied or why == NO_MERGE
+
+
+def bookkeeping_target(repo, path):
+    rel = repo.rel(path)
+    return rel == os.path.normpath(repo.backlog) or rel in CONFIG_NAMES or any(glob_match(rel, g) for g in repo.rules)
+
+
+def worker_guard_edit(h, repo, path):
+    if h.agent and h.active(repo, 'worker_guard') and bookkeeping_target(repo, path):
+        h.touch.add(repo)
+        h.deny(NO_BOOKKEEPING)
+
+
+BASH_PIECES[0] = worker_guard
+EDIT_PIECES[0] = worker_guard_edit
+
+
+# ---- piece 3: merge discipline --------------------------------------------------------------------
+
+def merge_discipline(h, sc):
+    for c in sc.cmds:
+        if (c.prog, c.sub) not in (('gh', 'pr merge'), ('gt', 'merge')):
+            continue
+        repo = cmd_repo(c, h)
+        if not h.active(repo, 'merge_discipline'):
+            continue
+        h.touch.add(repo)
+        if c.denied:   # piece 2 already told this worker never to merge; telling it how to would undo that
+            continue
+        if c.prog == 'gt':
+            h.deny('no gt merge during a run — merge with `gh pr merge <n> --match-head-commit <sha>`')
+        elif c.args is None or c.cwd is None:
+            h.deny("merge the SHA you verified — foreman couldn't read this merge; run `gh pr merge <n> "
+                   "--match-head-commit <sha>` in its own call")
+        else:
+            if not any(opt_values(c.args, ('--match-head-commit',))):
+                h.deny('merge the SHA you verified — add `--match-head-commit <sha>`')
+            if has_flag(c.args, ('--delete-branch', '-d')):
+                holder = other_worktree(c)
+                if holder:
+                    h.deny(f'remove the worktree at {holder} first, then delete the branch — it still holds the '
+                           "PR's head branch")
+
+
+def other_worktree(c):
+    """A worktree other than the command's own that has the PR's head branch checked out, or None."""
+    head = (pr_view(c) or {}).get('headRefName')
+    if not head:
+        return None
+    own = os.path.realpath(state.toplevel(c.cwd) or c.cwd)
+    for path, branch in worktrees(c.cwd):
+        if branch == f'refs/heads/{head}' and os.path.realpath(path) != own:
+            return path
+    return None
+
+
+BASH_PIECES[3] = merge_discipline
+
+
 # ---- pretool / posttool ---------------------------------------------------------------------------
 
 def pretool(h):
