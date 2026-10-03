@@ -39,6 +39,7 @@ TAG = re.compile(r'^foreman-worker: ([A-Za-z0-9_-]+)( spec-phase)?\s*$')
 HANDLERS = {}      # event -> fn(h)
 BASH_PIECES = {}   # order -> fn(h, sc); piece 2 runs first so its local merge deny saves pieces 3 and 4 a network call
 EDIT_PIECES = {}   # order -> fn(h, repo, path)
+SUBAGENT_EDIT_PIECES = {0, 10}   # the edit pieces that act only for a subagent: a main-session edit skips the load
 POST_EDIT = {}     # order -> fn(h, tool_input)
 
 
@@ -1531,6 +1532,12 @@ def main(argv):
             return
         if event == 'pretool' and command is not None and not inp.get('agent_id') and not FAST.search(command):
             return   # a subagent's call goes on: its first one carries the briefing (probe P2)
+        if (event == 'pretool' and inp.get('tool_name') in EDIT_TOOLS and not inp.get('agent_id')
+                and set(EDIT_PIECES) <= SUBAGENT_EDIT_PIECES):
+            return
+        path = ti.get('file_path') if isinstance(ti, dict) else None
+        if event == 'posttool' and command is None and not (isinstance(path, str) and path.endswith('.md')):
+            return   # the backlog check, the only post-edit piece, reads a .md file
         _load()
         fn = HANDLERS.get(event)
         if fn:

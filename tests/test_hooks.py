@@ -161,11 +161,12 @@ class CommonPathTest(Case):
         self.assertIsNone(out)
         self.assertIn('foreman hook error: IsADirectoryError', err)
 
-    def imports(self, event, tool_input):
+    def imports(self, event, tool_input, tool='Bash', agent=None):
         """The repo modules a hook call imports, read from `python3 -X importtime`."""
         p = subprocess.run([sys.executable, '-X', 'importtime', HOOKS, event], capture_output=True, text=True,
                            env=self.fx.env, cwd=self.fx.work, input=json.dumps(
-                               self.fx.payload('Bash', tool_input, event='PostToolUse' if event == 'posttool' else 'PreToolUse')))
+                               self.fx.payload(tool, tool_input, agent=agent,
+                                               event='PostToolUse' if event == 'posttool' else 'PreToolUse')))
         self.assertEqual((p.returncode, p.stdout), (0, ''))
         return {m.group(1) for m in IMPORTED.finditer(p.stderr)}
 
@@ -180,6 +181,22 @@ class CommonPathTest(Case):
                                ('posttool', 'python3 hooks.py run-end')):
             self.assertEqual(self.imports(event, {'command': command}), {'shellscan', 'state', 'cfg', 'backlog'},
                              (event, command))
+
+    def test_a_main_session_edit_loads_nothing(self):
+        # both edit pieces are subagent-only, and the backlog check, the only post-edit piece, reads a .md file
+        self.fx.start_run()
+        state_before = sorted(os.listdir(self.fx.state))
+        for event, tool, rel in (('pretool', 'Edit', 'app.py'), ('pretool', 'Write', '.claude/improvement-backlog.md'),
+                                 ('pretool', 'NotebookEdit', 'n.ipynb'), ('posttool', 'Edit', 'app.py'),
+                                 ('posttool', 'Write', 'src/x.py')):
+            path = {'notebook_path' if tool == 'NotebookEdit' else 'file_path': os.path.join(self.fx.work, rel)}
+            self.assertEqual(self.imports(event, path, tool=tool), set(), (event, tool, rel))
+        self.assertEqual(sorted(os.listdir(self.fx.state)), state_before)
+        # the control: a subagent's edit and a post-edit of a .md file still load the pieces
+        app = {'file_path': os.path.join(self.fx.work, 'app.py')}
+        self.assertEqual(self.imports('pretool', app, tool='Edit', agent='a1'), {'shellscan', 'state', 'cfg', 'backlog'})
+        self.assertEqual(self.imports('posttool', {'file_path': os.path.join(self.fx.work, 'README.md')}, tool='Edit'),
+                         {'shellscan', 'state', 'cfg', 'backlog'})
 
     def test_unusual_tool_input_fails_open(self):
         for tool_input in ('git push', ['git'], {'command': ['git', 'push']}, {'command': None}):

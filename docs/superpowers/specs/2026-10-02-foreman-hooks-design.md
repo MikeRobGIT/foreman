@@ -301,7 +301,7 @@ Two review rounds showed that parsing Bash keeps missing forms. Detection is the
 
 ### 5. Backlog row check (any session in a foreman repo)
 
-- **Trigger:** after Edit, Write or MultiEdit whose `file_path`, resolved in its own checkout, equals that checkout's `backlog_path`. This includes an isolated bookkeeping worktree.
+- **Trigger:** after Edit, Write or MultiEdit whose `file_path`, resolved in its own checkout, equals that checkout's `backlog_path`. This includes an isolated bookkeeping worktree. The backlog is a `.md` file: `posttool` returns before any import for an edit of any other path, and `pretool` does the same for a main-session edit, whose pieces are all subagent-only.
 - **Check:** `backlog.parse(text, prefix)` collects `line_problems` for every row-like line, plus `duplicates()`.
 - **Output:** when there are problems, `additionalContext`: "foreman: the backlog now has N problem rows: <up to 10, `id: problem`>. Fix them before committing." Problems that were already there are reported too.
 - **It never blocks.**
