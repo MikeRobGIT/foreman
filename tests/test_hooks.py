@@ -2206,5 +2206,192 @@ class ScriptAllowGateTextTest(ScriptAllowBase):
             self.assertFalse(self.allowed(cmd), cmd)
 
 
+class SpecGateTest(Case):
+    def setUp(self):
+        super().setUp()
+        self.fx.start_run()
+        self.wt = os.path.join(self.fx.tmp, 'wt')
+        git(self.fx.work, 'worktree', 'add', '-q', self.wt, '-b', 'w1b')
+        self.map('a1', spec=True)
+
+    def map(self, agent, spec):
+        # briefed: an allowed call by an unbriefed tagged worker would carry the briefing, not return None
+        state.write_json(os.path.join(self.fx.state, 'batches', 'S1', 'agents', agent),
+                         {'batch': 'w1b', 'spec': spec, 'briefed': True, 'time': time.time()})
+
+    def spec(self, name='plan.md'):
+        return os.path.join(self.wt, 'docs/superpowers/specs', name)
+
+    def test_edits_outside_the_spec_dir_are_denied(self):
+        self.assertIn("batch w1b's spec isn't released yet", self.fx.edit(os.path.join(self.wt, 'app.py'),
+                                                                          agent='a1', cwd=self.wt))
+        self.assertIsNone(self.fx.edit(self.spec(), tool='Write', agent='a1', cwd=self.wt))
+
+    def test_commits_are_judged_by_what_they_would_include(self):
+        write(os.path.join(self.wt, 'app.py'), 'print(2)\n')
+        git(self.wt, 'add', 'app.py')
+        self.assertIn('this commit would include app.py', self.fx.bash('git commit -m wip', agent='a1', cwd=self.wt))
+        git(self.wt, 'reset', '-q')
+        write(self.spec(), '# spec\n')
+        git(self.wt, 'add', self.spec())
+        self.assertIsNone(self.fx.bash('git commit -m spec', agent='a1', cwd=self.wt))
+        git(self.wt, 'commit', '-q', '-m', 'spec')
+        self.assertIn('app.py', self.fx.bash('git commit -a -m wip', agent='a1', cwd=self.wt))
+        self.assertIn('app.py', self.fx.bash('git commit -m wip app.py', agent='a1', cwd=self.wt))
+        self.assertIn('app.py', self.fx.bash('git add -A && git commit -m wip', agent='a1', cwd=self.wt))
+        self.assertIn('app.py', self.fx.bash('gt create -a -m wip', agent='a1', cwd=self.wt))
+        self.assertIsNone(self.fx.bash(f'git add {self.spec()} && git commit -m spec', agent='a1', cwd=self.wt))
+
+    def test_pushes_are_denied_before_release(self):
+        self.assertIn("isn't released yet", self.fx.bash('git push -u origin HEAD', agent='a1', cwd=self.wt))
+        self.assertIn("isn't released yet", self.fx.bash('gh pr create --fill', agent='a1', cwd=self.wt))
+        self.assertIn("isn't released yet", self.fx.bash('gt submit', agent='a1', cwd=self.wt))
+
+    def test_after_release_everything_passes(self):
+        self.fx.bash(f'python3 {HOOKS} release w1b abc1234')
+        self.assertIsNone(self.fx.edit(os.path.join(self.wt, 'app.py'), agent='a1', cwd=self.wt))
+        write(os.path.join(self.wt, 'app.py'), 'print(2)\n')
+        self.assertIsNone(self.fx.bash('git commit -a -m wip', agent='a1', cwd=self.wt))
+        self.assertNotIn("isn't released yet", self.fx.bash('git push -u origin HEAD', agent='a1', cwd=self.wt) or '')
+
+    def test_unmapped_non_spec_and_main_session_pass(self):
+        self.assertIsNone(self.fx.edit(os.path.join(self.wt, 'app.py'), agent='a9', cwd=self.wt))
+        self.map('a2', spec=False)
+        self.assertIsNone(self.fx.edit(os.path.join(self.wt, 'app.py'), agent='a2', cwd=self.wt))
+        self.assertIsNone(self.fx.edit(os.path.join(self.wt, 'app.py'), cwd=self.wt))
+        self.assertIsNone(self.fx.edit(os.path.join(self.wt, 'app.py'), agent='a1', sid='S2', cwd=self.wt))
+
+    def commit_spec(self):
+        write(self.spec(), '# spec\n')
+        git(self.wt, 'add', self.spec())
+        git(self.wt, 'commit', '-q', '-m', 'spec')
+        write(self.spec(), '# spec v2\n')
+
+    def test_a_message_in_a_flag_cluster_is_not_a_pathspec(self):
+        # shellscan gives `git commit -am "spec draft"` as ['-am', 'spec draft']
+        self.commit_spec()
+        for cmd in ('git commit -am "spec draft"', 'git commit -qm "spec draft"', 'git commit -a -m "spec draft"',
+                    'git commit -sam "spec draft"', 'gt modify -am "spec draft"'):
+            self.assertIsNone(self.fx.bash(cmd, agent='a1', cwd=self.wt), cmd)
+        write(os.path.join(self.wt, 'app.py'), 'print(2)\n')
+        why = self.fx.bash('git commit -am "spec draft"', agent='a1', cwd=self.wt)
+        self.assertIn('this commit would include app.py', why)
+        self.assertNotIn('spec draft', why)
+
+    def test_a_non_ascii_path_in_the_spec_dir_is_inside_it(self):
+        write(self.spec('café.md'), '# spec\n')
+        git(self.wt, 'add', '-A')
+        git(self.wt, 'commit', '-q', '-m', 'spec')
+        write(self.spec('café.md'), '# spec v2\n')
+        self.assertIsNone(self.fx.bash('git commit -a -m spec', agent='a1', cwd=self.wt))
+        write(self.spec('naïve.md'), '# new\n')
+        self.assertIsNone(self.fx.bash('git add -A && git commit -m spec', agent='a1', cwd=self.wt))
+
+    def test_a_move_into_the_spec_dir_still_names_the_file_it_deleted(self):
+        write(self.spec(), '# spec\n')
+        git(self.wt, 'mv', 'app.py', self.spec('app.py'))
+        self.assertIn('this commit would include app.py', self.fx.bash('git commit -m move', agent='a1', cwd=self.wt))
+        self.assertIn('this commit would include app.py',
+                      self.fx.bash('git add -A && git commit -m move', agent='a1', cwd=self.wt))
+        git(self.wt, 'reset', '-q')
+        git(self.wt, 'checkout', '-q', '--', 'app.py')
+        os.rename(os.path.join(self.wt, 'app.py'), self.spec('app.py'))   # the same move, unstaged
+        self.assertIn('this commit would include app.py',
+                      self.fx.bash('git add -A && git commit -m move', agent='a1', cwd=self.wt))
+
+    def test_all_stages_untracked_files_for_gt_and_git_add_but_not_for_git_commit(self):
+        write(os.path.join(self.wt, 'new.py'), 'x = 1\n')   # untracked, nothing tracked is modified
+        for cmd in ('gt create -a -m wip', 'gt modify --all', 'git add -A && git commit -m wip'):
+            self.assertIn('this commit would include new.py', self.fx.bash(cmd, agent='a1', cwd=self.wt), cmd)
+        self.assertIsNone(self.fx.bash('git commit -a -m wip', agent='a1', cwd=self.wt))
+
+    def test_gt_sees_an_earlier_git_add_in_the_same_command(self):
+        write(os.path.join(self.wt, 'app.py'), 'print(2)\n')
+        write(self.spec(), '# spec\n')
+        self.assertIn('app.py', self.fx.bash('git add app.py && gt create -m wip', agent='a1', cwd=self.wt))
+        self.assertIsNone(self.fx.bash(f'git add {self.spec()} && gt create -m spec', agent='a1', cwd=self.wt))
+
+    def test_a_commit_that_cannot_be_read_is_denied(self):
+        why = self.fx.bash('git commit -m "$msg" $(echo app.py', agent='a1', cwd=self.wt)
+        self.assertIn("foreman couldn't tell what this commit would include", why)
+
+    def test_the_target_is_judged_in_its_own_checkout(self):
+        # the worker stands in the main checkout; the file is the worktree's
+        self.assertIsNone(self.fx.edit(self.spec(), agent='a1'))
+        self.assertIn("isn't released yet", self.fx.edit(os.path.join(self.wt, 'app.py'), agent='a1'))
+        self.assertIn("isn't released yet", self.fx.edit(os.path.join(self.fx.work, 'app.py'), agent='a1'))
+
+    def test_the_spec_dir_is_a_directory_not_a_prefix(self):
+        for rel, denied in (('docs/superpowers/specs/sub/deep.md', False), ('docs/superpowers/specs-old/x.md', True),
+                            ('docs/superpowers/specs.md', True), ('docs/superpowers/specs/../app.py', True)):
+            self.assertEqual(self.fx.edit(os.path.join(self.wt, rel), agent='a1', cwd=self.wt) is not None, denied, rel)
+
+    def test_design_spec_dir_and_hooks_disabled_come_from_the_config(self):
+        path = os.path.join(self.fx.work, '.claude/foreman.config.md')
+        write(path, CONFIG.replace('---\n', '---\ndesign_spec_dir: notes/design/\n', 1))
+        self.assertIsNone(self.fx.edit(os.path.join(self.wt, 'notes/design/a.md'), agent='a1', cwd=self.wt))
+        self.assertIn("isn't released yet", self.fx.edit(self.spec(), agent='a1', cwd=self.wt))
+        write(path, CONFIG.replace('---\n', '---\nhooks_disabled: [spec_gate]\n', 1))
+        self.assertIsNone(self.fx.edit(os.path.join(self.wt, 'app.py'), agent='a1', cwd=self.wt))
+        self.assertNotIn("isn't released yet", self.fx.bash('git push', agent='a1', cwd=self.wt) or '')
+
+    def test_no_run_no_gate(self):
+        os.remove(os.path.join(self.fx.state, 'runs', 'S1.json'))
+        self.assertIsNone(self.fx.edit(os.path.join(self.wt, 'app.py'), agent='a1', cwd=self.wt))
+
+
+class SpecGateFirstCallTest(Case):
+    """A worker's map entry is created on its first PreToolUse (P2): the gate must read it from the transcript."""
+
+    def setUp(self):
+        super().setUp()
+        self.fx.start_run()
+        self.wt = os.path.join(self.fx.tmp, 'wt')
+        git(self.fx.work, 'worktree', 'add', '-q', self.wt, '-b', 'w1b')
+        self.main = os.path.join(self.fx.tmp, 'session.jsonl')
+        put_worker(self.fx, 'a3', 'foreman-worker: w1b spec-phase\nWrite the spec.')
+        put_worker(self.fx, 'a4', TAGGED)
+
+    def call(self, tool, tool_input, agent='a3'):
+        d = self.fx.payload(tool, tool_input, agent=agent, cwd=self.wt)
+        d['transcript_path'] = self.main
+        return self.fx.hook('pretool', d)[0]
+
+    def entry(self, agent='a3'):
+        return state.read_json(os.path.join(self.fx.state, 'batches', 'S1', 'agents', agent))
+
+    def test_the_first_call_an_edit_outside_the_spec_dir_is_denied(self):
+        self.assertIsNone(self.entry())
+        out = self.call('Edit', {'file_path': os.path.join(self.wt, 'app.py')})['hookSpecificOutput']
+        self.assertEqual(out['permissionDecision'], 'deny')
+        self.assertIn("batch w1b's spec isn't released yet", out['permissionDecisionReason'])
+        self.assertEqual((self.entry()['batch'], self.entry()['spec'], self.entry()['briefed']), ('w1b', True, False))
+        # the deny spent no briefing: the next allowed call carries it
+        out = self.call('Write', {'file_path': os.path.join(self.wt, 'docs/superpowers/specs/plan.md')})
+        self.assertIn('foreman worker briefing', out['hookSpecificOutput']['additionalContext'])
+
+    def test_the_first_call_a_push_or_a_code_commit_is_denied(self):
+        git(self.wt, 'config', 'user.name', 't')
+        write(os.path.join(self.wt, 'app.py'), 'print(2)\n')
+        out = self.call('Bash', {'command': 'git commit -a -m wip'})['hookSpecificOutput']
+        self.assertIn('this commit would include app.py', out['permissionDecisionReason'])
+        self.assertEqual(self.entry()['spec'], True)
+        put_worker(self.fx, 'a5', 'foreman-worker: w1b spec-phase\nspec')
+        out = self.call('Bash', {'command': 'git push -u origin HEAD'}, agent='a5')['hookSpecificOutput']
+        self.assertIn("isn't released yet", out['permissionDecisionReason'])
+
+    def test_a_build_phase_worker_and_an_untagged_agent_are_not_gated(self):
+        put_worker(self.fx, 'a6', 'just a helper')
+        for agent in ('a4', 'a6'):
+            out = self.call('Edit', {'file_path': os.path.join(self.wt, 'app.py')}, agent=agent)
+            self.assertNotIn('permissionDecision', (out or {}).get('hookSpecificOutput', {}), agent)
+
+    def test_a_denied_first_call_by_another_piece_still_fills_the_map(self):
+        # the worker guard denies the backlog edit and returns no briefing; piece 10 fills the map on its own
+        out = self.call('Edit', {'file_path': os.path.join(self.wt, '.claude/improvement-backlog.md')})
+        self.assertIn("isn't released yet", out['hookSpecificOutput']['permissionDecisionReason'])
+        self.assertEqual(self.entry()['spec'], True)
+
+
 if __name__ == '__main__':
     unittest.main()

@@ -1226,6 +1226,126 @@ def permission(h):
 HANDLERS['permission'] = permission
 
 
+# ---- piece 10: spec gate --------------------------------------------------------------------------
+
+GIT_COMMIT_VALUE_OPTS = ('-m', '--message', '-F', '--file', '-C', '--reuse-message', '-c', '--reedit-message', '-t',
+                         '--template', '--author', '--date', '--cleanup', '--fixup', '--squash', '--trailer',
+                         '--pathspec-from-file')
+COMMITS = (('git', 'commit'), ('gt', 'create'), ('gt', 'modify'))
+
+
+def gated_batch(h, repo):
+    """The batch when this subagent is a spec-phase worker whose batch isn't released, else None. resolve_agent
+    fills a missing map entry from the worker's transcript (P2), so the gate holds from the worker's first call,
+    whichever other piece denied it or briefed it."""
+    if not h.agent or not h.active(repo, 'spec_gate'):
+        return None
+    e = resolve_agent(repo, h)
+    if not e or not e.get('spec') or released(repo, h.sid, e.get('batch', '')):
+        return None
+    return e['batch']
+
+
+def spec_reason(batch):
+    return (f"batch {batch}'s spec isn't released yet. Finish the spec, put `SPEC READY <worktree> <branch> "
+            "<spec path> <sha>` as your final message's first line, and wait for the orchestrator's release")
+
+
+def in_spec_dir(repo, rel):
+    d = os.path.normpath(str(repo.get('design_spec_dir'))).strip('/')
+    return rel == d or rel.startswith(d + '/')
+
+
+def diff_names(top, *args):
+    """Top-level-relative paths of `git diff --name-only`. NUL-separated: without -z git quotes a path with
+    non-ASCII characters, and the quoted form is never inside a directory. --no-renames: a move into the spec
+    directory would otherwise name only its new path, hiding the file it deleted."""
+    return [p for p in (state.git(top, 'diff', '--name-only', '-z', '--no-renames', *args) or '').split('\0') if p]
+
+
+def changed_paths(top, everything):
+    """Top-level-relative paths: modified tracked files, plus untracked ones when `everything`."""
+    if not everything:
+        return diff_names(top)
+    toks = (state.git(top, 'status', '--porcelain', '-uall', '-z', '--no-renames') or '').split('\0')
+    return [t[3:] for t in toks if len(t) > 3]
+
+
+def under(top, cwd, path):
+    """`path` as written in `cwd`, relative to the checkout's top level."""
+    return os.path.relpath(os.path.realpath(os.path.join(cwd, path)), os.path.realpath(top))
+
+
+def commit_words(args):
+    """`-am msg` as `-a -m msg`: a short-flag cluster ending in an option that takes a value."""
+    out = []
+    for a in args:
+        if re.match(r'^-[A-Za-z]{2,}$', a) and '-' + a[-1] in GIT_COMMIT_VALUE_OPTS:
+            out += ['-' + a[1:-1], '-' + a[-1]]
+        else:
+            out.append(a)
+    return out
+
+
+def commit_paths(c, sc, top):
+    """The paths a `git commit` / `gt create|modify` would commit, or None when they can't be told."""
+    if c.args is None or c.cwd is None:
+        return None
+    paths = set(diff_names(top, '--cached'))
+    for a in sc.cmds:   # an earlier `git add` in the same command stages its paths
+        if a is c:
+            break
+        if (a.prog, a.sub) == ('git', 'add') and a.args is not None and a.cwd:
+            named = [p for p in positionals(a.args, ('--pathspec-from-file', '--chmod')) if p]
+            if has_flag(a.args, ('-A', '--all')) or '.' in named or not named:
+                paths |= set(changed_paths(top, everything=True))
+            paths |= {under(top, a.cwd, p) for p in named if p != '.'}
+    if c.prog == 'gt':
+        if has_flag(c.args, ('--all', '-a')):
+            paths |= set(changed_paths(top, everything=True))
+        return paths
+    args = commit_words(c.args)
+    if has_flag(args, ('--all', '-a')):
+        paths |= set(changed_paths(top, everything=False))
+    return paths | {under(top, c.cwd, p) for p in positionals(args, GIT_COMMIT_VALUE_OPTS)}
+
+
+def spec_gate(h, sc):
+    if not h.agent:
+        return
+    for c in sc.cmds:
+        push = is_push_trigger(c)
+        if not push and (c.prog, c.sub) not in COMMITS:   # before cmd_repo: it spawns git
+            continue
+        repo = cmd_repo(c, h)
+        batch = gated_batch(h, repo)
+        if not batch:
+            continue
+        h.touch.add(repo)
+        if push:
+            h.deny(spec_reason(batch) + " (the spec phase doesn't push)")
+            continue
+        top = state.toplevel(c.cwd) if c.cwd else None
+        paths = commit_paths(c, sc, top) if top else None
+        if paths is None:
+            h.deny(spec_reason(batch) + "; foreman couldn't tell what this commit would include")
+            continue
+        outside = sorted(p for p in paths if not in_spec_dir(repo, p))
+        if outside:
+            h.deny(spec_reason(batch) + '; this commit would include ' + ', '.join(outside[:10]))
+
+
+def spec_gate_edit(h, repo, path):
+    batch = gated_batch(h, repo)
+    if batch and not in_spec_dir(repo, repo.rel(path)):
+        h.touch.add(repo)
+        h.deny(spec_reason(batch))
+
+
+BASH_PIECES[10] = spec_gate
+EDIT_PIECES[10] = spec_gate_edit
+
+
 # ---- pretool / posttool ---------------------------------------------------------------------------
 
 def pretool(h):
