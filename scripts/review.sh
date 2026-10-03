@@ -52,7 +52,8 @@ poll=${FOREMAN_WATCH_POLL:-5}
 mkdir -p "$(dirname "$logfile")"
 echo $$ >"$logfile.pid"
 trap 'rm -f "$logfile.pid"' EXIT
-trap 'if [ -n "${pid:-}" ]; then kill -TERM -- "-$pid" 2>/dev/null; sleep 2; kill -KILL -- "-$pid" 2>/dev/null; fi; exit 143' TERM INT
+# The handler ignores a repeated TERM/INT first: bash would re-run it on `exit`, and that nested exit skips the EXIT trap.
+trap 'trap "" TERM INT; if [ -n "${pid:-}" ]; then kill -TERM -- "-$pid" 2>/dev/null; sleep 2; kill -KILL -- "-$pid" 2>/dev/null; fi; exit 143' TERM INT
 work=$(mktemp -d "${TMPDIR:-/tmp}/foreman-review.XXXXXX")
 template=${FOREMAN_PROMPT_TEMPLATE:-$plugin/templates/review-prompt.md}
 [ "$mode" = spec ] && template=$plugin/templates/spec-review-prompt.md

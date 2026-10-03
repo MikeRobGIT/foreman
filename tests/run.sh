@@ -353,7 +353,17 @@ for _ in $(seq 1 40); do [ -s "$STUB_PIDFILE" ] && [ -s "$T/out/kill.log.pid" ] 
 kill -TERM "$(cat "$T/out/kill.log.pid")"; wait "$rvpid"; rc=$?
 sleep 1
 check "TERM: a member that ignores TERM is killed, and the pid file is gone" bash -c "[ $rc = 143 ] && [ -s '$STUB_PIDFILE' ] && ! kill -0 \$(cat '$STUB_PIDFILE') 2>/dev/null && [ ! -e '$T/out/kill.log.pid' ]"
-pkill -f '^sleep 299$' 2>/dev/null; pkill -9 -f stubborn-member 2>/dev/null; unset HANG_PIDFILE STUB_PIDFILE
+kill -9 "$(cat "$STUB_PIDFILE" 2>/dev/null)" 2>/dev/null
+# A second TERM while the trap is still escalating must not leave the pid file behind (the nested exit skips the EXIT trap).
+rm -f "$STUB_PIDFILE"
+FOREMAN_REVIEWERS_DIR=$A FOREMAN_WATCH_POLL=1 FOREMAN_TOOL_POLL=1 FOREMAN_CONFIG=$T/chain.md \
+  "$root/scripts/review.sh" --spec "docs/my specs/d.md" "$fork" "$T/out/kill2.log" 2>/dev/null &
+rvpid=$!
+for _ in $(seq 1 40); do [ -s "$STUB_PIDFILE" ] && [ -s "$T/out/kill2.log.pid" ] && break; sleep 0.25; done
+kill -TERM "$rvpid"; sleep 1.5; kill -TERM "$rvpid" 2>/dev/null; wait "$rvpid"; rc=$?
+sleep 1
+check "TERM twice: exit 143, the member is dead and the pid file is gone" bash -c "[ $rc = 143 ] && [ -s '$STUB_PIDFILE' ] && ! kill -0 \$(cat '$STUB_PIDFILE') 2>/dev/null && [ ! -e '$T/out/kill2.log.pid' ]"
+kill -9 "$(cat "$STUB_PIDFILE" 2>/dev/null)" 2>/dev/null; kill -9 "$(cat "$HANG_PIDFILE" 2>/dev/null)" 2>/dev/null; unset HANG_PIDFILE STUB_PIDFILE
 echo "## templates/spec-review-prompt.md"
 sp=$root/templates/spec-review-prompt.md
 while IFS= read -r s; do check "spec-review prompt has: $s" grep -qF -- "$s" "$sp"; done <<'EOF'
