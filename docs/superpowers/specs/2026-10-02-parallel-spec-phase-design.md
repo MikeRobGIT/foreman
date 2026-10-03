@@ -56,12 +56,14 @@ A batch in the spec phase ends **released** or **parked**, never anything else.
 
 **The clock.** Only notifications wake the orchestrator, so the bounds are driven by timers.
 - **Timestamps:** every message that returns a worker to work stamps `sent_i` in the state table, as epoch seconds from `date +%s`. That covers launch (`sent_0`), findings, a pre-check bounce, a resume after a stop without `SPEC READY`, and a comment round. Every `SPEC READY` stamps `spec_ready_i`, and a stop without one stamps `stopped_i`.
-- **Worker time** is the sum of each `spec_ready_i − sent_i`, or `stopped_i − sent_i`, plus `now − last sent_i` while the worker is working. Orchestrator latency between a stop and a resume is therefore never counted.
+- **Worker time** is the sum of each `spec_ready_i − sent_i`, or `stopped_i − sent_i`, plus `now − last sent_i` while the worker is working.
+  - Orchestrator latency between a stop and a resume is never counted.
+  - Comment-round intervals are left out, because the comment round is exempt from `spec_phase_timeout`. Its own timer is `parallel_worker_timeout`.
 - **Timers:** for every return to work, the orchestrator starts a background `sleep <remaining worker time>` (Bash `run_in_background`). It starts one per running reviewer too (20 minutes), and one per comment round (`parallel_worker_timeout`).
   - It records each timer's task id. It stops the superseded timer (TaskStop) on disarm, which happens at `SPEC READY`, and on every re-arm. It also stops a superseded reviewer on re-dispatch, and ignores any late verdict from it.
-  - On every wake it recomputes every bound for every batch from the timestamps. A stray wake is harmless.
-- **Session limits:** in sessions that cap background commands (`-p`, SDK and cloud sessions, which default to 30 min and allow at most 2 h), every timer and chain is started with a `timeout` up to that cap.
-  - A timer stopped at the cap counts as a wake, and a chain stopped at the cap counts as exhausted.
+  - **On every wake** it recomputes every bound for every batch from the timestamps. Then it re-arms a timer for each working batch, and each running reviewer, whose timer has ended. A stray wake is harmless. The timers keep waking the orchestrator for as long as any batch is working, whatever the session's cap.
+- **Session limits:** in sessions that cap background commands (`-p`, SDK and cloud sessions, which default to 30 min and allow at most 2 h), every timer is `sleep min(remaining, cap − 1 min)`. Re-arming on every wake covers the rest. `timeout` is never used: macOS lacks it.
+  - A chain killed at the cap counts as exhausted.
   - At the subagent concurrency limit ("Concurrent subagent limit reached"), a reviewer dispatch is queued and retried at the next wake, not counted as a failure.
 - **"The bounds guarantee this"** in W3.6 rests on these timers.
 
@@ -209,7 +211,7 @@ Each `SPEC READY` is handled as it arrives, independently of other batches. The 
   - **Commented:** one comment round with the comments as findings. It's always allowed, and exempt from the round cap and the timeout. Batches that pass their comment round come back together at ONE follow-up checkpoint. A failure parks the batch.
   - **Neither:** parked ("not released by the human").
 - **Parking:**
-  1. Kill the round's chain and reviewer if they're running. Run `python3 $FOREMAN/hooks.py stopping <batch>`, if the hooks are installed, so the hooks' report check lets the stop through. Then stop the worker (TaskStop).
+  1. Kill the round's chain and reviewer if they're running. Run `python3 $FOREMAN/hooks.py stopping <batch>`, so the hooks' report check lets the stop through. It exits 3 when the hooks aren't firing, which is harmless. Then stop the worker (TaskStop).
   2. Copy every spec path to `$(git rev-parse --git-common-dir)/foreman/parked/<batch>/`, which outlives the session's scratch. Copy committed and uncommitted ones alike, including a park before the first `SPEC READY`, when the state table has no spec path yet:
      - `git -C <wt> status --porcelain --untracked-files=all -- <design_spec_dir>`;
      - `git -C <wt> diff --name-only <fork base, or $(git -C <wt> merge-base origin/<default> HEAD)> HEAD -- <design_spec_dir>`.
@@ -253,7 +255,7 @@ This is the Worker contract's current steps 3–8, plus:
 
 - **W5 bookkeeping for parked batches.** The orchestrator writes one report per parked batch: `{"pr": 0, "append": [{"id": <row>, "note": "spec parked (<reason>): <spec path> — <open findings or question>"}]}`. `<reason>` is `open question` for that case.
   - Notes are one line, with any ` | ` escaped as `\|`, and never quote a placeholder id like `IB-NEW-a`. bk.py refuses one with no matching new row.
-  - The bookkeeping PR also commits the parked spec to `design_spec_dir` with a `Status: parked — <reason>` line. Then the local branch is deleted, along with `foreman/parked/<batch>/` and the hooks' `batches/<session_id>/` entries for this wave (`hooks.py` state).
+  - The bookkeeping PR also commits the parked spec to `design_spec_dir` with a `Status: parked — <reason>` line. Then the local branch is deleted, along with `foreman/parked/<batch>/`. The orchestrator runs `hooks.py forget <batch>` for every batch of the wave.
 - **W6:**
   - rows parked during this invocation are excluded from later waves' pools.
   - **W2 rule for later invocations:**
@@ -331,4 +333,4 @@ A five-batch wave adds about 1.5–2 rounds per batch before code. Each round is
 
 ## Version
 
-0.5.0. It ships after hooks 0.4.0, or the numbers swap at merge.
+0.5.0. It ships after hooks 0.4.0, whose spec gate, report check and `hooks.py` CLIs it relies on.
