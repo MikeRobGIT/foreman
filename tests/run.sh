@@ -14,7 +14,7 @@ git() { /usr/bin/git -c user.name=t -c user.email=t@example.com "$@"; }
 
 echo "## syntax"
 for f in "$root"/scripts/*.sh "$root"/reviewers/*.sh; do check "bash -n ${f#$root/}" bash -n "$f"; done
-check "py_compile" python3 -m py_compile "$root/scripts/cfg.py" "$root/scripts/bk.py" "$root/scripts/backlog.py" "$root/scripts/ui.py" "$root/scripts/state.py" "$root/scripts/shellscan.py"
+check "py_compile" python3 -m py_compile "$root/scripts/cfg.py" "$root/scripts/bk.py" "$root/scripts/backlog.py" "$root/scripts/ui.py" "$root/scripts/state.py" "$root/scripts/shellscan.py" "$root/scripts/hooks.py"
 
 echo "## cfg.py"
 cat >"$T/c.md" <<'EOF'
@@ -249,6 +249,7 @@ check "test_ui_api.py" python3 "$root/tests/test_ui_api.py"
 check "test_state.py" python3 "$root/tests/test_state.py"
 echo "## shellscan.py + hooks.py"
 check "test_shellscan.py" python3 "$root/tests/test_shellscan.py"
+check "test_hooks.py" python3 "$root/tests/test_hooks.py"
 echo "## ui js"
 if command -v node >/dev/null; then check "test_ui_js.mjs" node --test "$root/tests/test_ui_js.mjs"; else echo "SKIP node not installed"; fi
 
