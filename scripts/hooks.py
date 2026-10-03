@@ -1143,19 +1143,19 @@ def pretool(h):
             repo = repo_at(path)
             for k in sorted(EDIT_PIECES):
                 EDIT_PIECES[k](h, repo, path)
-    try:
-        briefing_text = worker_briefing(h)   # piece 6: a tagged worker's first call (probe P2)
-    except Exception as e:   # a briefing that fails must not drop the denies below
-        print(f'foreman hook error: {type(e).__name__}: {e}', file=sys.stderr)
-        briefing_text = None
-    if h.denies or briefing_text:   # printed before the touches: a failed touch (stderr, via main) can't drop a deny
-        out = {'hookEventName': 'PreToolUse'}
-        if h.denies:
-            out.update(permissionDecision='deny',
-                       permissionDecisionReason='foreman: ' + '; '.join(dict.fromkeys(h.denies)))
-        if briefing_text:
-            out['additionalContext'] = briefing_text
-        print(json.dumps({'hookSpecificOutput': out}), flush=True)
+    briefing_text = None
+    if not h.denies:   # a denied call carries no briefing: it may not be shown, and `briefed` would be spent
+        try:
+            briefing_text = worker_briefing(h)   # piece 6: a tagged worker's first allowed call (probe P2)
+        except Exception as e:   # a failed briefing must not skip the marker touches below
+            print(f'foreman hook error: {type(e).__name__}: {e}', file=sys.stderr)
+    if h.denies:   # printed before the touches: a failed touch (stderr, via main) can't drop a deny
+        print(json.dumps({'hookSpecificOutput': {
+            'hookEventName': 'PreToolUse', 'permissionDecision': 'deny',
+            'permissionDecisionReason': 'foreman: ' + '; '.join(dict.fromkeys(h.denies))}}), flush=True)
+    elif briefing_text:
+        print(json.dumps({'hookSpecificOutput': {'hookEventName': 'PreToolUse', 'additionalContext': briefing_text}}),
+              flush=True)
     for r in h.touch:
         touch_marker(r, h.sid)
 

@@ -1708,16 +1708,26 @@ class BriefingTest(Case):
         self.assertIn('You run steps 2-8', self.context(self.call(tool='Edit')))
         self.assertIsNone(self.call(tool='Edit'))
 
-    def test_a_deny_and_the_briefing_arrive_in_one_json(self):
+    def test_a_denied_call_carries_no_briefing_and_the_next_allowed_call_does(self):
+        # unverified whether Claude Code shows additionalContext next to a deny, so a deny never spends the briefing
         self.fx.start_run()
         put_worker(self.fx, 'a1', TAGGED)
-        out = self.call('gh pr merge 5 --squash')['hookSpecificOutput']
-        self.assertEqual(out['permissionDecision'], 'deny')
-        self.assertIn('workers never merge', out['permissionDecisionReason'])
+        agents = os.path.join(self.fx.state, 'batches', 'S1', 'agents')
+        for _ in range(2):
+            out = self.call('gh pr merge 5 --squash')['hookSpecificOutput']
+            self.assertEqual(out['permissionDecision'], 'deny')
+            self.assertIn('workers never merge', out['permissionDecisionReason'])
+            self.assertNotIn('additionalContext', out)
+            self.assertFalse((self.entry() or {}).get('briefed'))
+            self.assertFalse(os.path.exists(os.path.join(agents, 'a1.briefed')))   # nor claimed
+        out = self.call('git status')['hookSpecificOutput']
         self.assertIn('You run steps 2-8', out['additionalContext'])
-        again = self.call('gh pr merge 5 --squash')['hookSpecificOutput']
-        self.assertEqual(again['permissionDecision'], 'deny')
-        self.assertNotIn('additionalContext', again)
+        self.assertNotIn('permissionDecision', out)
+        self.assertTrue(self.entry()['briefed'])
+        self.assertIsNone(self.call('git status'))
+        denied = self.call('gh pr merge 5 --squash')['hookSpecificOutput']
+        self.assertEqual(denied['permissionDecision'], 'deny')
+        self.assertNotIn('additionalContext', denied)
 
     def test_no_tag_no_briefing(self):
         put_worker(self.fx, 'a1', 'Do rows IB-1.\nforeman-worker: w1a')
@@ -1839,28 +1849,35 @@ class BriefingClaimTest(InProcess):
         hooks.forget(self.repo, 'S1', 'w1a')
         self.assertEqual(os.listdir(agents), [])
 
-    def test_a_briefing_that_cannot_render_keeps_the_deny_and_is_retried(self):
-        self.put_marker('S1')
-        payload = self.fx.payload('Bash', {'command': 'gh pr merge 5 --squash'}, agent='a1')
+    def pretool(self, tool_input=None, tool='Bash'):
+        payload = self.fx.payload(tool, tool_input or {'command': 'git status'}, agent='a1')
         payload['transcript_path'] = self.main
-
-        def pretool():
-            out, err = io.StringIO(), io.StringIO()
-            with mock.patch.object(sys, 'stdin', io.StringIO(json.dumps(payload))), \
-                    contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
-                hooks.main(['hooks.py', 'pretool'])
-            return json.loads(out.getvalue())['hookSpecificOutput'], err.getvalue()
-
+        out, err = io.StringIO(), io.StringIO()
         with mock.patch.dict(os.environ, {'PATH': self.fx.env['PATH']}), \
-                mock.patch.object(hooks, 'SKILL', os.path.join(self.fx.tmp, 'missing.md')):
-            out, err = pretool()
-        self.assertEqual(out['permissionDecision'], 'deny')
-        self.assertNotIn('additionalContext', out)
+                mock.patch.object(sys, 'stdin', io.StringIO(json.dumps(payload))), \
+                contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            hooks.main(['hooks.py', 'pretool'])
+        return (json.loads(out.getvalue())['hookSpecificOutput'] if out.getvalue() else None), err.getvalue()
+
+    def test_a_briefing_that_cannot_render_is_retried_on_the_next_call(self):
+        with mock.patch.object(hooks, 'SKILL', os.path.join(self.fx.tmp, 'missing.md')):
+            out, err = self.pretool()
+        self.assertIsNone(out)
         self.assertIn('foreman hook error: FileNotFoundError', err)
-        with mock.patch.dict(os.environ, {'PATH': self.fx.env['PATH']}):
-            out, err = pretool()   # nothing was claimed, so the next call briefs
-        self.assertEqual(out['permissionDecision'], 'deny')
+        out, err = self.pretool()   # nothing was claimed, so the next call briefs
         self.assertIn('You run steps 2-8', out['additionalContext'])
+
+    def test_a_briefing_that_fails_does_not_skip_the_marker_touch(self):
+        path = self.put_marker('S1', age=60)
+
+        def piece(h, repo, p):   # touches the marker without denying, as a matching run-only piece does
+            h.touch.add(repo)
+
+        with mock.patch.dict(hooks.EDIT_PIECES, {99: piece}), mock.patch.object(hooks, 'worker_briefing', side_effect=OSError('boom')):
+            out, err = self.pretool({'file_path': os.path.join(self.fx.work, 'app.py')}, tool='Edit')
+        self.assertIsNone(out)
+        self.assertIn('foreman hook error: OSError: boom', err)
+        self.assertGreater(state.read_json(path)['touched'], time.time() - 30)
 
 
 GOOD = 'Report.\n\n```json\n{"done": [{"id": "IB-1", "note": "shipped"}], "append": [], "new_rows": [], "rule_notes": []}\n```\n'
