@@ -287,9 +287,10 @@ def ends_run(sc):
                 continue
             w.append(seg.words[i])
             i += 1
-        p = os.path.expanduser(w[1]) if len(w) == 3 else ''
-        if (len(w) == 3 and os.path.basename(w[0]) == 'python3' and w[2] == 'run-end' and (os.path.isabs(p) or seg.cwd)
-                and same_file(os.path.join(seg.cwd or '', p), os.path.join(HERE, 'hooks.py'))):
+        if len(w) != 3 or os.path.basename(w[0]) != 'python3' or w[2] != 'run-end':
+            continue
+        p = os.path.expanduser(w[1])
+        if (os.path.isabs(p) or seg.cwd) and same_file(os.path.join(seg.cwd or '', p), os.path.join(HERE, 'hooks.py')):
             return True
     return False
 
