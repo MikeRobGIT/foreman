@@ -236,6 +236,7 @@ Two review rounds showed that parsing Bash keeps missing forms. Detection is the
 - **When the command can't be read** (unknown arguments, an unknown effective directory, or the step-7 fallback), the push is denied with its own reason: "foreman couldn't read this command. Run the gate, then push with a plain `git push` in its own call."
   - A `gate-lock.sh … && git push` in one call is denied the same way, because the receipt doesn't exist yet when `pretool` runs.
   - shlex words are built from the text with comments blanked, so `git push -u origin HEAD  # note` reads cleanly.
+- **When a command earlier in the same call moves HEAD** (`git commit`, `merge`, `pull`, `rebase`, `cherry-pick`, `revert`, `am`, `reset`, `checkout` or `switch`; `gt create`, `modify` or `sync`), the push is denied, because `pretool` judges the HEAD the call starts with: "commit (or merge) in one call, re-run the gate (`gate-lock.sh`) if it touched non-exempt paths, then push in its own call". `git checkout -- <path>` is an accepted false deny.
 - **Refspecs** are read from the segment's arguments:
   - **a delete** (`--delete`, `-d`, or a refspec starting with `:`) is allowed;
   - **a `+` refspec** is a force push (piece 2).

@@ -210,7 +210,8 @@ You run steps 2-8 on your batch in your own worktree, with these overrides:
   never reach a real external platform, delete throwaway files and fixtures before committing, and run every
   gate under a slot, from your checkout's top level, with the configured gate string as ONE argument:
   `$FOREMAN/gate-lock.sh <batch> -- '<gate>'` (never take or clear a slot by hand). That run mints the gate receipt
-  a push needs: commit every file the gate changed and list it in your report; don't edit files while a gate runs. A red that appears only under load: re-run that file alone, then the whole
+  a push needs: commit every file the gate changed and list it in your report, then push in its own call, after the
+  gate and the commit; don't edit files while a gate runs. A red that appears only under load: re-run that file alone, then the whole
   gate, which must end green in one run.
 - Step 8: push follow-up commits; never amend or force-push once the PR is open. Update your branch (merge
   `origin/main` into it, do not rebase) only when it conflicts or the orchestrator asks, then re-run the gate.
@@ -345,7 +346,7 @@ Read `.claude/foreman.config.md`, or the legacy `.claude/improve-next.config.md`
 | sync to fresh main | `gt sync` | `git switch main && git pull --rebase` |
 | create branch + commit | `gt create --all -m "<msg>"` | `git switch -c <branch> && git add -A && git commit -m "<msg>"` |
 | submit as draft PR | `gt submit` (draft) | `git push -u origin HEAD && gh pr create --draft --fill` |
-| amend + re-push | `gt modify --all && gt submit` | `git commit --amend -a && git push --force-with-lease` |
+| amend + re-push | `gt modify --all`, re-run the gate (step 4), then `gt submit` in its own call | `git commit --amend -a`, re-run the gate (step 4), then `git push --force-with-lease` in its own call |
 | post-merge sync | `gt sync` | `git switch main && git pull --rebase && git branch -d <branch>` |
 
 ## Steps

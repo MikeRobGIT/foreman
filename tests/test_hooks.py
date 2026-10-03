@@ -983,6 +983,42 @@ class GateBeforePushTest(Case):
         self.assertIsNone(self.fx.bash('git push -u origin HEAD'))
 
 
+class PushAfterHeadMoveTest(Case):
+    """A commit or merge before the push in one call: the hook judges the HEAD the call starts with, which on a fresh
+    branch passes trivially (rule (b)), so every form below was allowed before."""
+
+    def setUp(self):
+        super().setUp()
+        self.fx.start_run()
+        git(self.fx.work, 'switch', '-q', '-c', 'feat')
+
+    def assertMoved(self, command, **kw):
+        why = self.fx.bash(command, **kw) or ''
+        self.assertIn('commit (or merge) in one call', why, command)
+        self.assertIn('then push in its own call', why, command)
+        self.assertIn(f"{SCRIPTS}/gate-lock.sh <owner> -- 'echo gated'", why, command)
+
+    def test_a_commit_or_merge_then_a_push_in_one_call_is_denied(self):
+        for command in ('git add -A && git commit -m x && git push -u origin HEAD && gh pr create --draft --fill',
+                        'git commit -am fix && git push', 'git commit -am fix; git push',
+                        'git merge origin/main && git push', 'gt create -am x && gt submit'):
+            self.assertMoved(command)
+            self.assertMoved(command, agent='a1')
+
+    def test_every_command_that_moves_head_counts(self):
+        for mover in ('git commit -m x', 'git merge origin/main', 'git pull', 'git rebase origin/main',
+                      'git cherry-pick abc1234', 'git revert HEAD', 'git am x.patch', 'git reset --hard HEAD~1',
+                      'git checkout other', 'git switch other', 'gt create -m x', 'gt c -m x', 'gt modify -a', 'gt m',
+                      'gt sync', "bash -c 'git commit -am x'"):
+            self.assertMoved(f'{mover} && git push -u origin HEAD')
+
+    def test_a_call_that_keeps_head_still_pushes(self):
+        for command in ('git push -u origin HEAD && gh pr create --draft --fill', 'git fetch && git push',
+                        'git status && git push', 'git push', 'git stash && git push', 'git push && git commit -am x'):
+            self.assertIsNone(self.fx.bash(command), command)
+            self.assertIsNone(self.fx.bash(command, agent='a1'), command)
+
+
 class ReceiptExactnessTest(Case):
     """Revision 6: the receipt must match the pushed tree exactly, apart from exempt paths."""
 
@@ -1514,7 +1550,7 @@ class TrailerGuardTest(Case):
         write(msg, 'fix: x\n')
         os.chmod(msg, 0)
         out, err = self.fx.hook('pretool', self.fx.payload('Bash', {'command': f'git commit -F {msg} && git push -u origin HEAD'}))
-        self.assertIn('no passing gate for this tree', out['hookSpecificOutput']['permissionDecisionReason'])
+        self.assertIn('then push in its own call', out['hookSpecificOutput']['permissionDecisionReason'])
         self.assertIn('trailer guard skipped', err)
         self.assertNotIn('foreman hook error', err)
 

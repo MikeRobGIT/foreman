@@ -568,9 +568,21 @@ def is_push_trigger(c):
     return (c.prog, c.sub) in (('git', 'push'), ('gh', 'pr create'), ('gh', 'pr new'), ('gt', 'submit'))
 
 
+# commands that move HEAD; `git checkout -- <path>` is an accepted false deny
+HEAD_MOVERS = ({('git', s) for s in ('commit', 'merge', 'pull', 'rebase', 'cherry-pick', 'revert', 'am', 'reset',
+                                     'checkout', 'switch')}
+               | {('gt', s) for s in ('create', 'modify', 'sync')})
+
+
+def moved_reason(repo):
+    return ("a push after a commit or merge in the same call is judged by the HEAD before it — commit (or merge) in "
+            f"one call, re-run the gate if it touched non-exempt paths (`{HERE}/gate-lock.sh <owner> -- "
+            f"'{repo.get('gate') or '<gate>'}'` from the checkout's top level), then push in its own call")
+
+
 def gate_before_push(h, sc):
     gate_in_call = any(s.words and any(os.path.basename(w) == 'gate-lock.sh' for w in s.words) for s in sc.segs)
-    for c in sc.cmds:
+    for k, c in enumerate(sc.cmds):
         if not is_push_trigger(c):
             continue
         repo = cmd_repo(c, h)
@@ -579,6 +591,8 @@ def gate_before_push(h, sc):
         h.touch.add(repo)
         if c.args is None or c.cwd is None or gate_in_call:
             h.deny(UNREADABLE)
+        elif any((m.prog, m.sub) in HEAD_MOVERS for m in sc.cmds[:k]):   # the receipt check reads the HEAD before the call
+            h.deny(moved_reason(repo))
         elif c.sub == 'push' and shellscan.push_info(c.args, default_branch(c.cwd))[0]:
             continue
         else:
