@@ -180,6 +180,7 @@ Two review rounds showed that parsing Bash keeps missing forms. Detection is the
     - serial step 12 after a manual pass.
 
     The script itself does nothing. `pretool` recognises this exact call (a single segment: `python3` plus that path plus `run-end`) and deletes `runs/<session_id>.json`, using the hook input's own session id. Piece 8 allows the call.
+  - **Only from the main session:** `run-end` and `release` take effect only when the hook input has no `agent_id`. A subagent's call is denied ("only the orchestrator ends a run or releases a spec"). Subagents share the `session_id`, so without this a worker could unguard the run or release itself.
 - **Expiry:** a marker untouched for 48 hours is ignored and pruned on the next `run-start`.
 - **While a marker exists:**
   - subagents can't merge, force-push or rebase, or edit the backlog, rules or config;
@@ -288,7 +289,7 @@ Two review rounds showed that parsing Bash keeps missing forms. Detection is the
     `<scratch>` and `<worktree>` stay as written, followed by a one-line legend: "<scratch> = your scratchpad dir; <worktree> = your current checkout's top level".
   - then `gate`, `forbid_trailers` and `shared_resources`.
   - Cap: 8 KB. Over the cap, `shared_resources` is truncated first, never the contract.
-- **The briefing records `agent_id → batch`** as one file per agent, `state_dir/batches/agents/<agent_id>`, written atomically (temp file plus rename) with the batch name as its content. Workers launched in one message can't lose each other's entries. Piece 10 needs it. Batch names are unique per run (W2 names them by wave, e.g. `w16a`), so the map isn't keyed by session. Entries are pruned with the batch files.
+- **The briefing records `agent_id → batch`** as one file per agent, `state_dir/batches/agents/<agent_id>`, written atomically (temp file plus rename) with the batch name as its content. Workers launched in one message can't lose each other's entries. Piece 10 needs it. Batch names are dated, `<YYYYMMDD>-w<n><x>` (spec-phase W2), so they're unique across invocations, and the map isn't keyed by session. Entries are pruned with the batch files.
 - **Dispatch prompts keep:** the batch, rows, owned files, test-data id prefix, the resolved plugin path, and W6's inline rule notes from an unmerged bookkeeping PR.
 
 ### 7. Report check (SubagentStop)
@@ -350,15 +351,17 @@ Only Bash is considered. Anything that doesn't match every rule below gets no de
 
 ### 10. Spec gate (tagged workers during a run)
 
-- **Who:** a subagent (`agent_id` present) whose id is in the map from piece 6, during a run, whose batch has no release file `state_dir/batches/<batch>.released`.
+- **Who:** a subagent (`agent_id` present) whose id is in the map from piece 6, during a run, whose batch has no valid release. A valid release is a file `state_dir/batches/<batch>.released` whose `session_id` equals the hook input's `session_id`, so a stale file from an earlier run never counts.
 - **Unmapped ids fail open:** an `agent_id` with no map entry (no tag, or P2 failed) passes, and so does any call outside a run.
 - **Denied before release:**
   - Edit-family calls whose target, resolved in its own checkout, is outside that checkout's `design_spec_dir`;
   - `git commit` when any staged path is outside `design_spec_dir`, judged from `git diff --cached --name-only` in the effective directory. With `-a`/`--all`, the modified tracked files (`git diff --name-only`) count as staged too. This catches code written through Bash, which the Edit rule can't see.
   - `git push`, `gh pr create` and `gt submit`. The spec phase doesn't push.
 - **Allowed before release:** reading anything, running anything else (tests, `git grep`), and editing and committing inside `design_spec_dir`.
-- **Reason:** "foreman: batch <b>'s spec isn't released yet. Finish the spec, report `SPEC READY <path> <sha>`, and wait for the orchestrator's release."
-- **Release:** at W3.6, before its `SendMessage`, the orchestrator runs `python3 $FOREMAN/hooks.py release <batch> <sha>`. That writes `state_dir/batches/<batch>.released` = `{"sha", "time"}`. In manual mode this happens only for the batches the human approved at the checkpoint.
+- **Reason:** "foreman: batch <b>'s spec isn't released yet. Finish the spec, put `SPEC READY <worktree> <branch> <spec path> <sha>` as your final message's first line, and wait for the orchestrator's release."
+- **Release:** at W3.6, before its `SendMessage`, the orchestrator runs `python3 $FOREMAN/hooks.py release <batch> <sha>`.
+  - Like `run-end`, the script itself does nothing. `pretool` recognises the exact call and writes `state_dir/batches/<batch>.released` = `{"sha", "time", "session_id"}` from its own hook input. This puts the file where the hooks look, whatever `FOREMAN_HOME` the Bash tool has (P4).
+  - In manual mode it runs only for the batches the human approved at the checkpoint.
 - **After release** the gate is silent. Later spec edits are W4's concern: its byte-identical check, or a listed deviation.
 - **Cleanup:** W5 deletes `batches/*` for this wave's batches. Entries older than 14 days are pruned on `run-start`.
 
