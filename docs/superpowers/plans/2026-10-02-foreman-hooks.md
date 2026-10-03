@@ -5103,7 +5103,7 @@ and stalls. `script_allow` covers foreman's own scripts; add the rest of the wor
 {
   "permissions": {
     "allow": [
-      "Bash(sleep:*)", "Bash(date +%s)",
+      "Bash(sleep:*)", "Bash(date +%s)", "Bash(kill -TERM:*)",
       "Bash(git add:*)", "Bash(git commit:*)", "Bash(git fetch:*)", "Bash(git merge:*)", "Bash(git push:*)", "Bash(git worktree:*)",
       "Bash(gh pr create:*)", "Bash(gh pr view:*)", "Bash(gh pr checks:*)", "Bash(gh pr comment:*)", "Bash(gh pr edit:*)", "Bash(gh api:*)",
       "Bash(node --check:*)"
