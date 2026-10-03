@@ -2040,5 +2040,135 @@ class BkNoFetchTest(unittest.TestCase):
             fx.close()
 
 
+class ScriptAllowBase(Case):
+    def setUp(self):
+        super().setUp()
+        self.fx.start_run()
+
+    def allowed(self, command, agent=None, cwd=None):
+        out, _ = self.fx.hook('permission', self.fx.payload('Bash', {'command': command}, agent=agent, cwd=cwd,
+                                                           event='PermissionRequest'))
+        if out:
+            self.assertEqual(out, {'hookSpecificOutput': {'hookEventName': 'PermissionRequest',
+                                                          'decision': {'behavior': 'allow'}}})
+        return out is not None
+
+
+class ScriptAllowTest(ScriptAllowBase):
+    config = CONFIG.replace('gate: echo gated\n', 'gate: echo gated\npost_merge_check: echo whole-tree\n')
+
+    def setUp(self):
+        super().setUp()
+        self.wt = os.path.join(self.fx.tmp, 'wt')
+        git(self.fx.work, 'worktree', 'add', '-q', self.wt, '-b', 'w1')
+
+    def test_exact_paths_are_allowed(self):
+        self.assertTrue(self.allowed(f"{GATE_LOCK} w1 -- 'echo gated'"))
+        self.assertTrue(self.allowed(f'{SCRIPTS}/wt-setup.sh {self.wt}'))
+        self.assertTrue(self.allowed(f'bash {SCRIPTS}/wt-setup.sh --check {self.wt}'))
+        self.assertTrue(self.allowed(f'python3 {SCRIPTS}/bk.py {self.fx.work} --dry-run /tmp/r.json'))
+        self.assertTrue(self.allowed(f'python3 {SCRIPTS}/bk.py {self.fx.work} /tmp/r.json'))
+        self.assertTrue(self.allowed(f'python3 {SCRIPTS}/bk.py {self.fx.work} --dry-run /tmp/r.json', agent='a1'))
+
+    def test_one_paren_wrap_with_cd_and_review_spec(self):
+        self.assertTrue(self.allowed(f'(cd {self.wt} && {SCRIPTS}/review.sh --spec docs/s.md origin/main /tmp/r.log)'))
+        self.assertTrue(self.allowed(f'cd {self.wt} && {SCRIPTS}/review.sh origin/main /tmp/r.log'))
+        self.assertTrue(self.allowed(f'{SCRIPTS}/review.sh origin/main /tmp/r.log', cwd=self.wt))
+
+    def test_post_merge_check_is_allowed_and_mints_nothing(self):
+        self.assertTrue(self.allowed(f"{GATE_LOCK} orchestrator -- 'echo whole-tree'"))
+        self.fx.gate('echo whole-tree', owner='orchestrator')
+        self.assertFalse(os.path.isdir(os.path.join(self.fx.state, 'gate')))
+
+    def test_a_home_relative_plugin_path(self):
+        home = self.fx.env['HOME']
+        os.symlink(os.path.dirname(SCRIPTS), os.path.join(home, 'foreman'))
+        self.assertTrue(self.allowed(f"~/foreman/scripts/gate-lock.sh w1 -- 'echo gated'"))
+
+    def test_hooks_py_for_the_main_session_only(self):
+        self.assertTrue(self.allowed(f'python3 {HOOKS} run-end'))
+        self.assertTrue(self.allowed(f'python3 {HOOKS} release w1a abc1234'))
+        self.assertTrue(self.allowed(f'python3 {HOOKS} stopping w1a'))
+        self.assertTrue(self.allowed(f'python3 {HOOKS} forget w1a'))
+        self.assertFalse(self.allowed(f'python3 {HOOKS} run-end', agent='a1'))
+        self.assertFalse(self.allowed(f'python3 {HOOKS} release w1a not-a-sha'))
+
+    def test_no_decision(self):
+        script = f'{SCRIPTS}/wt-setup.sh {self.wt}'
+        for cmd in (script + '\necho hi', f'{SCRIPTS}/wt-setup.sh $(pwd)', script + '; rm -rf /tmp/x',
+                    f'BASH_ENV=x bash {script}', f'FOREMAN_CONFIG=x {script}', f'env {script}', script + ' > /tmp/out',
+                    f'(({script}))', f'{{ {script}; }}', f'command {script}'):
+            self.assertFalse(self.allowed(cmd), cmd)
+
+    def test_no_decision_for_wrong_arguments(self):
+        self.assertFalse(self.allowed(f"{GATE_LOCK} w1 -- 'echo other'"))
+        self.assertFalse(self.allowed(f"{GATE_LOCK} --name db w1 -- 'echo gated'"))
+        self.assertFalse(self.allowed(f'{GATE_LOCK} w1 -- echo gated'))
+        self.assertFalse(self.allowed(f'{SCRIPTS}/wt-setup.sh {self.fx.tmp}'))
+        self.assertFalse(self.allowed(f'python3 {SCRIPTS}/bk.py {self.fx.work} /tmp/r.json', agent='a1'))
+        self.assertFalse(self.allowed(f'{SCRIPTS}/review.sh origin/main /tmp/r.log', cwd=self.fx.tmp))
+        self.assertFalse(self.allowed(f"{SCRIPTS}/review.sh 'origin/main;x' /tmp/r.log", cwd=self.wt))
+        self.assertFalse(self.allowed(f'{SCRIPTS}/review.sh --verbose origin/main', cwd=self.wt))
+        self.assertFalse(self.allowed(f'{self.fx.tmp}/gate-lock.sh w1 -- x'))
+
+    def test_no_decision_for_malformed_arguments(self):
+        for cmd in (f"{GATE_LOCK} w1 -- 'echo gated' extra", f"{GATE_LOCK} w1 'echo gated'",
+                    f'{SCRIPTS}/wt-setup.sh {self.wt} {self.wt}', f'{SCRIPTS}/wt-setup.sh --check --check {self.wt}',
+                    f'python3 {SCRIPTS}/bk.py {self.fx.work}', f'python3 {HOOKS} release w1a abc1234 extra',
+                    f'python3 {HOOKS}', f'python3 {HOOKS} pretool',
+                    f"{self.fx.tmp}/gate-lock.sh w1 -- 'echo gated'"):
+            self.assertFalse(self.allowed(cmd), cmd)
+        # inside a repo but not at a worktree's root: review.sh would run against a subdirectory's config
+        self.assertFalse(self.allowed(f'{SCRIPTS}/review.sh origin/main /tmp/r.log',
+                                      cwd=os.path.join(self.fx.work, '.claude')))
+
+    def test_no_decision_for_other_shapes(self):
+        script = f'{SCRIPTS}/review.sh origin/main /tmp/r.log'
+        cd = f'cd {self.wt}'
+        for cmd in (script + ' &', script + ' | cat', script + ' || true', script + ' && true', script + ' ;',
+                    f'{cd} ; {script}', f'{cd} || {script}', f'{cd} && cd {self.wt} && {script}',
+                    f'{cd} {self.wt} && {script}', f'({cd}) && {script}', f'{cd} && ({script})', f'{cd} && {script} &',
+                    f'bash -x {script}', f'sh -c {script}', f"{SCRIPTS}/review.sh 'a\\b' /tmp/r.log",
+                    script + '\r', script + ' # $(x)', script + ' # ${x}'):   # text the words alone wouldn't refuse
+            self.assertFalse(self.allowed(cmd, cwd=self.wt), cmd)
+
+    def test_a_relative_script_path_is_the_shells_not_the_hooks(self):
+        os.symlink(SCRIPTS, os.path.join(self.fx.work, 'scripts'))   # the hook runs in work: ./scripts is the plugin
+        write(os.path.join(self.wt, 'scripts', 'review.sh'), '#!/bin/sh\necho decoy\n')   # the shell runs in wt
+        review = 'review.sh origin/main /tmp/r.log'
+        self.assertTrue(self.allowed(f'./scripts/{review}', cwd=self.fx.work))
+        self.assertFalse(self.allowed(f'cd {self.wt} && ./scripts/{review}', cwd=self.fx.work))
+
+    def test_a_command_that_is_not_text(self):
+        out, _ = self.fx.hook('permission', self.fx.payload('Bash', {'command': 7}, event='PermissionRequest'))
+        self.assertIsNone(out)
+
+    def test_only_during_a_run(self):
+        out, _ = self.fx.hook('permission', self.fx.payload('Bash', {'command': f"{GATE_LOCK} w1 -- 'echo gated'"},
+                                                           sid='S2', event='PermissionRequest'))
+        self.assertIsNone(out)
+
+    def test_hooks_disabled_drops_the_piece(self):
+        write(os.path.join(self.fx.work, '.claude/foreman.config.md'),
+              self.config.replace('---\n', '---\nhooks_disabled: [script_allow]\n', 1))
+        self.assertFalse(self.allowed(f"{GATE_LOCK} w1 -- 'echo gated'"))
+
+
+class ScriptAllowGateTextTest(ScriptAllowBase):
+    """A configured gate may hold `<`, `>` or `2>&1`: only that exact quoted argument is exempt from the text check."""
+    config = CONFIG.replace('gate: echo gated\n', 'gate: npm test 2>&1\npost_merge_check: cat < in.txt\n')
+
+    def test_a_gate_with_a_redirect_is_allowed(self):
+        self.assertTrue(self.allowed(f"{GATE_LOCK} w1 -- 'npm test 2>&1'"))
+        self.assertTrue(self.allowed(f"{GATE_LOCK} w1 -- 'cat < in.txt'"))
+
+    def test_the_redirect_exemption_covers_nothing_else(self):
+        for cmd in (f"{GATE_LOCK} w1 -- 'npm test 2>&1' > /tmp/out", f"{GATE_LOCK} w1 -- 'npm test 2>&1' 2>/tmp/e",
+                    f"{GATE_LOCK} w1 < /tmp/in -- 'npm test 2>&1'", f"{GATE_LOCK} w1 -- 'npm test 2>&1 '",
+                    f"{GATE_LOCK} w1 -- 'npm test 2>&1; rm -rf x'", f"{GATE_LOCK} w1 -- 'npm test 2>&2'",
+                    f"{GATE_LOCK} w1 -- npm test 2>&1"):
+            self.assertFalse(self.allowed(cmd), cmd)
+
+
 if __name__ == '__main__':
     unittest.main()

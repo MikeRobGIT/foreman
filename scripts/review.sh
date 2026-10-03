@@ -17,7 +17,10 @@ here=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 plugin=$(dirname "$here")
 adapters=${FOREMAN_REVIEWERS_DIR:-$plugin/reviewers}
 repo=$(/usr/bin/git rev-parse --show-toplevel) || { echo "review.sh: not in a git repo" >&2; exit 2; }
-cfg() { python3 "$here/cfg.py" "$repo" "$@"; }
+# Config comes from the MAIN checkout, never the worktree: a config planted in a worktree must not pick the
+# reviewer commands (a `custom` entry runs any command).
+main=$(/usr/bin/git worktree list --porcelain | awk '/^worktree /{print substr($0, 10); exit}')
+cfg() { python3 "$here/cfg.py" "${main:-$repo}" "$@"; }
 
 timeout=$(cfg reviewer_timeout_seconds 900)
 stall=$(cfg reviewer_stall_seconds 150)

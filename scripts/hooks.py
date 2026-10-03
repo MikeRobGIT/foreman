@@ -1127,6 +1127,90 @@ def subagent_stop(h):
 HANDLERS['subagent-stop'] = subagent_stop
 
 
+# ---- piece 8: script allow ------------------------------------------------------------------------
+
+SCRIPTS = ('gate-lock.sh', 'wt-setup.sh', 'review.sh', 'bk.py', 'hooks.py')
+OWN_OPTS = ('--', '--check', '--spec', '--dry-run')
+BAD_TEXT = re.compile(r'[\n\r`<>]|\$\(|\$\{')
+BAD_ARG = re.compile(r'[\'"$`\\;|&<>\x00-\x1f\x7f]')
+
+
+def plain(arg):
+    return not BAD_ARG.search(arg) and (not arg.startswith('-') or arg in OWN_OPTS)
+
+
+def is_worktree(repo, path):
+    return os.path.realpath(path) in {os.path.realpath(p) for p, _ in worktrees(repo.main)}
+
+
+def gate_args(repo):
+    """The commands gate-lock.sh may be given as its one argument: `gate`, or `post_merge_check` (mints nothing)."""
+    both = (repo.get('gate'), repo.get('post_merge_check') or repo.get('gate'))
+    return {g for g in both if isinstance(g, str) and g}
+
+
+def script_args_ok(name, args, repo, h, cwd):
+    if name == 'gate-lock.sh':
+        return len(args) == 3 and plain(args[0]) and args[1] == '--' and args[2] in gate_args(repo)
+    if not all(plain(a) for a in args):
+        return False
+    if name == 'wt-setup.sh':
+        rest = args[1:] if args[:1] == ['--check'] else args
+        return len(rest) == 1 and rest[0] not in OWN_OPTS and is_worktree(repo, os.path.join(cwd, rest[0]))
+    if name == 'review.sh':
+        rest = args[2:] if args[:1] == ['--spec'] and len(args) > 1 else args
+        return len(rest) == 2 and not set(rest) & set(OWN_OPTS) and is_worktree(repo, cwd)
+    if name == 'bk.py':
+        return (not h.agent or '--dry-run' in args) and len([a for a in args if a not in OWN_OPTS]) >= 2
+    return not h.agent and control_words([os.path.join(HERE, 'hooks.py')] + args) is not None
+
+
+def script_allowed(h, command):
+    """True when `command` runs one of foreman's own scripts in a strict shape (piece 8 never denies)."""
+    sc = shellscan.scan(command, h.cwd)
+    if not sc.ok or any(s.words is None for s in sc.segs):
+        return False
+    b = sc.blanked.strip()
+    if (b.count('(') or b.count(')')) and not (b.count('(') == b.count(')') == 1 and b[0] == '(' and b[-1] == ')'):
+        return False
+    segs = [s for s in sc.segs if s.words]
+    if len(segs) == 2 and segs[0].words[0] == 'cd' and len(segs[0].words) == 2 and segs[0].sep == '&&':
+        cmd = segs[1]
+    elif len(segs) == 1:
+        cmd = segs[0]
+    else:
+        return False
+    cd = segs[0] if cmd is not segs[0] else None
+    if any(s.sep not in (None, '(', ')') for s in sc.segs if s is not cd):
+        return False
+    words = cmd.words[1:] if cmd.words[0] in ('python3', 'bash', 'sh') else cmd.words
+    name = os.path.basename(words[0]) if words else ''
+    if name not in SCRIPTS or cmd.cwd is None:
+        return False
+    exe = os.path.join(cmd.cwd, os.path.expanduser(words[0]))   # a relative path is the shell's, not the hook's
+    if not same_file(exe, os.path.join(HERE, name)):
+        return False
+    repo = repo_at(cmd.cwd)
+    if not h.active(repo, 'script_allow'):
+        return False
+    bare = command
+    if name == 'gate-lock.sh':   # a configured gate may hold `<`, `>` or `2>&1`: its quoted argument is exempt
+        for g in gate_args(repo):
+            bare = bare.replace(f"'{g}'", '')
+    return not BAD_TEXT.search(bare) and script_args_ok(name, words[1:], repo, h, cmd.cwd)
+
+
+def permission(h):
+    ti = h.inp.get('tool_input')
+    command = ti.get('command') if isinstance(ti, dict) else None
+    if h.inp.get('tool_name') == 'Bash' and isinstance(command, str) and script_allowed(h, command):
+        print(json.dumps({'hookSpecificOutput': {'hookEventName': 'PermissionRequest',
+                                                 'decision': {'behavior': 'allow'}}}))
+
+
+HANDLERS['permission'] = permission
+
+
 # ---- pretool / posttool ---------------------------------------------------------------------------
 
 def pretool(h):

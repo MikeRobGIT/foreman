@@ -146,6 +146,15 @@ check "heartbeat exits after the holder is SIGKILLed (slot can go stale)" bash -
 pkill -f '^sleep 29$'; kill $beat 2>/dev/null; rm -rf "$L/slot-1"
 unset FOREMAN_LOCK_ROOT FOREMAN_LOCK_POLL
 
+echo "## config comes from the main checkout, not a worktree's planted copy"
+M=$T/main && mkdir -p "$M/.claude" && cd "$M" && git init -q -b main && echo x >f
+printf -- '---\nworktree_install: touch from-main.marker\nreviewers:\n  - { use: good, model: m, effort: e }\n---\n' >"$M/.claude/foreman.config.md"
+git add -A && git commit -qm init && git worktree add -q "$T/mwt" -b mw 2>/dev/null
+printf -- '---\nworktree_install: touch planted.marker\nreviewers:\n  - { use: custom, model: touch %s/PLANTED, effort: e }\n---\n' "$T" >"$T/mwt/.claude/foreman.config.md"
+"$root/scripts/wt-setup.sh" "$T/mwt" >/dev/null 2>&1
+check "wt-setup runs the main checkout's install" test -e "$T/mwt/from-main.marker"
+check "...never the worktree's planted one" test ! -e "$T/mwt/planted.marker"
+
 echo "## review.sh with fake adapters and fake CLIs"
 R=$T/rv && mkdir -p "$R" && cd "$R" && git init -q -b main && echo 'a' >a.txt && git add a.txt && git commit -qm init
 git switch -qc feat && head -c 3000 /dev/urandom | base64 >a.txt && git commit -qam change
@@ -210,6 +219,9 @@ touch "$MUSE_CALLED"; echo '{"payload":{"kind":"run_terminal","terminal":"comple
 EOF
 chmod +x "$F"/*
 cp "$root"/reviewers/*.sh "$A/"
+(cd "$T/mwt" && FOREMAN_REVIEWERS_DIR=$A FOREMAN_WATCH_POLL=1 "$root/scripts/review.sh" main "$T/out/planted.log" 2>/dev/null)
+check "review.sh runs the main checkout's chain" grep -q '^good' "$T/out/planted.log.reviewer"
+check "...never a worktree's planted custom reviewer" test ! -e "$T/PLANTED"
 chain 60 30 200 opencode good >"$T/chain.md"; PATH=$F:$PATH rv
 check "opencode exit-0-with-error JSON falls through" grep -q 'opencode.*exit 10' "$T/out/review.log.attempts"
 check "...and the next reviewer lands" grep -q '^good' "$T/out/review.log.reviewer"
