@@ -19,8 +19,10 @@ adds `pr`):
 
 - `done` flips a `ready` row to `done (#pr)` and appends `**DONE (#pr):** note` to its
   acceptance column. `append` adds a note to any row without touching its status.
-- `IB-NEW-x` placeholders are numbered from the backlog's real max id, per report, and
-  rewritten everywhere in that report's text (workers' own numbering always collided).
+- `IB-NEW-x` placeholders are numbered from the real max id, per report, and rewritten everywhere
+  in that report's text (workers' own numbering always collided). The max covers this file,
+  origin's default branch and every open backlog UI branch (`backlog/ui-*`, fetched first), so a
+  new row never takes an id an unmerged UI PR already uses.
 - A new row must have exactly 5 ` | ` separators (a stray pipe shifts the table's columns)
   and no newline (rows stay single-line).
 - A rule note applies only when `old` matches exactly once; anything else is reported.
@@ -30,6 +32,7 @@ adds `pr`):
 import json
 import os
 import re
+import subprocess
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -64,7 +67,8 @@ def main():
     path = os.path.join(repo, BACKLOG)
     lines = open(path).read().split('\n')
     ids = [int(m.group(1)) for l in lines for m in [ROW.match(l)] if m]
-    next_id = max(ids) + 1
+    subprocess.run(['git', 'fetch', '-q', '--prune', 'origin', backlog.UI_REFSPEC], cwd=repo, capture_output=True)
+    next_id = first_id = max(max(ids), backlog.reserved_max_id(repo, BACKLOG, P)) + 1
     anchor = max(n for n, l in enumerate(lines) if (m := ROW.match(l)) and int(m.group(1)) == max(ids))
 
     def find(id_):
@@ -176,7 +180,7 @@ def main():
         print('\nPROBLEMS (nothing written):\n  ' + '\n  '.join(problems))
         raise SystemExit(1)
     if dry:
-        print(f'\ndry run: ok, {len(new_rows)} new rows from {P}-{max(ids) + 1}')
+        print(f'\ndry run: ok, {len(new_rows)} new rows from {P}-{first_id}')
         return
     open(path, 'w').write('\n'.join(lines))
     for f, t in edits.items():

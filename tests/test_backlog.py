@@ -50,6 +50,11 @@ class ParseTest(unittest.TestCase):
         ready = [bl.lines[i].id for i in bl.ready_indexes()]
         self.assertEqual(ready, ['IB-1', 'IB-5'])
 
+    def test_duplicate_ids_are_reported(self):
+        t = FIXTURE + '| IB-5 | Again | low | ready | x | y |\n| IB-5 | Thrice | low | ready | x | y |\n| IB-4 | Twice |\n'
+        self.assertEqual(backlog.parse(t).duplicates(), {'IB-5': 3, 'IB-4': 2})
+        self.assertEqual(backlog.parse(FIXTURE).duplicates(), {})
+
     def test_other_prefix(self):
         t = '| FX-7 | A | low | ready | B | C |\n'
         bl = backlog.parse(t, 'FX')

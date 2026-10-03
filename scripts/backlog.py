@@ -7,6 +7,8 @@ never cuts an escaped pipe. Every other line (headings, legend, blank lines, a m
 is kept verbatim, so serialise(parse(text)) == text byte for byte.
 """
 import re
+import subprocess
+from collections import Counter
 
 SEP = ' | '
 RISKS = ('low', 'medium', 'high')
@@ -64,6 +66,12 @@ class Backlog:
 
     def ready_indexes(self):
         return [i for i, l in enumerate(self.lines) if isinstance(l, Row) and l.status == 'ready']
+
+    def duplicates(self):
+        """{id: count} for every id on more than one line (malformed rows still hold their id)."""
+        pat = row_pattern(self.prefix)
+        n = Counter(m.group(1) for l in self.lines for m in [pat.match(l.raw if isinstance(l, Row) else str(l))] if m)
+        return {f'{self.prefix}-{k}': c for k, c in n.items() if c > 1}
 
 
 def parse(text, prefix='IB'):
@@ -222,10 +230,15 @@ def apply(bl, ops):
     return [_apply_one(bl, op) for op in ops]
 
 
-def assign_ids(bl, tmp_ids):
+def max_id(bl):
     pat = row_pattern(bl.prefix)
     raws = [l.raw if isinstance(l, Row) else str(l) for l in bl.lines]  # malformed rows still hold their id
-    top = max([int(m.group(1)) for r in raws for m in [pat.match(r)] if m] or [0])
+    return max([int(m.group(1)) for r in raws for m in [pat.match(r)] if m] or [0])
+
+
+def assign_ids(bl, tmp_ids, floor=0):
+    """Number NEW-n rows from max(the file's highest id, floor) + 1."""
+    top = max(max_id(bl), floor)
     mapping = {}
     for tmp in tmp_ids:
         top += 1
@@ -236,6 +249,25 @@ def assign_ids(bl, tmp_ids):
             cells[0] = mapping[l.id]
             bl.lines[i] = Row(build(cells), cells)
     return mapping
+
+
+UI_REFSPEC = '+refs/heads/backlog/ui-*:refs/remotes/origin/backlog/ui-*'
+
+
+def reserved_max_id(repo, backlog_path, prefix, branch=None):
+    """The highest id on origin's default branch or on any open UI branch (refs/remotes/origin/backlog/ui-*),
+    as last fetched. A new id must be above it, or it collides with a UI PR that has not merged yet.
+    0 when `repo` is not a git checkout."""
+    def git(*args):
+        p = subprocess.run(['git', *args], cwd=repo, capture_output=True)
+        return p.stdout.decode('utf-8') if p.returncode == 0 else None
+    if branch is None:
+        head = (git('symbolic-ref', '--short', 'refs/remotes/origin/HEAD') or '').strip()
+        branch = head.split('/', 1)[1] if '/' in head else 'main'
+    refs = (git('for-each-ref', '--format=%(refname)', 'refs/remotes/origin/backlog/') or '').split()
+    refs = [f'refs/remotes/origin/{branch}'] + [r for r in refs if r.startswith('refs/remotes/origin/backlog/ui-')]
+    texts = [git('show', f'{r}:{backlog_path}') for r in refs]
+    return max([max_id(parse(t, prefix)) for t in texts if t is not None] or [0])
 
 
 def describe(op, mapping=None):

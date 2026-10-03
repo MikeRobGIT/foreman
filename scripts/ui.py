@@ -231,7 +231,9 @@ class Repo:
                 rows.append(d)
             elif isinstance(line, backlog.Unparsed):
                 rows.append({'unparsed': str(line)})
-        notice, self.notice = self.notice, ''
+        dups = [f'{k} appears {"twice" if n == 2 else f"{n} times"}' for k, n in bl.duplicates().items()]
+        notice = '; '.join(n for n in [self.notice, *dups] if n)
+        self.notice = ''
         return {'version': version, 'sha': sha, 'branch': self.branch, 'fetched_at': at, 'prefix': self.prefix,
                 'rows': rows, 'ops': ops, 'results': results, 'notice': notice}
 
@@ -284,7 +286,7 @@ class Repo:
             ops = self.load_ops()
             if not ops:
                 return {'pr_url': None, 'applied': 0, 'conflicts': 0, 'branch': None, 'message': 'nothing pending'}
-            self.git('fetch', '-q', 'origin', self.branch)
+            self.git('fetch', '-q', '--prune', 'origin', f'+refs/heads/{self.branch}:refs/remotes/origin/{self.branch}', backlog.UI_REFSPEC)
             base_sha = self.git('rev-parse', f'origin/{self.branch}').strip()
             branch = self.next_branch()
             wt = tempfile.mkdtemp(prefix='foreman-ui-')
@@ -302,7 +304,8 @@ class Repo:
             if not applied:
                 return {'pr_url': None, 'applied': 0, 'conflicts': len(conflicts), 'branch': None,
                         'message': 'nothing to publish: every change conflicts with main'}
-            mapping = backlog.assign_ids(bl, [o['tmp'] for o in applied if o['op'] == 'add'])
+            floor = backlog.reserved_max_id(self.path, self.backlog_path, self.prefix, self.branch)
+            mapping = backlog.assign_ids(bl, [o['tmp'] for o in applied if o['op'] == 'add'], floor)
             with open(path, 'w', encoding='utf-8') as f:
                 f.write(backlog.serialise(bl))
             title = self.title_for(applied)

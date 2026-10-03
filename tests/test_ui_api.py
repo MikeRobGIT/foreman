@@ -355,6 +355,46 @@ class PublishTest(unittest.TestCase):
                                        {'day': '2026-10-01', 'done': 1, 'filed': 0}])
 
 
+class IdTest(unittest.TestCase):
+    def setUp(self):
+        self.f = Fixture()
+
+    def tearDown(self):
+        self.f.close()
+
+    def push_from_other_clone(self, branch, extra_row):
+        other = os.path.join(self.f.tmp, 'other-' + branch.replace('/', '-'))
+        git(self.f.tmp, 'clone', '-q', self.f.origin, other)
+        if branch != 'main':
+            git(other, 'checkout', '-q', '-b', branch)
+        write(os.path.join(other, '.claude/improvement-backlog.md'), extra_row + '\n', 'a')
+        git(other, 'commit', '-qam', 'other')
+        git(other, 'push', '-q', 'origin', f'HEAD:refs/heads/{branch}')
+
+    def test_publish_numbers_past_an_open_ui_branch(self):
+        self.push_from_other_clone('backlog/ui-1', '| IB-6 | Filed in another UI PR | low | ready | x | ui |')
+        self.f.request('POST', '/api/ops', {'op': 'add', 'title': 'New one', 'risk': 'low', 'status': 'ready', 'reason': '', 'acceptance': 'Acc', 'source': 'ui', 'insert': 'bottom'})
+        status, res, _ = self.f.request('POST', '/api/publish')
+        self.assertEqual(status, 200, res)
+        git(self.f.work, 'fetch', '-q', 'origin')
+        diff = git(self.f.work, 'diff', 'origin/main', f'origin/{res["branch"]}')
+        self.assertIn('+| IB-7 | New one |', diff)
+
+    def test_duplicate_ids_show_in_the_notice(self):
+        self.push_from_other_clone('main', '| IB-2 | Two again | low | ready | x | y |')
+        status, data, _ = self.f.request('GET', '/api/backlog?refresh=1')
+        self.assertIn('IB-2 appears twice', data['notice'])
+
+    def test_bk_numbers_past_an_open_ui_branch(self):
+        self.push_from_other_clone('backlog/ui-1', '| IB-6 | Filed in another UI PR | low | ready | x | ui |')
+        rep = os.path.join(self.f.tmp, 'rep.json')
+        write(rep, json.dumps({'pr': 9, 'new_rows': ['| IB-NEW-a | From the loop | low | ready | a | #9 |']}))
+        out = subprocess.run([sys.executable, os.path.join(HERE, '..', 'scripts', 'bk.py'), self.f.work, rep],
+                             capture_output=True, text=True)
+        self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
+        self.assertIn('| IB-7 | From the loop |', open(os.path.join(self.f.work, '.claude/improvement-backlog.md')).read())
+
+
 class ProcessTest(unittest.TestCase):
     def setUp(self):
         self.f = Fixture()
