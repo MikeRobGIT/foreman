@@ -1261,6 +1261,16 @@ class WorkerGuardTest(Case):
             for q in quoted:
                 self.assertIn(' '.join(q.split()), contract, name)
 
+    def test_a_merge_run_from_outside_the_repo_is_judged_by_the_workers_own_repo(self):
+        # a merge names its repo with -R or the API path, not its directory
+        scratch = os.path.join(self.fx.tmp, 'scratch')
+        os.makedirs(scratch)
+        for command in (f'cd {scratch} && gh pr merge 1 -R o/r --squash',
+                        f'cd {scratch} && gh api -X PUT repos/o/r/pulls/1/merge', f'cd {scratch} && gt merge'):
+            self.assertIn('workers never merge', self.fx.bash(command, agent='a1') or '', command)
+        self.assertFalse(os.path.exists(self.fx.env['FAKE_GH_LOG']))
+        self.assertIsNone(self.fx.bash(f'cd {scratch} && git rebase origin/main', agent='a1'))   # only a merge falls back
+
     def test_a_push_to_the_default_branch_quotes_never_merge(self):
         # a direct push to the default branch is an unreviewed merge
         why = self.fx.bash('git push origin HEAD:main', agent='a1')

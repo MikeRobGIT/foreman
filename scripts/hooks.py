@@ -739,10 +739,13 @@ NO_BOOKKEEPING = ('workers don\'t edit the backlog, the rules files or the forem
                   'NEW ROWS instead')
 
 
+def merges(c):
+    return ((c.prog, c.sub) in (('gh', 'pr merge'), ('gt', 'merge'))
+            or ((c.prog, c.sub) == ('gh', 'api') and shellscan.gh_api_merge(c.args, subagent=True)))
+
+
 def worker_violation(c):
-    if (c.prog, c.sub) in (('gh', 'pr merge'), ('gt', 'merge')):
-        return NO_MERGE
-    if (c.prog, c.sub) == ('gh', 'api') and shellscan.gh_api_merge(c.args, subagent=True):
+    if merges(c):
         return NO_MERGE
     if shellscan.is_rebase(c):
         return NO_REBASE
@@ -763,6 +766,8 @@ def worker_guard(h, sc):
         return
     for c in sc.cmds:
         repo = cmd_repo(c, h)
+        if repo is None and merges(c):   # a merge names its repo with -R or the API path, not its directory
+            repo = repo_at(h.cwd)
         if not h.active(repo, 'worker_guard'):
             continue
         why = worker_violation(c)

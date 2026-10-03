@@ -264,7 +264,7 @@ Two review rounds showed that parsing Bash keeps missing forms. Detection is the
 ### 2. Worker guard (subagents during a run)
 
 - **Bash commands denied:**
-  - `gh pr merge` (including the `gh api` merge forms) and `gt merge`;
+  - `gh pr merge` (including the `gh api` merge forms) and `gt merge`. A merge names its repo with `-R` or the API path, not its directory, so one run from outside any foreman repo (`cd <scratch> && gh pr merge 1 -R o/r`) is judged in the worker's own `cwd`;
   - `git push` with `--force`, `-f` or any combined short flag containing `f` (`-uf`), `--force-with-lease`, `--mirror`, or a `+` refspec;
   - `git push` whose destination ref is the default branch (`HEAD:main`, `main`, `refs/heads/<default>`);
   - `git rebase`;
