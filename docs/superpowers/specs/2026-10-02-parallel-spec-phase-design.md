@@ -205,7 +205,7 @@ Each `SPEC READY` is handled as it arrives, independently of other batches. The 
   - **Commented:** one comment round with the comments as findings. It's always allowed, and exempt from the round cap and the timeout. Batches that pass their comment round come back together at ONE follow-up checkpoint. A failure parks the batch.
   - **Neither:** parked ("not released by the human").
 - **Parking:**
-  1. Kill the round's chain and reviewer if they're running. Stop the worker (TaskStop).
+  1. Kill the round's chain and reviewer if they're running. Run `python3 $FOREMAN/hooks.py stopping <batch>`, if the hooks are installed, so the hooks' report check lets the stop through. Then stop the worker (TaskStop).
   2. Copy every spec path to `$(git rev-parse --git-common-dir)/foreman/parked/<batch>/`, which outlives the session's scratch. Copy committed and uncommitted ones alike, including a park before the first `SPEC READY`, when the state table has no spec path yet:
      - `git -C <wt> status --porcelain --untracked-files=all -- <design_spec_dir>`;
      - `git -C <wt> diff --name-only <fork base or origin/<default>> HEAD -- <design_spec_dir>`.
@@ -260,7 +260,7 @@ This is the Worker contract's current steps 3–8, plus:
 - **Non-negotiables:** "Parallel mode: no code before the batch's spec is released."
 - **W1:** a worktree whose batch was parked is removed at parking; its branch is deleted after W5 commits the spec. `SPEC READY` is not a final report.
 - **W2:** batches are named `<YYYYMMDD-HHMM>-w<n><x>`, where the time is the invocation's start (e.g. `20261002-1530-w1a`). That is unique across invocations, including repeated `/loop` ticks in one session. Add the parked-row rule.
-- **W3:** the prompt gains the `foreman-worker: <batch>` tag (hooks), the absolute `templates/spec.md` path, `design_spec_dir`, and "the batch starts with the spec phase". Add the state-table columns.
+- **W3:** the prompt begins with `foreman-worker: <batch> spec-phase`. The ` spec-phase` suffix opts the batch into the hooks' spec gate (piece 10) and the spec-phase report check (piece 7). The prompt also gains the absolute `templates/spec.md` path, `design_spec_dir`, and "the batch starts with the spec phase". Add the state-table columns.
 - **Step 0.5 table:** add `design_spec_dir`, `spec_review_rounds` and `spec_phase_timeout` with their defaults.
 - **W3.5 and W3.6:** new, as above.
 - **W4:** the `SPEC READY` routing.
