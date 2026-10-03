@@ -1,6 +1,6 @@
 # Foreman hooks: design
 
-Status: draft for review, revision 2 (2026-10-02). Revision 1 had 3 Critical, 13 Important and 5 Minor findings from an independent review; all are addressed below, and the few changes made to a suggested fix are noted where they apply. Branch `feat/hooks`. Target version 0.4.0. This depends on the parallel spec-phase design (`feat/spec-phase`, see Interactions).
+Status: draft for review, revision 3 (2026-10-02). Revision 1 drew 3 Critical, 13 Important and 5 Minor findings. Revision 2 drew 2 Critical, 3 Important and 6 Minor findings plus 8 partials. Revision 3 replaces Bash parsing with fail-closed scanning and addresses the rest. Branch `feat/hooks`. Target version 0.4.0. This depends on the parallel spec-phase design (`feat/spec-phase`, see Interactions).
 
 ## Purpose
 
@@ -38,6 +38,8 @@ The docs were read on 2026-10-02 (`code.claude.com/docs/en/hooks`, `sub-agents`,
 7. **`PermissionRequest` can allow a call.** A session that can't prompt and gets no decision denies it. `WorktreeCreate` would replace git's worktree creation; it is out of scope.
 
 Still to be probed in the plan; the design states a fallback for each:
+- (P6) whether `SubagentStart`'s `agent_id` equals the same worker's `PreToolUse` `agent_id`;
+- (P7) whether TaskStop fires `SubagentStop`;
 - (P1) whether `UserPromptSubmit` or `UserPromptExpansion` carries the `/foreman` text;
 - (P2) whether `SubagentStart` input includes the prompt or a readable transcript;
 - (P3) whether a resumed session keeps its `session_id`;
@@ -76,7 +78,7 @@ The user approved the spec gate on 2026-10-02. It enforces the spec-phase rule "
 ```
 hooks/hooks.json        settings hooks (pieces 1-8, 10) + "modules": ["./status.mjs"] (piece 9)
 scripts/hooks.py        dispatcher: python3 hooks.py <event>, JSON on stdin; also the CLIs `hooks.py run-end` and `hooks.py release <batch> <sha>`
-scripts/shellparse.py   split a Bash command into simple commands (below); used by hooks.py
+scripts/shellscan.py    fail-closed command detection (below); used by hooks.py
 scripts/state.py        main_checkout(path), repo_key(main), state_dir(main); CLI: state.py <path> → prints state_dir
 hooks/status.mjs        the wave status mod
 scripts/gate-lock.sh    + mints gate receipts (piece 1); state dir via state.py
@@ -95,21 +97,62 @@ Every handler is `type: command`, in exec form: `python3 ${CLAUDE_PLUGIN_ROOT}/s
 - **SubagentStop** → `subagent-stop`.
 - **PermissionRequest** with matcher `Bash` → `permission`.
 
-### Command parsing (`shellparse.py`)
+### Command detection (`shellscan.py`): scan, don't parse
 
-- **Splitting:** `shlex.shlex(cmd, posix=True, punctuation_chars=';&|<>()')` with `whitespace=' \t'`. A newline is a separator, so it becomes a token. The command is split on `;`, `&&`, `||`, `|`, `&` and newline into simple commands.
-- **Prefixes:** leading `VAR=value` assignments are dropped. `bash -c '<s>'` and `sh -c '<s>'` are recursed into once.
-- **Program name:** `git` or `gh` after an optional `command`/`env`/`nice`; `gt`. The subcommand is the first non-option word after the global options (`git -C <path>`, `-c k=v`).
-- **What every Bash piece sees:** every simple command, each with its effective directory: a preceding `cd <path>` in the same chain changes it; `git -C <path>` overrides it.
-- **On a parse error** (unbalanced quotes), the pieces get the raw string. Each piece says what it does then.
+Two review rounds showed that parsing Bash keeps missing forms. Detection is therefore a fail-closed scan, and it errs toward treating text as a matching command.
+
+**Considered and rejected: git-native hooks** (`pre-push`, `commit-msg`).
+- Config-based git hooks need git ≥ 2.54, but foreman's scripts call Apple's `/usr/bin/git` 2.50.
+- husky owns `core.hooksPath` in vacancy-vibe.
+- Every repo would need an install step.
+
+**Scan steps for one Bash command string:**
+1. **`-c` bodies:** for `bash`, `sh`, `zsh` and `eval` (basename), scan the argument of `-c` (or `eval`'s arguments) recursively. This is done once, before the next step hides it.
+2. **Blank, don't delete:**
+   - heredoc bodies, from `<<[-~]? *['"]?WORD['"]?` to the line equal to `WORD`;
+   - the contents of single- and double-quoted strings;
+   - `#` comments that start a word outside quotes, up to the end of the line (the newline is kept).
+
+   Blanking keeps every offset, so the original text can be looked up.
+3. **Split** the blanked text into segments at:
+   - `;`, `&&`, `||`, `|`, `|&` and `&`;
+   - newlines;
+   - `(`, `)`, `{` and `}`;
+   - the words `then`, `do`, `else`, `elif`, `if`, `while`, `until`, `!` and `time`.
+
+   Each segment is a candidate simple command.
+4. **Strip each segment's prefix:**
+   - `VAR=value` assignments;
+   - `env` with its options;
+   - `command`, `nice`, `exec` and `xargs`.
+
+   The **program** is the next word's basename, so `/usr/bin/git` counts as `git`. Record whether a prefix was stripped. Piece 8 needs that.
+5. **Classify:**
+   - `git`: skip global options (`-C <p>`, `-c <k=v>`, `--git-dir=…`, `--work-tree=…`, other `-x`/`--x`); the next word is the subcommand.
+   - `gh`: `gh pr <verb>`.
+   - `gt`: `gt <verb>`.
+   - The segment's **effective directory** comes from the last preceding `cd <p>` segment, then `git -C <p>`. With `--git-dir`/`--work-tree` present it is unknown.
+   - The segment's **arguments** are its original text (quotes restored), split by `shlex.split`. If that fails, the arguments are unknown.
+6. **On failure** (unbalanced quotes, an unterminated heredoc): pieces 1–4 regex-scan the raw text (`\bgit\b[^\n]*\bpush\b`, `\bgh\s+pr\s+(create|merge|…)\b`, `\bgt\s+(submit|merge|modify)\b`) and treat every match as a command with unknown arguments. Each piece says what it does with unknown arguments. Piece 8 gives no decision.
+
+**Known false denies,** accepted because they fail closed:
+- a `git` word inside an unquoted `echo`, e.g. `echo git push`;
+- unknown arguments, where piece 1 requires a receipt.
+
+**Tests** pin every form the reviews found:
+- comment then newline, `true;(git push)`, `(cd wt && git push)`, `{ git push; }`, `if …; then git push; fi`, `|&`;
+- a heredoc body containing `don't`, `+main` and `:old`;
+- `/usr/bin/git push`, `env -i git push`, `GIT_DIR=x git push`;
+- `bash -c 'git push'`, `eval "git push"`;
+- the quoted string `'a;b'`, which stays one argument.
 
 ### `hooks.py` common path
 
 1. Parse stdin. On a parse error, exit 0.
 2. Find the repo.
-   - **Edit-family tools** use `dirname(tool_input.file_path)`. **Bash** uses each simple command's effective directory. **Other events** use `cwd`.
+   - **Edit-family tools** use `dirname(tool_input.file_path)` (`notebook_path` for NotebookEdit). **Bash** uses each simple command's effective directory. **Other events** use `cwd`.
    - `git rev-parse --show-toplevel` gives the checkout. `main_checkout` is the first `git worktree list --porcelain` entry.
-   - "In a foreman repo" means `cfg.config_path(main)` is not None, ignoring `FOREMAN_CONFIG`. Otherwise exit 0.
+   - "In a foreman repo" means `cfg.config_path(main, use_env=False)` is not None. `use_env=False` is a new parameter: hooks ignore `FOREMAN_CONFIG`, while the scripts and tests keep using it. Otherwise exit 0.
 3. Drop any piece listed in the config's `hooks_disabled`.
 4. **Run active:** the file `state_dir/runs/<session_id>.json` exists, and its `touched` time is within 48 hours.
 5. **Subagent:** the input has `agent_id`.
@@ -121,21 +164,27 @@ Every handler is `type: command`, in exec form: `python3 ${CLAUDE_PLUGIN_ROOT}/s
 **State.** `state_dir(main)` = `$FOREMAN_HOME/<repo_key(main)>`, with FOREMAN_HOME defaulting to `~/.claude/foreman`. `repo_key` = the first 12 hex digits of sha1(origin url + newline + realpath(main)).
 - `ui.py` moves to this function, and SKILL.md's `/foreman ui` passes `--repo <main checkout>`, not `$PWD`.
 - `gate-lock.sh` gets the dir from `python3 state.py <toplevel>`.
-- `run-start` records the resolved `state_dir` in the marker. If `FOREMAN_HOME` differs between the Bash tool and hooks (P4), hooks.py also checks the dir named in the marker.
+- Every state lookup in hooks.py checks `state_dir(main)` and also the default `~/.claude/foreman/<key>` when they differ. This covers a `FOREMAN_HOME` set only for the Bash tool (P4).
 - Directories are 0700 and files 0600.
 
 ## The run marker
 
-- **`run-start`** fires when the prompt contains a token starting with `/foreman` or `/foreman:foreman` (so `/loop 2h /foreman --auto-merge` counts). The next word must not be `ui` or `init`.
-  - It writes `runs/<session_id>.json` = `{"started", "touched", "args", "state_dir"}`. Repeats update `args` and `touched`.
+- **`run-start`** fires when the prompt begins with `/foreman` or `/foreman:foreman`, or with `/loop [<interval>] /foreman…`. The next word must not be `ui` or `init`. A mention elsewhere in the prompt doesn't start a run.
+  - It writes `runs/<session_id>.json` = `{"started", "touched", "args"}`. Repeats update `args` and `touched`.
   - It never blocks.
-- **`run-end`** has two triggers.
-  - `SessionEnd` with reason `clear` or `logout` deletes the marker (P5). Other reasons keep it, so a resumed mid-wave session stays guarded, depending on P3.
-  - The skill's termination steps run `python3 $FOREMAN/hooks.py run-end`. It reads the session id from the newest marker of this repo whose `args` match, and deletes it.
+- **`run-end`** has two triggers. Both act on the calling session's own marker, never another session's:
+  - `SessionEnd` with reason `clear` or `logout` (P5). Other reasons keep the marker, so a resumed mid-wave session stays guarded (P3).
+  - The skill's termination steps run `python3 <plugin>/scripts/hooks.py run-end`:
+    - W6's stop;
+    - the autonomous loop's end;
+    - serial step 12 after a manual pass.
+
+    The script itself does nothing. `pretool` recognises this exact call (a single segment: `python3` plus that path plus `run-end`) and deletes `runs/<session_id>.json`, using the hook input's own session id. Piece 8 allows the call.
 - **Expiry:** a marker untouched for 48 hours is ignored and pruned on the next `run-start`.
-- **While a marker exists** (between `run-end` steps, or when a run is abandoned):
+- **While a marker exists:**
   - subagents can't merge, force-push or rebase, or edit the backlog, rules or config;
-  - everyone needs a gate receipt to push non-exempt diffs, and merges need `--match-head-commit`;
+  - everyone needs a gate receipt to push a non-exempt diff;
+  - merges need `--match-head-commit`;
   - piece 8 allows the scripts;
   - the status band shows.
 
@@ -160,9 +209,14 @@ Every handler is `type: command`, in exec form: `python3 ${CLAUDE_PLUGIN_ROOT}/s
 - **When none holds:**
   - The push is denied: "foreman: no passing gate for this tree — run `<plugin>/scripts/gate-lock.sh <owner> -- '<gate>'` from the checkout's top level, commit every file the gate changed, then push."
   - When a last receipt exists, the reason also lists up to 10 paths changed since it, so a gate that reformats files outside the batch is visible.
-- **When the diff can't be determined** (no `origin/<default>`, or a failing git), the push is denied with the same reason. This is the stated fail-closed exception.
+- **When the diff can't be determined** (no `origin/<default>`, a failing git, unknown arguments, or an unknown effective directory), the push is denied with the same reason. This is the stated fail-closed exception.
+- **Refspecs** are read from the segment's arguments:
+  - **a delete** (`--delete`, `-d`, or a refspec starting with `:`) is allowed;
+  - **a `+` refspec** is a force push (piece 2).
 - **Receipts (minted by `gate-lock.sh`):**
   - Before running the command, `gate-lock.sh` changes to `git rev-parse --show-toplevel`.
+  - It runs the command after `--` the same way with or without `--name`, from the top level.
+  - **Untracked files:** before the command, it records the untracked, non-ignored paths. After the command, any NEW untracked path (coverage output, reports) is excluded from the receipt tree and listed on stderr ("gate created untracked files; they are not part of the receipt"). A gate artifact therefore never needs to be committed.
   - It mints only when ALL of these hold:
     - the command after `--` is exactly one argument;
     - that argument equals the config's `gate`;
@@ -171,7 +225,7 @@ Every handler is `type: command`, in exec form: `python3 ${CLAUDE_PLUGIN_ROOT}/s
     Extra gates never mint, because their `when:` can't be checked.
   - **The tree** is that of the working copy at the end:
     1. copy the checkout's real index (`git rev-parse --git-path index`) to a temp file;
-    2. run `GIT_INDEX_FILE=<temp> git add -A`;
+    2. run `GIT_INDEX_FILE=<temp> git add -A -- . ':!<new untracked paths>'`;
     3. run `git write-tree`.
     Starting from the real index keeps force-added ignored files and the existing blobs, so clean/eol/LFS filters aren't re-run on unchanged files.
   - **Contents:** `{"command", "owner", "time", "toplevel"}`. It also updates the `gate/last/<sha1(toplevel)>` pointer. Receipts older than 14 days are pruned.
@@ -189,19 +243,26 @@ Every handler is `type: command`, in exec form: `python3 ${CLAUDE_PLUGIN_ROOT}/s
 
 ### 3. Merge discipline (everyone during a run)
 
-`gh pr merge` and `gt merge` are denied when:
-- the command lacks `--match-head-commit <sha>`: "merge the SHA you verified";
-- it has `--delete-branch` or `-d` AND the PR's head branch is checked out in a worktree of this repo (`gh pr view <n> --json headRefName`, matched against `git worktree list --porcelain`): "remove the worktree first, then delete the branch".
-
-Serial step 12 (`--delete-branch`, no worktree) passes that second check, but it must add `--match-head-commit`. SKILL.md changes accordingly.
+- **`gh pr merge`** is denied when:
+  - it lacks `--match-head-commit <sha>`: "merge the SHA you verified";
+  - it has `--delete-branch` or `-d`, AND the PR's head branch is checked out in a worktree OTHER than the one the command runs in: "remove that worktree first, then delete the branch". gh switches the current worktree to the default branch itself, so serial step 12's main checkout is not counted.
+- **`gt merge`** is denied during a run: "merge with `gh pr merge --match-head-commit <sha>`". It merges through Graphite's queue and can't pin a SHA.
+- **The PR's head branch** comes from one `gh pr view <n> --json headRefName,commits` call, with a 4 second subprocess timeout, shared with piece 4. Piece 2's local deny of a subagent's merge is decided first; when it stands, no network call is made.
+- **Serial step 12** reads `gh pr merge <n> --squash --match-head-commit <verified sha> --delete-branch`, run from the main checkout. SKILL.md changes accordingly.
 
 ### 4. Trailer guard (any session in a foreman repo)
 
-- **What is checked:**
-  - **Message text:** for `git commit`, the `-m` and `--message` values plus the file named by `-F`, `--file` or `--message-file`. For `gh pr create|edit|comment|merge|review`, the `--title`, `--body`, `--subject` and `-b` values plus `--body-file`/`-F`. For `gt create|modify|submit`, `-m`/`--message`.
-  - **File paths** resolve against the simple command's effective directory; absolute paths are used as given. `-F -` reads the text from the command's heredoc, which is part of the command string.
-- **Rule:** deny when any `forbid_trailers` entry starts a line of the message or body: `(?im)^\s*<entry>`, case-insensitive. Mentions inside a sentence don't count.
-- **`gh pr merge --squash` with no body:** the squash body is built from the PR's commit messages. The hook reads `gh pr view <n> --json commits` and denies if any commit message has a forbidden line. The reason names the commit and says to pass `--body` without it. (The review suggested denying every squash without a body; this narrows it.)
+- **The message text checked:**
+  - **`git commit`:** the `-m`/`--message` values, plus the file named by `-F`/`--file`.
+  - **`gh pr create|edit|comment|merge|review`:** the `-t`/`--title`, `-b`/`--body` and `--subject` values, plus `-F`/`--body-file`.
+  - **`gt create|modify|submit`:** `-m`/`--message`.
+  - **Heredoc bodies** belong to the command they feed.
+  - **With unknown arguments,** the segment's raw text.
+- **Files:** a file path resolves against the effective directory; absolute paths are used as given. A file that doesn't exist yet (written earlier in the same command) is read from the heredoc that writes it if there is one, and otherwise skipped with a stderr note.
+- **Rule:** deny when a line of the message starts with a `forbid_trailers` entry after any non-word characters: `(?im)^[^\w\n]*<entry>`, case-insensitive. That catches `🤖 Generated with …`. Mentions inside a sentence don't count.
+- **`gh pr merge`** with any method (`--squash`, `--merge` or `--rebase`) lands the PR's commit messages unless a body replaces them.
+  - The hook reads the commits from piece 3's shared `gh pr view` call. It verifies the field names (`messageHeadline`, `messageBody`) in the plan.
+  - It denies when any commit message has a forbidden line and no `--body`/`--body-file` replaces it (squash), or for merge and rebase, which always keep them. The reason names the commit.
 - **With an empty list,** the piece does nothing.
 
 ### 5. Backlog row check (any session in a foreman repo)
@@ -218,38 +279,57 @@ Serial step 12 (`--delete-branch`, no worktree) passes that second check, but it
   - Workers then still get the contract the way they do today, in the dispatch prompt. SKILL.md keeps it there until P2 is confirmed.
   - The briefing does not need a run marker: the tag is the proof of a foreman worker.
 - **Content,** as `additionalContext`:
-  - the `### Worker contract` section read from the installed `SKILL.md`, rendered. `$FOREMAN` becomes `${CLAUDE_PLUGIN_ROOT}/scripts`; `{{key}}` values come from the config; `<prefix>` becomes `id_prefix`.
+  - the `### Worker contract` section read from the installed `SKILL.md`, rendered:
+    - `$FOREMAN` becomes `${CLAUDE_PLUGIN_ROOT}/scripts`;
+    - `{{key}}` takes the config value, or the SKILL.md default-table value when the config lacks it;
+    - `<prefix>` becomes `id_prefix`;
+    - `<batch>` comes from the tag.
+
+    `<scratch>` and `<worktree>` stay as written, followed by a one-line legend: "<scratch> = your scratchpad dir; <worktree> = your current checkout's top level".
   - then `gate`, `forbid_trailers` and `shared_resources`.
   - Cap: 8 KB. Over the cap, `shared_resources` is truncated first, never the contract.
-- **The briefing records `agent_id → batch`** in `state_dir/batches/agents/<agent_id>`, with the batch name as the file's content. Piece 10 needs it. Batch names are unique per run (W2 names them by wave, e.g. `w16a`), so the map isn't keyed by session.
+- **The briefing records `agent_id → batch`** as one file per agent, `state_dir/batches/agents/<agent_id>`, written atomically (temp file plus rename) with the batch name as its content. Workers launched in one message can't lose each other's entries. Piece 10 needs it. Batch names are unique per run (W2 names them by wave, e.g. `w16a`), so the map isn't keyed by session. Entries are pruned with the batch files.
 - **Dispatch prompts keep:** the batch, rows, owned files, test-data id prefix, the resolved plugin path, and W6's inline rule notes from an unmerged bookkeeping PR.
 
 ### 7. Report check (SubagentStop)
 
 - **Same who-test as piece 6.** The tag comes from the first user message in `agent_transcript_path`. With no tag, the stop is allowed.
 - **When `stop_hook_active` is true,** the stop is allowed. The check blocks at most once per stop.
-- **If the last message starts with `SPEC READY `,** the stop is allowed. That is the spec-phase hand-off, not a final report.
+- **If any line of the last message starts with `SPEC READY `,** the stop is allowed. That is the spec-phase hand-off, not a final report.
 - **Otherwise,** it takes the last fenced `json` block in `last_assistant_message`:
   - **Missing:** block with "end your report with ONE fenced json block in the worker contract's format, even if empty".
   - **Invalid JSON:** block, quoting the parse error.
-  - **Valid:** drop `rule_notes`, because they may quote rules text from a bookkeeping PR that isn't merged yet. Add `"pr": 0` and run `bk.py <the worker's checkout> --dry-run <file>`.
+  - **Wrong shape:** `hooks.py` validates the shape first:
+    - `done`/`append` are lists of `{id: str, note: str}`;
+    - `new_rows` is a list of strings;
+    - `rule_notes` is a list of `{file, old, new}`.
+
+    On a mismatch it blocks, naming the bad field. bk.py never sees a shape it would crash on.
+  - **Valid:** drop `rule_notes`, because they may quote rules text from a bookkeeping PR that isn't merged yet. Add `"pr": 0` and run `bk.py <the worker's checkout> --dry-run --no-fetch <file>` with a 20 second timeout. `--no-fetch` is a new flag that skips bk.py's UI-branch fetch.
     - The worker's checkout is the toplevel of `cwd`; its branch started from `origin/<default>`.
     - It blocks only when stdout contains `PROBLEMS (nothing written)`, listing those problem lines.
     - Any other non-zero exit, such as a crash, is allowed, with a stderr warning.
 
 ### 8. Script allow (PermissionRequest, during a run)
 
-Only Bash is considered, and anything not matching every rule below gets no decision; normal handling then applies. This piece never denies.
-- **The text** contains no newline or `\r`, no `$(`, no backtick, and no `${`.
-- **Parsing** with `shellparse`: exactly one simple command, optionally preceded by one `cd <path> &&`.
-- **The executable,** after an optional `python3`, `bash` or `sh`, is one of `${CLAUDE_PLUGIN_ROOT}/scripts/{gate-lock.sh,wt-setup.sh,review.sh,bk.py}` by exact absolute path.
+Only Bash is considered. Anything that doesn't match every rule below gets no decision, and normal handling then applies. This piece never denies.
+- **The text** contains no newline or `\r`, no `$(`, no backtick, no `${`, and no `<`/`>` redirection.
+- **The scan** (shellscan) yields exactly one command segment, optionally preceded by one `cd <path> &&`. The pair may be wrapped once in `( … )`. No prefix was stripped: no `VAR=` assignment, no `env`, no `command`.
+- **The executable,** after an optional `python3`, `bash` or `sh` without options, compared after `realpath(expanduser(…))`, is one of `<plugin>/scripts/gate-lock.sh`, `wt-setup.sh`, `review.sh`, `bk.py` or `hooks.py`.
 - **Per script:**
-  - **`gate-lock.sh`:** the arguments are `<owner> -- <one argument equal to the config's gate>`; `--name` is not allowed.
-  - **`wt-setup.sh` and `review.sh`:** the target directory is a worktree of this repo. For `wt-setup.sh` that is the path argument; for `review.sh` it is the effective cwd. Both scripts now read config from that directory's MAIN checkout, never from the directory itself. Otherwise a planted config in a worktree could run any `worktree_install` or `custom` reviewer command.
+  - **`gate-lock.sh`:** `<owner> -- <one argument>`, where the argument equals the config's `gate` (mints a receipt) or `post_merge_check` (doesn't mint, because only `gate` mints); no `--name`.
+  - **`wt-setup.sh [--check] <dir>`:** `<dir>` is a worktree of this repo.
+  - **`review.sh [--spec <path>] <base> <logfile>`:** the effective directory is a worktree of this repo. Both scripts read config from that worktree's MAIN checkout, never from the directory itself. Otherwise a planted config could run any `worktree_install` or `custom` reviewer command. The scripts keep honouring `FOREMAN_CONFIG` for tests, which is safe because an env prefix gets no decision here.
   - **`bk.py`:** subagents only with `--dry-run`.
+  - **`hooks.py`:** only `run-end` or `release <batch> <sha>`.
 - **The config file is write-protected for subagents** by piece 2.
 - **On a match:** `{"hookSpecificOutput":{"hookEventName":"PermissionRequest","decision":{"behavior":"allow"}}}`.
-- **Other commands:** the README gives a `permissions.allow` snippet for the rest of the worker contract: `git push`, `gh pr create|view|checks`, `gh api`, `node --check`. W3 adds a preflight: before launching, the orchestrator checks that those permissions are present and warns if not.
+- **Other commands:** the README gives a `permissions.allow` snippet for the rest of the worker contract:
+  - `git add`, `git commit`, `git fetch`, `git merge`, `git push` and `git worktree`;
+  - `gh pr create|view|checks|comment|edit`, `gh api`;
+  - `node --check`.
+
+  W3's preflight checks that it's present and warns if not.
 
 ### 9. Wave status (mod `hooks/status.mjs`)
 
@@ -302,12 +382,12 @@ Only Bash is considered, and anything not matching every rule below gets no deci
   - a permissions preflight;
   - the contract stays in the dispatch prompt until probe P2 confirms the briefing.
 - **Worker contract:**
-  - "commit every file the gate changed and list it in your report";
+  - "commit every file the gate changed and list it in your report; don't edit files while a gate runs";
   - a line saying hooks enforce gate receipts, no merge, no force-push, no rebase, no backlog/rules/config edits, trailers and the report check.
 - **Gate steps** run `gate-lock.sh <owner> -- '<gate>'` with the exact configured string, from the checkout's top level.
-- **Step 12 and W4.6:** `gh pr merge --match-head-commit <verified sha>`. Step 12 deletes the branch after the sync, when no worktree holds it.
+- **Step 12:** `gh pr merge <n> --squash --match-head-commit <verified sha> --delete-branch`, from the main checkout. **W4.6:** `--match-head-commit`, no `--delete-branch` (the worktree holds the branch).
 - **W5:** a bookkeeping diff with non-exempt paths is gated in its worktree after `{{worktree_setup}}`.
-- **Termination** (W6 stop and the autonomous loop's end) runs `python3 $FOREMAN/hooks.py run-end`.
+- **Termination** (W6's stop, the autonomous loop's end, and serial step 12) runs `python3 $FOREMAN/hooks.py run-end`.
 - **W3.6 (spec-phase release):** runs `python3 $FOREMAN/hooks.py release <batch> <sha>` before the release message. **W5** deletes `batches/*` for this wave.
 - **`/foreman ui`** passes `--repo <main checkout>`.
 - **A "Hooks" paragraph** lists the pieces, `hooks_disabled`, and the `! <command>` override.
@@ -330,31 +410,30 @@ These are guardrails, not a security boundary. Piece 8 is the only piece that gr
 
 ## Testing
 
-- **`tests/test_shellparse.py`:**
-  - `a; git push`, `a && git push`, `a\ngit push`, `cd wt && git push`;
-  - `git -C wt push`, `bash -c 'git push'`, `VAR=1 git push`;
-  - quoted operators staying one token, and an unbalanced quote.
+- **`tests/test_shellscan.py`:** every form listed under Command detection, plus a fail-closed fallback case for unbalanced quotes.
 - **`tests/test_hooks.py`** feeds recorded hook JSON to `hooks.py` in temp repos, with a temp `FOREMAN_HOME` and a fake `gh`, one row per case:
   - **Scoping:** no config means silent, and `FOREMAN_CONFIG` set means it is ignored; no marker silences the run-only pieces; `agent_id` present versus absent.
   - **Piece 1:**
     - receipt present, missing, an exempt-only diff, and an exempt diff since the last receipt;
     - a rename of code into `docs/` is not exempt;
-    - `gate; git push` and `cd wt && git push` are both judged;
-    - a delete push is allowed; an undeterminable diff is denied;
+    - `gate; git push`, `cd wt && git push`, `(git push)` and `/usr/bin/git push` are all judged;
+    - a gate that writes `coverage/` gets a receipt that matches HEAD without the coverage files;
+    - a delete push (`:b`, `--delete`) is allowed; an undeterminable diff or unknown arguments are denied;
     - minting: the gate string versus a multi-argument form, versus `--name`, versus a non-gate command;
     - a receipt tree equals `HEAD^{tree}` with a force-added ignored file, and with a CRLF blob under `text=auto`;
     - a gate run from a subdirectory runs at the top level.
-  - **Pieces 2 and 3:** each denial, plus a normal push and merge allowed. `-d` is allowed when no worktree holds the branch.
-  - **Piece 4:** a trailer line in `-m`, in a `-F` file in the scratchpad, and in a heredoc; a mid-sentence mention allowed; a squash whose commits carry a trailer.
+  - **Pieces 2 and 3:** each denial, plus a normal push and merge allowed. `-d` is allowed when only the command's own worktree holds the branch (serial step 12 from the main checkout), and denied when another worktree holds it. `gt merge` is denied during a run.
+  - **Piece 4:** a trailer line in `-m`, in a `-F` file in the scratchpad, and in a heredoc; the `🤖 Generated with` footer; a mid-sentence mention allowed; squash, merge and rebase whose commits carry a trailer.
   - **Piece 5:** a bookkeeping-worktree edit is checked; a clean backlog returns nothing.
   - **Pieces 6 and 7:**
     - briefing with and without the tag; rendered `$FOREMAN`;
-    - the report check: missing block, invalid JSON, a refused block, a valid block, `rule_notes` ignored, a bk.py crash allowed, `stop_hook_active`, and `SPEC READY`.
+    - the report check: missing block, invalid JSON, a wrong shape (`"done": ["IB-1"]`), a refused block, a valid block, `rule_notes` ignored, `stop_hook_active`, and `SPEC READY` after a preface line.
   - **Piece 8:**
     - an exact path allowed;
-    - no decision for each of: a newline, `$(`, `; rm`;
+    - no decision for each of: a newline, `$(`, `; rm`, `BASH_ENV=x bash <script>`, `FOREMAN_CONFIG=x <script>`, `env <script>`, and a `>` redirect;
+    - allowed: a one-paren wrap `(cd <wt> && <review.sh> --spec …)`, gate-lock with `post_merge_check` (no receipt minted), a `~/` plugin path, `hooks.py run-end`, and `hooks.py release w1a <sha>`;
     - no decision for gate-lock with a non-gate command or `--name`, for wt-setup on a non-worktree directory, and for bk.py without `--dry-run` from a subagent.
-  - **Run marker:** `/loop … /foreman`, `ui`/`init` skipped, `SessionEnd` reasons, `hooks.py run-end`, and the 48-hour expiry.
+  - **Run marker:** `/loop 2h /foreman` starts a run; a mid-prompt mention doesn't; `ui`/`init` are skipped; `SessionEnd` reasons; `hooks.py run-end` deletes only the calling session's marker while another session's stays; the 48-hour expiry.
   - **Piece 10:**
     - a mapped, unreleased worker is denied an Edit outside `design_spec_dir` and allowed one inside it;
     - `git commit` with a staged code file is denied; with only the spec staged it is allowed; `git commit -a` with a modified code file is denied;
