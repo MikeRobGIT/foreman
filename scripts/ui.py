@@ -125,20 +125,23 @@ class Repo:
             os.replace(p, f'{p}.bad-{int(time.time())}')
             self.notice = 'pending.json could not be read; it was set aside and the list starts empty'
             return self.version, []
-        # The in-memory floor keeps the version rising even when the file was set aside or deleted.
+        # The version labels the ops that were read: never the floor, which a save raises before its file lands.
         self.version = max(self.version, data['version'])
-        return self.version, data['ops']
+        return data['version'], data['ops']
 
     def load_ops(self):
         return self.load_store()[1]
 
     def save_ops(self, ops):
-        self.version = self.load_store()[0] + 1
+        # The in-memory floor keeps the version rising even when the file was set aside or deleted.
+        self.load_store()
+        version = self.version + 1
         # mkstemp creates the file 0600; the rename keeps a crash from leaving half a file.
         fd, tmp = tempfile.mkstemp(dir=self.state, suffix='.json')
         with os.fdopen(fd, 'w', encoding='utf-8') as f:
-            json.dump({'version': self.version, 'ops': ops}, f, indent=1, ensure_ascii=False)
+            json.dump({'version': version, 'ops': ops}, f, indent=1, ensure_ascii=False)
         os.replace(tmp, self.ops_path())
+        self.version = version
 
     def replay(self, ops, upto=None):
         _, text, _ = self.fetch()

@@ -10,6 +10,7 @@ import tempfile
 import threading
 import time
 import unittest
+from unittest import mock
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(HERE, '..', 'scripts'))
@@ -158,6 +159,24 @@ class ServerTest(unittest.TestCase):
         uids = [o['uid'] for o in d3['ops']]
         self.assertNotIn('mine', uids)
         self.assertEqual(len(set(uids)), 2)
+
+    def test_a_view_taken_mid_save_carries_the_version_of_the_ops_it_read(self):
+        repo = self.f.server.repo
+        self.f.request('POST', '/api/ops', {'op': 'move', 'id': 'IB-2', 'to': 'top'})
+        before = repo.view()
+        mid, real_replace = [], os.replace
+
+        def replace(src, dst):
+            if dst == repo.ops_path():
+                mid.append(repo.view())
+            return real_replace(src, dst)
+        with mock.patch('os.replace', replace):
+            repo.add_op({'op': 'move', 'id': 'IB-1', 'to': 'top'})
+        self.assertEqual(len(mid), 1)
+        self.assertEqual((mid[0]['version'], mid[0]['ops']), (before['version'], before['ops']))
+        after = repo.view()
+        self.assertEqual(after['version'], before['version'] + 1)
+        self.assertEqual(len(after['ops']), 2)
 
     def test_drop_and_rebase_with_a_stale_uid_are_409(self):
         self.f.request('POST', '/api/ops', {'op': 'move', 'id': 'IB-2', 'to': 'top'})
