@@ -82,10 +82,12 @@ class Repo:
         self._prs = (0, None)
 
     def git(self, *args, check=True, cwd=None):
-        p = subprocess.run(['git', *args], cwd=cwd or self.path, capture_output=True, text=True, encoding='utf-8')
+        # Bytes, decoded by hand: text mode would turn a CRLF backlog into LF and every row would conflict.
+        p = subprocess.run(['git', *args], cwd=cwd or self.path, capture_output=True)
+        out, err = p.stdout.decode('utf-8'), p.stderr.decode('utf-8', 'replace')
         if check and p.returncode:
-            raise GitError(f'git {" ".join(args)}: {p.stderr.strip() or p.stdout.strip()}')
-        return p.stdout
+            raise GitError(f'git {" ".join(args)}: {err.strip() or out.strip()}')
+        return out
 
     def default_branch(self):
         out = self.git('symbolic-ref', '--short', 'refs/remotes/origin/HEAD', check=False).strip()
@@ -293,7 +295,7 @@ class Repo:
             os.rmdir(wt)
             self.git('worktree', 'add', '-q', '-b', branch, wt, base_sha)
             path = os.path.join(wt, self.backlog_path)
-            with open(path, encoding='utf-8') as f:
+            with open(path, encoding='utf-8', newline='') as f:
                 bl = backlog.parse(f.read(), self.prefix)
             results = backlog.apply(bl, ops)
             bad = [f'{backlog.describe(o)}: {r["reason"]}' for o, r in zip(ops, results) if r['result'] == 'invalid']
@@ -306,8 +308,9 @@ class Repo:
                         'message': 'nothing to publish: every change conflicts with main'}
             floor = backlog.reserved_max_id(self.path, self.backlog_path, self.prefix, self.branch)
             mapping = backlog.assign_ids(bl, [o['tmp'] for o in applied if o['op'] == 'add'], floor)
-            with open(path, 'w', encoding='utf-8') as f:
-                f.write(backlog.serialise(bl))
+            text = backlog.serialise(bl)
+            with open(path, 'w', encoding='utf-8', newline='') as f:
+                f.write(text)
             title = self.title_for(applied)
             self.git('add', self.backlog_path, cwd=wt)
             if subprocess.run(['git', 'diff', '--cached', '--quiet'], cwd=wt).returncode == 0:
@@ -315,7 +318,8 @@ class Repo:
                 return {'pr_url': None, 'applied': 0, 'conflicts': len(conflicts), 'branch': None,
                         'message': 'nothing to publish: the pending changes already match main'}
             self.git('commit', '-q', '-m', title, cwd=wt)
-            self.git('push', '-q', '-u', 'origin', 'HEAD', cwd=wt)
+            self.check_commit(wt, base_sha, text)
+            self.git('push', '-q', 'origin', f'HEAD:refs/heads/{branch}', cwd=wt)
             pushed = True
             body = '\n'.join(['Backlog edits made in the foreman UI, replayed onto '
                               f'`{self.branch}` at `{base_sha[:9]}`.', '']
@@ -340,6 +344,16 @@ class Repo:
             if branch:
                 self.git('branch', '-D', branch, check=False)
             self.publishing.release()
+
+    def check_commit(self, wt, base_sha, text):
+        """The commit must change only the backlog, to exactly the text written (a commit hook could change either)."""
+        changed = self.git('diff', '--name-only', f'{base_sha}..HEAD', cwd=wt).split()
+        want = subprocess.run(['git', 'hash-object', '--stdin', f'--path={self.backlog_path}'], cwd=wt,
+                              input=text.encode('utf-8'), capture_output=True).stdout.decode().strip()
+        got = self.git('rev-parse', f'HEAD:{self.backlog_path}', cwd=wt).strip()
+        if changed != [self.backlog_path] or want != got:
+            raise PublishError(f'the commit is not what the UI wrote (changed: {", ".join(changed) or "nothing"}; '
+                               'a commit hook may have edited it); not pushed')
 
     def settle(self, applied):
         # Edits made while the publish ran are in pending.json now; remove only the ops that were handled.

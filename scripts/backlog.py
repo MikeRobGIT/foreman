@@ -53,9 +53,13 @@ class Row:
 
 
 class Backlog:
-    def __init__(self, lines, prefix):
+    def __init__(self, lines, prefix, eol=''):
         self.lines = lines
         self.prefix = prefix
+        self.eol = eol  # '\r' in a CRLF file: split on '\n' leaves it on every line, and rebuilt rows keep it
+
+    def row(self, cells):
+        return Row(build(cells) + self.eol, cells)
 
     def rows(self):
         return [l for l in self.lines if isinstance(l, Row)]
@@ -84,7 +88,7 @@ def parse(text, prefix='IB'):
             lines.append(Row(line, cells) if cells and len(cells) == 6 else Unparsed(line))
         else:
             lines.append(line)
-    return Backlog(lines, prefix)
+    return Backlog(lines, prefix, '\r' if '\r\n' in text else '')
 
 
 def serialise(bl):
@@ -130,9 +134,9 @@ def validate_cells(cells, prefix):
     return problems
 
 
-def make_row(cells, prefix):
+def make_row(cells, prefix, eol=''):
     problems = validate_cells(cells, prefix)
-    return (None, problems) if problems else (Row(build(cells), cells), [])
+    return (None, problems) if problems else (Row(build(cells) + eol, cells), [])
 
 
 def check_op_shape(op):
@@ -186,7 +190,7 @@ def _apply_one(bl, op):
             return {'result': 'invalid', 'reason': f'{op["status"]} needs a reason'}
         cells = [op['tmp'], escape(op['title']), op['risk'], _status_text(op['status'], op.get('reason')),
                  escape(op.get('acceptance', '')), escape(op.get('source', ''))]
-        row, problems = make_row(cells, bl.prefix)
+        row, problems = make_row(cells, bl.prefix, bl.eol)
         if problems:
             return {'result': 'invalid', 'reason': '; '.join(problems)}
         rows = [i for i, l in enumerate(bl.lines) if isinstance(l, Row)]
@@ -219,7 +223,7 @@ def _apply_one(bl, op):
         if op['to'] in NEEDS_REASON and not (op.get('reason') or '').strip():
             return {'result': 'invalid', 'reason': f'{op["to"]} needs a reason'}
         cells[3] = _status_text(op['to'], op.get('reason'))
-    new, problems = make_row(cells, bl.prefix)
+    new, problems = make_row(cells, bl.prefix, bl.eol)
     if problems:
         return {'result': 'invalid', 'reason': '; '.join(problems)}
     bl.lines[i] = new
@@ -247,7 +251,7 @@ def assign_ids(bl, tmp_ids, floor=0):
         if isinstance(l, Row) and l.id in mapping:
             cells = l.cells()
             cells[0] = mapping[l.id]
-            bl.lines[i] = Row(build(cells), cells)
+            bl.lines[i] = bl.row(cells)
     return mapping
 
 

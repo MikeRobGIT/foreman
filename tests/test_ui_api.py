@@ -331,6 +331,35 @@ class PublishTest(unittest.TestCase):
         status, data, _ = self.f.request('GET', '/api/backlog')
         self.assertEqual(len(data['ops']), 1)
 
+    def test_crlf_backlog_keeps_its_line_endings(self):
+        other = os.path.join(self.f.tmp, 'other')
+        git(self.f.tmp, 'clone', '-q', '-c', 'core.autocrlf=false', self.f.origin, other)
+        p = os.path.join(other, '.claude/improvement-backlog.md')
+        write(p, BACKLOG.replace('\n', '\r\n'))
+        git(other, 'commit', '-qam', 'crlf')
+        git(other, 'push', '-q')
+        blob = subprocess.run(['git', 'show', 'origin/main:.claude/improvement-backlog.md'], cwd=other, capture_output=True).stdout
+        self.assertIn(b'| IB-2 | Two | medium | ready | B | s |\r\n', blob)
+        self.f.request('GET', '/api/backlog?refresh=1')
+        status, data, _ = self.f.request('POST', '/api/ops', {'op': 'status', 'id': 'IB-2', 'to': 'deferred', 'reason': 'later'})
+        self.assertEqual(data['results'], [{'result': 'applied', 'reason': ''}])
+        status, res, _ = self.f.request('POST', '/api/publish')
+        self.assertEqual((status, res['applied']), (200, 1), res)
+        git(self.f.work, 'fetch', '-q', 'origin')
+        new = subprocess.run(['git', 'show', f'origin/{res["branch"]}:.claude/improvement-backlog.md'], cwd=self.f.work, capture_output=True).stdout
+        self.assertEqual(new, blob.replace(b'| IB-2 | Two | medium | ready | B | s |', '| IB-2 | Two | medium | deferred \u2014 later | B | s |'.encode()))
+
+    def test_a_commit_that_differs_from_the_plan_is_not_pushed(self):
+        hook = os.path.join(self.f.work, '.git', 'hooks', 'pre-commit')
+        write(hook, '#!/bin/sh\necho "| IB-99 | Sneaked in | low | ready | x | y |" >> .claude/improvement-backlog.md\ngit add .claude/improvement-backlog.md\n')
+        os.chmod(hook, 0o755)
+        self.f.request('POST', '/api/ops', {'op': 'move', 'id': 'IB-2', 'to': 'top'})
+        status, res, _ = self.f.request('POST', '/api/publish')
+        self.assertEqual(status, 502, res)
+        self.assertIn('not pushed', res['error'])
+        self.assertEqual([b for b in self.remote_branches() if b.startswith('backlog/ui-')], [])
+        self.assertEqual(len(self.f.server.repo.load_ops()), 1)
+
     def test_concurrent_publish_is_409(self):
         self.f.server.repo.publishing.acquire()
         try:

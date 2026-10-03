@@ -27,6 +27,19 @@ class ParseTest(unittest.TestCase):
         t = FIXTURE.rstrip('\n')
         self.assertEqual(backlog.serialise(backlog.parse(t)), t)
 
+    def test_crlf_survives_edits_adds_and_numbering(self):
+        bl = backlog.parse(FIXTURE.replace('\n', '\r\n'))
+        r = backlog.apply(bl, [
+            {'op': 'set', 'id': 'IB-5', 'field': 'title', 'value': 'Five', 'base': base_of(bl, 'IB-5')},
+            {'op': 'add', 'tmp': 'NEW-1', 'title': 'A', 'risk': 'low', 'status': 'ready', 'reason': '', 'acceptance': 'X', 'source': 'ui', 'insert': 'top'},
+        ])
+        self.assertEqual([x['result'] for x in r], ['applied', 'applied'])
+        backlog.assign_ids(bl, ['NEW-1'])
+        out = backlog.serialise(bl)
+        self.assertNotIn('\n', out.replace('\r\n', ''))
+        self.assertIn('| IB-5 | Five | low | ready | Text. | #13 |\r\n', out)
+        self.assertIn('| IB-6 | A | low | ready | X | ui |\r\n', out)
+
     def test_fields_and_status(self):
         bl = backlog.parse(FIXTURE)
         rows = {r.id: r for r in bl.rows()}
