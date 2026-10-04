@@ -593,11 +593,11 @@ def is_push_trigger(c):
 
 
 # commands that move HEAD; `git checkout -- <path>` is an accepted false deny. shellscan reads only gt's s, ss, m and c
-# aliases, so the others (co, u, d, sq, ab) and gh's `pr co` are listed as spelled
+# aliases, so the others (co, u, d, sq, ab, r) and gh's `pr co` are listed as spelled
 HEAD_MOVERS = ({('git', s) for s in ('commit', 'merge', 'pull', 'rebase', 'cherry-pick', 'revert', 'am', 'reset',
                                      'checkout', 'switch', 'update-ref', 'commit-tree')}
                | {('gt', s) for s in ('create', 'modify', 'sync', 'squash', 'sq', 'absorb', 'ab', 'fold', 'restack',
-                                      'checkout', 'co', 'up', 'u', 'down', 'd')}
+                                      'checkout', 'co', 'up', 'u', 'down', 'd', 'r')}
                | {('gh', 'pr checkout'), ('gh', 'pr co')})
 
 
@@ -877,8 +877,8 @@ def message_texts(c, sc, h):
     opts = MESSAGE_OPTS.get(c.prog, {}).get(c.sub)
     if opts is None:
         return None
-    if c.args is None:
-        return [c.text]
+    if c.args is None:   # unreadable: the raw text, and again with each quote opening a line (`-m "Co-Authored-By: x`)
+        return [c.text, re.sub(r'["\']', '\n', c.text)]
     texts = opt_values(c.args, opts[0]) + list(c.heredocs)
     for f in opt_values(c.args, opts[1]):
         if f == '-':
@@ -1341,8 +1341,9 @@ def changed_paths(top, everything):
 
 def under(top, cwd, path):
     """`path` as written in `cwd`, relative to the checkout's top level. A path the shell expands at run time (`$(...)`,
-    backticks, `$VAR`, `{a,../b}`; the scan blanks a substitution with NUL bytes) can be anything: Unreadable."""
-    if re.search('[${`' + shellscan.FILL + ']', path):
+    backticks, `$VAR`, `{a,../b}`, a leading `~`; the scan blanks a substitution with NUL bytes) or git resolves against
+    the top level (`:/x`, `:(top)x`, `:^x`) can be anything: Unreadable."""
+    if re.search('[${`' + shellscan.FILL + ']', path) or path.startswith(('~', ':')):
         raise Unreadable(path)
     return os.path.relpath(os.path.realpath(os.path.join(cwd, path)), os.path.realpath(top))
 
@@ -1367,9 +1368,12 @@ def own_command(c, seg):
     """True when c is the program of the segment's own words, behind nothing but `VAR=value` assignments and `env`.
     A command found inside `bash -c`, `eval` or a shell's heredoc takes its wrapper's segment, and the wrapper's script
     runs (and may write) before it. Any other prefix wraps it too: `xargs git commit` appends the pathspecs it reads
-    from stdin or a file, and a redirect (`> app.py git commit -am x`) writes before the commit reads the tree."""
+    from stdin or a file, and a redirect (`> app.py git commit -am x`) writes before the commit reads the tree. An
+    assignment runs a substitution in its value first (`X=$(echo x > app.py) git commit`, also `<(...)`, backticks, and
+    those inside quotes, which the scan leaves as text): only a plain value counts."""
     pre = c.pre or []
-    return (all(shellscan.ASSIGN.match(w) or w == 'env' for w in pre) and len(seg.words or []) > len(pre)
+    return (all((shellscan.ASSIGN.match(w) and not any(x in w for x in (shellscan.FILL, '`', '$('))) or w == 'env'
+                for w in pre) and len(seg.words or []) > len(pre)
             and seg.words[:len(pre)] == pre and os.path.basename(seg.words[len(pre)]) == c.prog)
 
 
@@ -1380,9 +1384,12 @@ def alone(c, sc):
     k = next((i for i, s in enumerate(sc.segs) if (s.start, s.end) == (c.start, c.end)), None)
     if k is None or not own_command(c, sc.segs[k]):
         return False
-    adds = {(a.start, a.end) for a in sc.cmds if (a.prog, a.sub) == ('git', 'add')}
-    return all(s.words == [] or (bool(s.words) and (s.words[0] in ('cd', 'pushd') or (s.start, s.end) in adds))
-               for s in sc.segs[:k])
+    by_span = {(s.start, s.end): s for s in sc.segs}
+    adds = {(a.start, a.end) for a in sc.cmds if (a.prog, a.sub) == ('git', 'add') and (a.start, a.end) in by_span
+            and own_command(a, by_span[(a.start, a.end)])}   # a `git add` inside a wrapper has its wrapper's span
+    return all(s.words == [] or (bool(s.words) and (
+        (s.words[0] in ('cd', 'pushd') and not any(re.search('[<>]', w) for w in s.words[1:]))   # `cd .>app.py` is one word
+        or (s.start, s.end) in adds)) for s in sc.segs[:k])
 
 
 def would_commit(c, sc, top):

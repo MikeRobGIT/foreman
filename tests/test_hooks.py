@@ -1120,7 +1120,7 @@ class PushAfterHeadMoveTest(Case):
             self.assertMoved(command)
             self.assertMoved(command, agent='a1')
         for mover in ('gt squash', 'gt absorb', 'gt fold', 'gt restack', 'gt checkout other', 'gt up', 'gt down',
-                      'gt sq', 'gt ab', 'gt co other', 'gt u', 'gt d',   # gt's own aliases: shellscan only reads s, ss, m, c
+                      'gt sq', 'gt ab', 'gt co other', 'gt u', 'gt d', 'gt r',   # gt's aliases: shellscan reads only s ss m c
                       'gh pr checkout 12', 'gh pr co 12', 'git update-ref HEAD abc1234', 'git commit-tree abc1234^{tree}'):
             self.assertMoved(f'{mover} && git push -u origin HEAD')
 
@@ -1717,7 +1717,9 @@ class TrailerGuardTest(Case):
         # an unbalanced quote: the scan can't read it, so shellscan's fallback offers `git merge` as a candidate
         self.fx.start_run()
         for command in ('git merge -m "x\nCo-Authored-By: a origin/main', 'git merge --message "x\nCo-Authored-By: a',
-                        'git fetch && git merge -m "x\nCo-Authored-By: a origin/main'):
+                        'git fetch && git merge -m "x\nCo-Authored-By: a origin/main',
+                        'git merge -m "Co-Authored-By: x',   # the trailer is on the command's own line
+                        'git merge --message "Co-Authored-By: x origin/main', "git merge -m 'Co-Authored-By: x"):
             self.assertIn('starts with "Co-Authored-By"', self.fx.bash(command) or '', command)
         self.assertIsNone(self.fx.bash('git merge -m "Merge main\nall good origin/main'))
 
@@ -2587,9 +2589,9 @@ class SpecGateTest(Case):
         why = self.fx.bash('git commit -m "$msg" $(echo app.py', agent='a1', cwd=self.wt)
         self.assertIn("foreman couldn't tell what this commit would include", why)
 
-    def judged(self, command, **kw):
-        """(the deny reason or None, stderr) of a Bash call run in the worktree."""
-        out, err = self.fx.hook('pretool', self.fx.payload('Bash', {'command': command}, cwd=self.wt, **kw))
+    def judged(self, command, cwd=None, **kw):
+        """(the deny reason or None, stderr) of a Bash call run in the worktree, or in `cwd`."""
+        out, err = self.fx.hook('pretool', self.fx.payload('Bash', {'command': command}, cwd=cwd or self.wt, **kw))
         return (out['hookSpecificOutput']['permissionDecisionReason'] if out else None), err
 
     def test_a_pathspec_expanded_at_run_time_is_unreadable_not_a_crash(self):
@@ -2597,11 +2599,27 @@ class SpecGateTest(Case):
         for cmd in ('git commit -m x $(git diff --name-only)', 'git commit -m x `git diff --name-only`',
                     'git commit -m x "$(git diff --name-only)"', 'git commit -m x $FILES',
                     'git commit -m x docs/superpowers/specs/$NAME', 'git add $(git ls-files -m) && git commit -m x',
-                    'git commit -m x docs/superpowers/specs/{plan.md,../../app.py}'):   # brace expansion: two words
+                    'git commit -m x docs/superpowers/specs/{plan.md,../../app.py}',   # brace expansion: two words
+                    'git commit -m x <(echo app.py)', 'git commit -m x >(cat)',   # only the NUL fill marks these
+                    'git commit -m x "docs/superpowers/specs/`cat list`"'):   # a quoted backtick isn't filled
             why, err = self.judged(cmd, agent='a1')
             self.assertIn("foreman couldn't tell what this commit would include", why or '', cmd)
             self.assertNotIn('foreman hook error', err, cmd)
             self.assertEqual(self.judged(cmd), (None, ''), cmd)   # the main session's identical call
+
+    def test_a_tilde_or_pathspec_magic_is_unreadable_not_a_path_inside_the_spec_dir(self):
+        # from inside the spec dir the lexical path stays in it, but the shell expands `~` and git resolves `:/`,
+        # `:(top)` and `:^` against the top level (a Bash tool's cwd persists, so one earlier `cd` is enough)
+        write(self.spec(), '# spec\n')
+        here = os.path.join(self.wt, 'docs/superpowers/specs')
+        self.assertEqual(self.judged('git commit -m x plan.md', cwd=here, agent='a1'), (None, ''))   # the control
+        for cmd in ('git commit -m x ~/wt/app.py', 'git commit -m x :/app.py', 'git commit -m x ":(top)app.py"',
+                    'git commit -m x :^app.py', 'git add :/app.py && git commit -m x'):
+            with self.subTest(cmd=cmd):
+                why, err = self.judged(cmd, cwd=here, agent='a1')
+                self.assertIn("foreman couldn't tell what this commit would include", why or '', cmd)
+                self.assertNotIn('foreman hook error', err, cmd)
+                self.assertEqual(self.judged(cmd, cwd=here), (None, ''), cmd)   # the main session's identical call
 
     def test_a_substitution_in_a_message_is_not_a_pathspec(self):
         write(self.spec(), '# spec\n')
@@ -2644,6 +2662,32 @@ class SpecGateTest(Case):
         # xargs hands its stdin or file to the commit as pathspecs, and a redirect writes before `-a` reads the tree
         for cmd in ("xargs git commit -m x <<'EOF'\napp.py\nEOF", 'xargs git commit -m x < list.txt',
                     'xargs -a list.txt git commit -m x', '> app.py git commit -am x', 'sudo git commit -m x'):
+            with self.subTest(cmd=cmd):
+                self.assertIn(self.OWN_CALL, self.judged(cmd, agent='a1')[0] or '', cmd)
+                self.assertEqual(self.judged(cmd), (None, ''), cmd)   # the main session's identical call
+
+    def test_a_cd_with_an_attached_redirect_is_not_alone(self):
+        # `cd .>app.py` is one word to shlex, and the hook reads it as a directory: only a directory of that very name
+        # (made by an earlier call) keeps the commit's cwd real, so the commit is judged from a clean tree
+        for name in ('.>app.py', '.2>app.py'):
+            os.makedirs(os.path.join(self.wt, name))
+        for cmd in ('cd .>app.py && git commit -am x', 'pushd .>app.py && git commit -am x',
+                    'cd .2>app.py && git commit -am x'):
+            with self.subTest(cmd=cmd):
+                self.assertIn(self.OWN_CALL, self.judged(cmd, agent='a1')[0] or '', cmd)
+                self.assertEqual(self.judged(cmd), (None, ''), cmd)   # the main session's identical call
+
+    def test_a_writer_dressed_as_a_prefix_is_not_alone(self):
+        # each runs before the commit and can write app.py, yet looks like a `git add`, an assignment or a `cd`
+        for cmd in ("bash -c 'echo x > app.py; git add -u' && git commit -m x",
+                    "sh -c 'echo x > app.py; git add -u' && git commit -m x",
+                    'eval "echo x > app.py; git add -u" && git commit -m x',
+                    "bash <<'EOF'\necho x > app.py; git add -u\nEOF\ngit commit -m x",
+                    'X=$(echo x > app.py) git commit -am y', 'X=`echo x > app.py` git commit -am y',
+                    'X=<(echo x > app.py) git commit -am y', 'X="$(echo x > app.py)" git commit -am y',
+                    'X="`echo x > app.py`" git commit -am y', 'env X=$(echo x > app.py) git commit -am y',
+                    'cd . > app.py && git commit -am x', 'pushd . >app.py && git commit -am x',
+                    'cd . 2>app.py && git commit -am x'):
             with self.subTest(cmd=cmd):
                 self.assertIn(self.OWN_CALL, self.judged(cmd, agent='a1')[0] or '', cmd)
                 self.assertEqual(self.judged(cmd), (None, ''), cmd)   # the main session's identical call
