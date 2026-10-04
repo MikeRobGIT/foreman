@@ -511,6 +511,10 @@ EOF
 chmod +x "$F/codex"
 chain 60 30 200 codex >"$T/chain.md"; PATH=$F:$PATH sv --spec "docs/my specs/d.md" "$fork" "$T/out/cx7.log"
 check "codex: --color is followed by never" bash -c "grep -A1 -x -- --color '$CODEX_ARGS' | grep -qx never"
+rm -f "$MUSE_CALLED" "$MUSE_CALLED.args"
+chain 60 30 1 muse >"$T/chain.md"; PATH=$F:$PATH sv --spec "docs/my specs/d.md" "$fork" "$T/out/mu.log"
+check "muse spec mode lands without inlining a diff (reviewer_max_diff_kb=1 doesn't skip it)" grep -q '^muse' "$T/out/mu.log.reviewer"
+for flag in --disable-write --disable-shell --disable-web-tools; do check "muse spec mode keeps $flag" grep -qx -- "$flag" "$MUSE_CALLED.args"; done
 unset CODEX_ARGS
 cd "$T"
 echo "## templates/spec.md and the W3.5 pre-check"

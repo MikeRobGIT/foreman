@@ -178,10 +178,10 @@ fell through. **Every provider in the chain may receive your diff.**
 
 | adapter | how it runs | read-only by | status |
 |---|---|---|---|
-| `codex` | review: `codex -m M -c model_reasoning_effort=E --sandbox read-only review --base B`; spec: `… --sandbox read-only exec --ephemeral --color never -o <log> -` (prompt on stdin) | sandbox | verified (CLI 0.160.0, gpt-6.1-sol) |
-| `opencode` | `opencode run --pure --format json -m M --variant E` | `OPENCODE_PERMISSION` denies edit/web/task, bash only `git diff/log/show/status` | verified (zai-coding-plan/glm-5.3) |
-| `claude` | `claude -p --permission-mode plan --permission-prompts none --allowedTools Read,Grep,Glob,Bash(git diff/log/show:*)` | plan mode, allowlist | verified (haiku) |
-| `muse` | `muse exec --approval-mode never --disable-write --disable-shell --disable-web-tools --prompt-file …` | only the three `--disable-*` flags: `--approval-mode never` auto-allows every tool call (a probe without them ran a shell command and wrote a file); tests fail if one is dropped | verified (muse-spark-1.3-contributor) |
+| `codex` | review: `codex -m M -c model_reasoning_effort=E --sandbox read-only review --base B`; spec: `… --sandbox read-only exec --ephemeral --color never -o <log> -` (prompt on stdin) | sandbox | verified (CLI 0.160.0, gpt-6.1-sol); spec mode verified 2026-10-04 |
+| `opencode` | `opencode run --pure --format json -m M --variant E` | `OPENCODE_PERMISSION` denies edit/web/task, bash only `git diff/log/show/status` | verified (zai-coding-plan/glm-5.3); spec mode verified 2026-10-04 |
+| `claude` | `claude -p --permission-mode plan --permission-prompts none --allowedTools Read,Grep,Glob,Bash(git diff/log/show:*)` | plan mode, allowlist | verified (haiku); spec mode verified 2026-10-04 |
+| `muse` | `muse exec --approval-mode never --disable-write --disable-shell --disable-web-tools --prompt-file …` | only the three `--disable-*` flags: `--approval-mode never` auto-allows every tool call (a probe without them ran a shell command and wrote a file); tests fail if one is dropped | verified (muse-spark-1.3-contributor); spec mode verified 2026-10-04 (reads the repo under --disable-shell) |
 | `prime-agent` | `prime-agent -p --no-tools --no-session --offline -nc` (prompt + diff on stdin) | no tools | verified (default model) |
 | `agy` | `agy -p … --mode plan --sandbox --output-format json` | diff in prompt, plan mode | unverified (not signed in) |
 | `pi` | `pi -p --no-session --tools read,grep,find,ls` | tool allowlist | unverified (not installed) |
@@ -194,7 +194,7 @@ diff. No adapter runs with a bypass, yolo or skip-permissions flag.
 
 The spec phase runs `scripts/review.sh --spec <spec path> <fork base> <log>`. It uses
 `templates/spec-review-prompt.md`, and only adapters that read the repo themselves (marked
-`# foreman: reads-repo`): codex (`codex exec`), claude, opencode (its `plan` agent), and `custom` when its
+`# foreman: reads-repo`): codex (`codex exec`), claude, opencode (its `plan` agent), muse (its read tools under `--disable-shell`), and `custom` when its
 command uses both `{prompt_file}` and `{base}`. Every other adapter falls through. If no adapter is left, the
 orchestrator runs two Claude reviewers instead. On TERM, review.sh kills the running adapter's process group and
 exits 143. `<log>.pid` holds its pid while it runs.
