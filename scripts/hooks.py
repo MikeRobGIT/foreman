@@ -592,10 +592,13 @@ def is_push_trigger(c):
     return (c.prog, c.sub) in (('git', 'push'), ('gh', 'pr create'), ('gh', 'pr new'), ('gt', 'submit'))
 
 
-# commands that move HEAD; `git checkout -- <path>` is an accepted false deny
+# commands that move HEAD; `git checkout -- <path>` is an accepted false deny. shellscan reads only gt's s, ss, m and c
+# aliases, so the others (co, u, d, sq, ab) and gh's `pr co` are listed as spelled
 HEAD_MOVERS = ({('git', s) for s in ('commit', 'merge', 'pull', 'rebase', 'cherry-pick', 'revert', 'am', 'reset',
-                                     'checkout', 'switch')}
-               | {('gt', s) for s in ('create', 'modify', 'sync')})
+                                     'checkout', 'switch', 'update-ref', 'commit-tree')}
+               | {('gt', s) for s in ('create', 'modify', 'sync', 'squash', 'sq', 'absorb', 'ab', 'fold', 'restack',
+                                      'checkout', 'co', 'up', 'u', 'down', 'd')}
+               | {('gh', 'pr checkout'), ('gh', 'pr co')})
 
 
 def moved_reason(repo):

@@ -1115,6 +1115,21 @@ class PushAfterHeadMoveTest(Case):
                       'gt sync', "bash -c 'git commit -am x'"):
             self.assertMoved(f'{mover} && git push -u origin HEAD')
 
+    def test_gt_gh_and_plumbing_commands_that_move_head_count(self):
+        for command in ('gt squash && gt submit', 'gh pr checkout 12 && git push', 'git update-ref HEAD x && git push'):
+            self.assertMoved(command)
+            self.assertMoved(command, agent='a1')
+        for mover in ('gt squash', 'gt absorb', 'gt fold', 'gt restack', 'gt checkout other', 'gt up', 'gt down',
+                      'gt sq', 'gt ab', 'gt co other', 'gt u', 'gt d',   # gt's own aliases: shellscan only reads s, ss, m, c
+                      'gh pr checkout 12', 'gh pr co 12', 'git update-ref HEAD abc1234', 'git commit-tree abc1234^{tree}'):
+            self.assertMoved(f'{mover} && git push -u origin HEAD')
+
+    def test_commands_that_leave_head_alone_still_push(self):
+        for command in ('gt log && gt submit', 'gt trunk && git push', 'gh pr view 12 && git push',
+                        'gh pr list && git push', 'git rev-parse HEAD && git push', 'git symbolic-ref HEAD && git push'):
+            self.assertIsNone(self.fx.bash(command), command)
+            self.assertIsNone(self.fx.bash(command, agent='a1'), command)
+
     def test_a_call_that_keeps_head_still_pushes(self):
         for command in ('git push -u origin HEAD && gh pr create --draft --fill', 'git fetch && git push',
                         'git status && git push', 'git push', 'git stash && git push', 'git push && git commit -am x'):
