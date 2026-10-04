@@ -2640,6 +2640,21 @@ class SpecGateTest(Case):
             self.assertIn(self.OWN_CALL, self.judged(cmd, agent='a1')[0] or '', cmd)
             self.assertEqual(self.judged(cmd), (None, ''), cmd)   # the main session's identical call
 
+    def test_a_commit_behind_a_prefix_command_is_not_alone(self):
+        # xargs hands its stdin or file to the commit as pathspecs, and a redirect writes before `-a` reads the tree
+        for cmd in ("xargs git commit -m x <<'EOF'\napp.py\nEOF", 'xargs git commit -m x < list.txt',
+                    'xargs -a list.txt git commit -m x', '> app.py git commit -am x', 'sudo git commit -m x'):
+            with self.subTest(cmd=cmd):
+                self.assertIn(self.OWN_CALL, self.judged(cmd, agent='a1')[0] or '', cmd)
+                self.assertEqual(self.judged(cmd), (None, ''), cmd)   # the main session's identical call
+
+    def test_variable_assignments_and_env_may_come_before_the_commit(self):
+        write(self.spec(), '# spec\n')
+        git(self.wt, 'add', self.spec())
+        for cmd in ('GIT_AUTHOR_NAME=x git commit -m x', 'GIT_AUTHOR_NAME=x GIT_AUTHOR_EMAIL=x@y git commit -m x',
+                    'env GIT_AUTHOR_NAME=x git commit -m x'):
+            self.assertEqual(self.judged(cmd, agent='a1'), (None, ''), cmd)
+
     def test_an_attached_gt_message_is_not_a_flag_cluster(self):
         # `-mupdate` holds an `a` and a `u`, but it is a message: it must not read as `-a` or `-u`
         self.commit_spec()

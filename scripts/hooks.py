@@ -1364,11 +1364,13 @@ def commit_words(args, value_opts=GIT_COMMIT_VALUE_OPTS):
 
 
 def own_command(c, seg):
-    """True when c is the program of the segment's own words. A command found inside `bash -c`, `eval` or a shell's
-    heredoc takes its wrapper's segment, and the wrapper's script runs (and may write) before it."""
+    """True when c is the program of the segment's own words, behind nothing but `VAR=value` assignments and `env`.
+    A command found inside `bash -c`, `eval` or a shell's heredoc takes its wrapper's segment, and the wrapper's script
+    runs (and may write) before it. Any other prefix wraps it too: `xargs git commit` appends the pathspecs it reads
+    from stdin or a file, and a redirect (`> app.py git commit -am x`) writes before the commit reads the tree."""
     pre = c.pre or []
-    return (len(seg.words or []) > len(pre) and seg.words[:len(pre)] == pre
-            and os.path.basename(seg.words[len(pre)]) == c.prog)
+    return (all(shellscan.ASSIGN.match(w) or w == 'env' for w in pre) and len(seg.words or []) > len(pre)
+            and seg.words[:len(pre)] == pre and os.path.basename(seg.words[len(pre)]) == c.prog)
 
 
 def alone(c, sc):
