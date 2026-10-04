@@ -585,8 +585,10 @@ EOF
 appears_before() { awk -v a="$2" -v b="$3" 'index($0, a) && !x {x=NR} index($0, b) && !y {y=NR} END {exit !(x && y && x < y)}' "$1"; }
 check "W3.5 comes before W3.6" appears_before "$sk" '- **W3.5 Spec review**' '- **W3.6 Release.**'
 check "W3.6 comes before W4" appears_before "$sk" '- **W3.6 Release.**' '- **W4 Each report'
-check "the spec phase is inside the Worker contract" appears_before "$sk" '### Worker contract' '**Step 2 is the spec phase**'
-check "...and ends before the Backlog UI section" appears_before "$sk" '**Step 2 is the spec phase**' '## Backlog UI'
+check "the Worker contract points at the spec phase" appears_before "$sk" '### Worker contract' '**Step 2 is the spec phase**'
+check "...before the Worker spec phase section" appears_before "$sk" '**Step 2 is the spec phase**' '### Worker spec phase'
+check "...which ends before the Hooks section" appears_before "$sk" '### Worker spec phase' '## Hooks'
+check "...and the Hooks section comes before the Backlog UI section" appears_before "$sk" '## Hooks' '## Backlog UI'
 check "plugin version 0.5.0" grep -qF '"version": "0.5.0"' "$root/.claude-plugin/plugin.json"
 
 echo "## backlog.py + ui.py"
