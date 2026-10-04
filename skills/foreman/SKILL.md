@@ -372,6 +372,14 @@ W1-W6 to keep them apart from steps 0-12; W6's stop conditions replace the auton
   gate left behind. It goes through the same checks: fix real contradictions, and after one round defer
   docs nits (a Critical/Important finding still blocks). Then run `python3 $FOREMAN/hooks.py forget <batch>` for each
   of this wave's batches.
+  - **Parked batches.** Write one report per parked batch,
+    `{"pr": 0, "append": [{"id": <row>, "note": "spec parked (<reason>): <spec path> — <open findings or question>"}]}`,
+    and feed it to `bookkeeping_tool` with the others. `<reason>` is the park reason (`open question` for that
+    case), and `<spec path>` is `no spec` when nothing was copied. Notes are one line, with any ` | ` escaped as
+    `\|`, and never quote a placeholder id like `<prefix>-NEW-a`: bk.py refuses one with no new row. The
+    bookkeeping PR also commits each copied spec from `foreman/parked/<batch>/` into `{{design_spec_dir}}`, with
+    a `Status: parked — <reason>` line under its title. Then delete the batch's local branch and
+    `foreman/parked/<batch>/`.
 - **W6 Next wave or stop.** The next wave may start once main is green after W5, while the bookkeeping PR is
   still in review, if: its pool excludes every row that PR files or closes, each worker's briefing carries that
   PR's rule notes inline (the rules text is not on main yet), and the next bookkeeping PR is opened only after
@@ -379,9 +387,16 @@ W1-W6 to keep them apart from steps 0-12; W6's stop conditions replace the auton
   pool is empty, `parallel_max_waves` is reached, the user says stop, main is red, CI is down, or half a
   wave failed. A worker with no report and no PR activity for `parallel_worker_timeout` minutes (not
   counting queued CI) is stuck: run `python3 $FOREMAN/hooks.py stopping <batch>`, then stop it (TaskStop), leave its
-  worktree and PR alone, keep its rows out of the next pool, report it, and carry on. When the run stops, run
+  worktree and PR alone, keep its rows out of the next pool, report it, and carry on. A stuck spec-phase worker is parked instead (W3.6, "worker stuck";
+  parking runs the same `stopping` first). A worker waiting after `SPEC READY`, or awaiting release, isn't silent:
+  its clock restarts at every findings or release message. Rows parked during this invocation stay out of later
+  waves' pools (W2's parked-row rule covers later invocations). When the run stops, run
   `python3 $FOREMAN/hooks.py run-end` last, and only after every worker has reported or been stopped (`stopping`,
   then TaskStop): ending the run while a background worker still runs turns off the run-only hooks that guard it.
+  - **Run report.** At the stop, the report includes a spec-phase table, one row per batch: spec wall-clock,
+    rounds, the reviewer that landed (or the fall-through, or "no cross-model review"), the reviewer model, park
+    and reason, and the review rounds after the PR opened. The last column is the measure: follow-up rounds per
+    PR after review.
 
 ### Worker contract
 

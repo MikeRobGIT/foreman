@@ -544,6 +544,15 @@ printf -- '---\nspec_review_rounds: 2\n---\n' >"$T/sr.md"
 check "a config value wins over the default" test "$(FOREMAN_CONFIG=$T/sr.md python3 "$root/scripts/cfg.py" "$T" spec_review_rounds)" = 2
 check "template: the spec-phase keys, once each, with their defaults" test "$(grep -cE '^(design_spec_dir: docs/superpowers/specs|spec_review_rounds: 3|spec_phase_timeout: 60) ' "$root/templates/foreman.config.md")" = 3
 
+echo "## bk.py: a parked batch's append-only report"
+echo '{"pr": 0, "spec": "docs/superpowers/specs/2026-10-02-FM-2-design.md", "append": [{"id": "FM-2", "note": "spec parked (open question): docs/superpowers/specs/2026-10-02-FM-2-design.md — which role owns the setting?"}]}' >"$T/park.json"
+python3 "$root/scripts/bk.py" "$T/bk" "$T/park.json" >"$T/park.out" 2>&1
+check "bk.py accepts a pr: 0 append-only report (and ignores \"spec\")" test $? = 0
+check "...the note lands on FM-2, which stays ready" grep -qF '| FM-2 | second | low | ready | also spec parked (open question): docs/superpowers/specs/2026-10-02-FM-2-design.md — which role owns the setting? | me |' "$T/bk/.claude/backlog.md"
+echo '{"pr": 0, "append": [{"id": "FM-2", "note": "spec parked (open question): see FM-NEW-a"}]}' >"$T/park-bad.json"
+python3 "$root/scripts/bk.py" "$T/bk" "$T/park-bad.json" >/dev/null 2>&1
+check "bk.py refuses a parked note that quotes a placeholder id" test $? = 1
+
 echo "## backlog.py + ui.py"
 check "test_backlog.py" python3 "$root/tests/test_backlog.py"
 check "test_ui_api.py" python3 "$root/tests/test_ui_api.py"
