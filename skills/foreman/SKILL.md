@@ -150,6 +150,101 @@ W1-W6 to keep them apart from steps 0-12; W6's stop conditions replace the auton
   - **State table** columns: batch, rows, owned files, worktree, branch, spec path, fork base, round, pinned SHA,
     released SHA, PR, verified SHA, the clock's timestamps and timer task ids (W3.5), and status (`spec`,
     `review <r>`, `passed`, `parked: <reason>`, `released`, `PR #<n>`).
+- **W3.5 Spec review**, for each batch on its own as its `SPEC READY` arrives (other batches keep moving).
+  `SPEC READY` is the first line of the worker's last message that starts with `SPEC READY ` (a preface line
+  before it is fine): `SPEC READY <worktree> <branch> <spec path> <sha>`. Read it from the right: the SHA is the
+  last word; the spec path starts with `{{design_spec_dir}}/`; the branch is the word before it; the worktree is
+  everything before the branch. At the batch's first `SPEC READY`, record its **fork base**:
+  `git -C <worktree> merge-base <sha> origin/<default>` (`<default>` is `origin/HEAD`'s branch, else `main`).
+  1. **Pre-checks.** They spend no round, but bounces are capped at 2: a third parks the batch ("spec incomplete
+     after 2 bounces"). A bounce sends the problems in one `SendMessage` and returns the worker to work.
+     - The worktree and the commit exist (`git -C <worktree> cat-file -e <sha>^{commit}`), the worktree's HEAD
+       is that commit (`git -C <worktree> rev-parse HEAD`), and `git -C <worktree> status --porcelain --
+       {{design_spec_dir}}` prints nothing: the reviewers read the working tree, so it must be the pinned SHA.
+     - The spec has every template section and no `⟦FILL` marker. Run both commands in the worktree; any output
+       is a bounce:
+       `grep -n '⟦FILL' <spec path>`
+       `grep '^## ' ${CLAUDE_PLUGIN_ROOT}/templates/spec.md | while IFS= read -r h; do grep -qxF "$h" <spec path> || echo "missing section: $h"; done`
+     - `git -C <worktree> diff --name-only <fork base> <sha>` lists only paths under `{{design_spec_dir}}`.
+     - Every `Scope request:` line in the Implementation outline is answered. When no other batch owns the file,
+       extend the batch's owned files and say so in your next message ("owned files now also include <file>").
+       Otherwise re-batch, or park ("scope conflict").
+  2. **A round is pinned to one SHA.** Don't resume the worker while its round runs, and discard any result for
+     an older SHA. Round r:
+     a. **The cross-model chain**, in the background (Bash `run_in_background`). Write `$FOREMAN`, `<scratch>`
+        and every other path out literally and absolute, with nothing else in the command (hooks piece 8
+        auto-allows exactly this shape; anything more prompts, and a background run stalls on the prompt):
+        `(cd <worktree> && $FOREMAN/review.sh --spec <spec path> <fork base> <scratch>/<batch>-spec-r<r>.log)`
+        The base is always the fork base, so every round reviews the whole current spec. While the chain runs,
+        `<log>.pid` holds its pid.
+     b. **When the chain exits** (landed or not), dispatch the **read-only reviewer** in the background: `Agent`
+        with `subagent_type: Explore` and `model: opus`. Give it the spec path, the rows, the `{{rules_glob}}`
+        files, the worktree path, the chain's log when one landed (exit 0; `<log>.reviewer` names it), and round
+        r-1's Critical and Important findings with the worker's responses. Its job, in this order:
+        1. Before reading the spec's list, derive its own list of symbols, columns, statuses and writers from
+           Rows and Change, `git grep` them, and diff its list against "Callers and writers checked".
+        2. Verify the spec's other claims against the code at each cited `path:line`.
+        3. Check the outline against the owned files, the tests against the change, and the open questions.
+        4. Rule on each chain finding (confirmed, or rejected with evidence) and on each response to a previous
+           finding (resolved or not).
+        5. Return ONE merged verdict: Critical, Important and Minor findings, each with section, evidence and
+           fix, then `Verdict: pass | revise`.
+     c. **When the chain is exhausted** (exit 1; exit 2, a hard error; or killed at a session cap), dispatch two
+        read-only reviewers in parallel with (b)'s prompt and no chain log: the opus one, and a second `Explore`
+        with `model: sonnet`. Combine their verdicts into one findings list, duplicates removed by section and
+        evidence; that list goes to the worker and is what round r+1 rules on. Mark the batch "no cross-model
+        review" in the run report: the Agent tool offers only Claude models.
+  3. **Verdict.**
+     - **Pass:** no Critical or Important finding in the merged verdict (case c: in either verdict). Before
+       passing, grep-verify the evidence for every chain P1 or P2 the reviewer rejected; a rejection you can't
+       confirm turns the pass into a revise. Status `passed`, then W3.6.
+     - **Revise:** spot-check the findings (the reviewer already verified them), then send them in ONE
+       `SendMessage`, with the Minor ones marked optional. The next `SPEC READY` starts round r+1.
+     - **Park** (W3.6): a bound below is exceeded, or an open question the batch depends on needs a human
+       decision (reason `open question`). Open questions outside the batch's scope don't block a pass: they
+       become row notes in the final report (do the decidable part).
+  4. **Reviewer failures.** A read-only reviewer that fails, or isn't back in 20 minutes, is re-dispatched once;
+     stop the superseded one (TaskStop) and ignore any late verdict from it. A round that still produces no
+     verdict doesn't count, and a second such round parks the batch ("review could not run"). At the subagent
+     concurrency limit ("Concurrent subagent limit reached"), queue the dispatch for the next wake: that is not
+     a failure.
+  5. **A stop without `SPEC READY`** (a question, a context limit, an error): resume the worker once with "finish
+     the spec; questions go under Open questions; end with `SPEC READY` as the first line". It counts as a
+     bounce. A second such stop parks the batch ("spec incomplete").
+  6. **Bounds.** A batch in the spec phase ends `released` or `parked`, never anything else.
+
+     | bound | default | when exceeded |
+     |---|---|---|
+     | `spec_review_rounds` | 3 | rounds without a pass: park ("no pass in <n> rounds") |
+     | `spec_phase_timeout` | 60 minutes of worker time (the clock) | park ("spec phase timed out") |
+     | one round | the chain: its adapters' own timeouts (exit 2 counts as exhausted); the read-only reviewer: 20 min | re-dispatch once, then the round doesn't count |
+     | pre-check bounces | 2 | park ("spec incomplete after 2 bounces") |
+     | rounds that don't count | 1 | park ("review could not run") |
+     | W6 silence | `parallel_worker_timeout` | park ("worker stuck"); restarts at every findings or release message |
+     | manual checkpoint | not selected | park ("not released by the human") |
+     | comment round (W3.6) | one per batch, always allowed, exempt from `spec_review_rounds` and `spec_phase_timeout` | failing it parks the batch |
+
+  7. **The clock.** Only notifications wake you, so the bounds run on timers.
+     - **Timestamps**, epoch seconds from `date +%s`, in the state table. Every message that returns the worker
+       to work stamps `sent_i`: launch (`sent_0`), findings, a bounce, a resume after a stop without
+       `SPEC READY`, a comment round. Every `SPEC READY` stamps `spec_ready_i`; a stop without one stamps
+       `stopped_i`.
+     - **Worker time** is the sum of every `spec_ready_i − sent_i` (or `stopped_i − sent_i`), plus
+       `now − last sent_i` while the worker is working. Time between a stop and your resume never counts, and
+       comment-round intervals are left out (their own timer is `parallel_worker_timeout`).
+     - **Timers.** For every return to work, start `sleep <remaining worker time in seconds>` with Bash
+       `run_in_background`; one `sleep 1200` per running reviewer; one `sleep <parallel_worker_timeout × 60>` per
+       comment round. Record each timer's task id. Stop the superseded timer (TaskStop) at `SPEC READY` and on
+       every re-arm.
+     - **On every wake**, recompute every bound for every batch from the timestamps and act on the exceeded
+       ones. Then re-arm a timer for each working batch, running reviewer and comment round whose timer has
+       ended. A stray wake is harmless.
+     - **Session caps.** Where background commands are capped (`-p`, SDK and cloud sessions: 30 minutes by
+       default, 2 hours at most), every timer is `sleep min(remaining, cap − 60)`; re-arming covers the rest.
+       Never use `timeout` (macOS lacks it). A chain killed at the cap counts as exhausted.
+  8. **Reviewer model.** Before the first dispatch, check whether the project or the user defines its own
+     `Explore` agent (`grep -l '^name: Explore' .claude/agents/*.md ~/.claude/agents/*.md`). One that does keeps
+     its own `model:`; record that model, not `opus`, as the reviewer in the run report.
 - **W4 Each report, as it arrives** (a report is a claim; re-read everything):
   1. **Verify on the head SHA.** The latest run of every `required_ci` check on that SHA is green (list
      check runs with pagination); every `review_bots` entry has reviewed that SHA (the config's definition,
