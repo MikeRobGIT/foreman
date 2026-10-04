@@ -274,7 +274,7 @@ W1-W6 to keep them apart from steps 0-12; W6's stop conditions replace the auton
       Batches that pass it come back together at ONE follow-up checkpoint, which offers only release or park.
       A batch that fails it is parked.
     - **Neither:** parked ("not released by the human").
-  - **Parking** (a bound, an open question, the checkpoint, W6's stuck spec-phase worker):
+  - **Parking** (a bound, an open question, the checkpoint, W6's stuck worker whose batch isn't released yet):
     1. Kill the round's chain and reviewer if they're running. Read the pid in `<log>.pid` and run
        `kill -TERM <pid>`: review.sh then kills its running adapter's process group, removes `<log>.pid` and
        exits. Wait for `<log>.pid` to disappear (check every 2 s, at most 30 s; if it is still there, carry on
@@ -389,8 +389,8 @@ W1-W6 to keep them apart from steps 0-12; W6's stop conditions replace the auton
   pool is empty, `parallel_max_waves` is reached, the user says stop, main is red, CI is down, or half a
   wave failed. A worker with no report and no PR activity for `parallel_worker_timeout` minutes (not
   counting queued CI) is stuck: run `python3 $FOREMAN/hooks.py stopping <batch>`, then stop it (TaskStop), leave its
-  worktree and PR alone, keep its rows out of the next pool, report it, and carry on. A stuck spec-phase worker is parked instead (W3.6, "worker stuck";
-  parking runs the same `stopping` first). A worker waiting after `SPEC READY`, or awaiting release, isn't silent:
+  worktree and PR alone, keep its rows out of the next pool, report it, and carry on. A stuck worker whose batch isn't released yet (status `spec`, `review <r>` or `passed`) is parked instead (W3.6, "worker stuck";
+  parking runs the same `stopping` first); a released one gets the rule above. A worker waiting after `SPEC READY`, or awaiting release, isn't silent:
   its clock restarts at every findings or release message. Rows parked during this invocation stay out of later
   waves' pools (W2's parked-row rule covers later invocations). When the run stops, run
   `python3 $FOREMAN/hooks.py run-end` last, and only after every worker has reported or been stopped (`stopping`,
