@@ -58,9 +58,10 @@ Tokens may be combined in any order (e.g. `IB-03 loop`; ids use the config's `id
   mode** (`loop`/`--auto-merge` token) self-merge is allowed ONLY on a fully-green pass — `{{gate}}` +
   matched `{{extra_gates}}` green, `{{required_ci}}` + all `{{review_bots}}` green with **no unresolved
   Critical/Important** finding after step-8 triage, step-9 browser-verify passed (or a justified
-  zero-surface skip), and `risk != high`. Anything short of that STOPs and notifies. Never merge on yellow.
+  zero-surface skip), in parallel mode a W4.2b verdict on the merge SHA with no Critical or Important finding and no deviation ruled unacceptable, and `risk != high`. Anything short of that STOPs and notifies. Never merge on yellow.
 - **Wait for ALL configured review bots + CI before addressing** (step 7).
 - **Browser-verify EVERY change with an app surface, in the claude-in-chrome browser** (step 9) — the skip is a narrow, explicitly-justified exception (zero application surface only). Playwright and "the code looks right" are never substitutes for the live check.
+- **Parallel mode: no code before the batch's spec is released** (W3.5, W3.6). The hooks' spec gate (piece 10) enforces it; without the hooks, W3.5's diff pre-check is the only guard.
 - **Behavior-preserving work changes ZERO behavior** — the golden master staying green is the proof.
 - **Honor every project-specific guardrail** declared in the config's notes / the project rules (e.g. "no external-platform mutations without go-ahead").
 - Gating is executed by you in steps 7–11. Do **not** wire any Stop hook to gate (known false positives).
@@ -591,7 +592,9 @@ Read `.claude/foreman.config.md`, or the legacy `.claude/improve-next.config.md`
 | `gate_exempt` | gitignore-style paths a push may change without a gate receipt; `backlog_path` and `rules_glob` always are | `docs/**`, `**/*.md` |
 | `worker_agent_types` | subagent types the worker briefing and report check apply to | `general-purpose`, `workflow-subagent` |
 | `hooks_disabled` | hook ids to turn off in this repo (see **Hooks**) | none |
-| `design_spec_dir` | where a spec-phase worker may edit and commit before its spec is released | `docs/superpowers/specs` |
+| `design_spec_dir` | where parallel-mode batch specs are committed (W3.5), and the only place a spec-phase worker may edit or commit before its spec is released (`spec_gate`); not `e2e.spec_dir` | `docs/superpowers/specs` |
+| `spec_review_rounds` | spec review rounds without a pass before a batch is parked (W3.5) | 3 |
+| `spec_phase_timeout` | minutes of worker time in the spec phase before a batch is parked (W3.5's clock) | 60 |
 | `status_pane` | the wave status band above the prompt during a run | `true` |
 
 ### Merge-tool command mapping (referenced by steps 0, 5, 7, 10, 12)
