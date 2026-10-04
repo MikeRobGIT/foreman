@@ -311,7 +311,8 @@ W1-W6 to keep them apart from steps 0-12; W6's stop conditions replace the auton
        spec file is allowed.
   2b. **Spec reviewer** (spec-phase batches). Dispatch a read-only reviewer in the background (`Agent`,
      `subagent_type: Explore`, `model: opus`; W3.5's reviewer-model note applies) on the SHA W4.1 verified,
-     with a 20-minute reviewer timer (W3.5's clock). Give it the spec, the PR diff and the deviations section.
+     with a 20-minute reviewer timer (W3.5's clock). Give it the spec, the PR diff, the deviations section, the
+     report's list of gate-changed files, and every other batch's owned files (from the state table).
      It does four things:
      - checks the code against the spec;
      - reports deviations the spec doesn't list;
