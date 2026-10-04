@@ -697,6 +697,58 @@ class PretoolTest(InProcess):
         self.assertIn('foreman hook error: OSError: read-only', err)
 
 
+def early_deny(h, *args):
+    h.deny('first says no')
+
+
+def crash(h, *args):
+    raise RuntimeError('boom')
+
+
+def late_deny(h, *args):
+    h.deny('last says no')
+
+
+class PieceIsolationTest(InProcess):
+    """One piece's crash costs only its own decision: the denies the other pieces recorded, before or after it, still
+    print (they used to be dropped with it, by main's fail-open handler)."""
+
+    def run_pretool(self, tool, tool_input):
+        out, err = io.StringIO(), io.StringIO()
+        with mock.patch.object(sys, 'stdin', io.StringIO(json.dumps(self.fx.payload(tool, tool_input)))), \
+                contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            hooks.main(['hooks.py', 'pretool'])
+        return (json.loads(out.getvalue())['hookSpecificOutput']['permissionDecisionReason']
+                if out.getvalue() else None), err.getvalue()
+
+    def test_a_crashing_bash_piece_keeps_the_denies_of_the_pieces_around_it(self):
+        with mock.patch.dict(hooks.BASH_PIECES, {97: early_deny, 98: crash, 99: late_deny}):
+            why, err = self.run_pretool('Bash', {'command': 'git status'})
+        self.assertEqual(why, 'foreman: first says no; last says no')
+        self.assertIn('foreman hook error: crash: RuntimeError: boom\n', err)
+
+    def test_a_crashing_edit_piece_keeps_the_denies_of_the_pieces_around_it(self):
+        with mock.patch.dict(hooks.EDIT_PIECES, {97: early_deny, 98: crash, 99: late_deny}):
+            why, err = self.run_pretool('Edit', {'file_path': os.path.join(self.fx.work, 'app.py')})
+        self.assertEqual(why, 'foreman: first says no; last says no')
+        self.assertIn('foreman hook error: crash: RuntimeError: boom\n', err)
+
+    def test_a_crash_before_every_other_piece_drops_nothing_either(self):
+        with mock.patch.dict(hooks.BASH_PIECES, {-1: crash}):
+            why, err = self.run_pretool('Bash', {'command': 'git commit -m "x\nCo-Authored-By: a"'})
+        self.assertIn('starts with "Co-Authored-By"', why)   # piece 4, a real piece that runs after the crash
+        self.assertIn('foreman hook error: crash: RuntimeError: boom', err)
+
+    def test_a_crashing_real_piece_costs_only_its_own_decision(self):
+        with mock.patch.dict(hooks.BASH_PIECES, {1: crash}):   # piece 1, the gate before a push
+            why, _ = self.run_pretool('Bash', {'command': 'git commit -m "x\nCo-Authored-By: a"'})
+        self.assertIn('starts with "Co-Authored-By"', why)
+
+    def test_no_crash_no_note(self):
+        why, err = self.run_pretool('Bash', {'command': 'git status'})
+        self.assertEqual((why, err), (None, ''))
+
+
 def head_tree(cwd):
     return git(cwd, 'rev-parse', 'HEAD^{tree}').strip()
 

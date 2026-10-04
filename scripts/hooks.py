@@ -12,8 +12,9 @@ record lands where the hooks look and is bound to this session:
   hooks.py forget <batch>          drop the batch's hook state (W5)
   exit 0 = recorded, 1 = the record is missing, 3 = hooks inactive (no fresh run marker); run-end always 0
 
-Every hook fails open on its own errors (stderr note, exit 0). Three cases fail closed: an undeterminable push diff,
-a push or merge command the scan can't read, and a spec-phase commit whose contents can't be told.
+Every hook fails open on its own errors (stderr note, exit 0), and so does each piece of pretool: one piece's crash
+costs only its own decision. Three cases fail closed: an undeterminable push diff, a push or merge command the scan
+can't read, and a spec-phase commit whose contents can't be told.
 """
 import json
 import os
@@ -1430,6 +1431,15 @@ EDIT_PIECES[10] = spec_gate_edit
 
 # ---- pretool / posttool ---------------------------------------------------------------------------
 
+def run_piece(piece, *args):
+    """One piece's call, isolated: a crash costs only that piece's decision (a stderr note), not the denies the other
+    pieces recorded or are yet to record, which main's fail-open handler would drop with it."""
+    try:
+        piece(*args)
+    except Exception as e:
+        print(f'foreman hook error: {piece.__name__}: {type(e).__name__}: {e}', file=sys.stderr)
+
+
 def pretool(h):
     tool = h.inp.get('tool_name')
     ti = h.inp.get('tool_input') or {}
@@ -1443,7 +1453,7 @@ def pretool(h):
             path = os.path.join(h.cwd, path)
             repo = repo_at(path)
             for k in sorted(EDIT_PIECES):
-                EDIT_PIECES[k](h, repo, path)
+                run_piece(EDIT_PIECES[k], h, repo, path)
     briefing_text = None
     if not h.denies:   # a denied call carries no briefing: it may not be shown, and `briefed` would be spent
         try:
@@ -1473,7 +1483,7 @@ def pretool_bash(h, command):
             pretool_control(h, repo, *call)
         return
     for k in sorted(BASH_PIECES):
-        BASH_PIECES[k](h, sc)
+        run_piece(BASH_PIECES[k], h, sc)
 
 
 def posttool(h):
