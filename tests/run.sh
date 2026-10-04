@@ -567,16 +567,20 @@ SPEC READY <absolute worktree path> <branch> <spec path> <sha>
 foreman-worker: <batch> spec-phase
 Parallel mode: no code before the batch's spec is released
 in parallel mode a W4.2b verdict on the merge SHA
-## Deviations after release
+only in an appended `## Deviations after release`
+up to its `## Deviations after release` heading
+perl -0pe 's/\n## Deviations after release\n.*//s; s/\s+\z/\n/'
 superpowers:brainstorming
-python3 $FOREMAN/hooks.py release <batch> <sha>
+  1. `python3 $FOREMAN/hooks.py release <batch> <sha>`. The hooks record it
 $FOREMAN/review.sh --spec <spec path> <fork base>
 grep -n '⟦FILL' <spec path>
 grep '^## ' ${CLAUDE_PLUGIN_ROOT}/templates/spec.md | while IFS= read -r h; do grep -qxF "$h" <spec path> || echo "missing section: $h"; done
 spec parked (<reason>): <spec path>
 | `design_spec_dir` |
-| `spec_review_rounds` |
-| `spec_phase_timeout` |
+| `spec_review_rounds` | 3 | rounds without a pass
+| `spec_phase_timeout` | 60 minutes of worker time (the clock)
+| `spec_review_rounds` | spec review rounds without a pass
+| `spec_phase_timeout` | minutes of worker time in the spec phase
 EOF
 appears_before() { awk -v a="$2" -v b="$3" 'index($0, a) && !x {x=NR} index($0, b) && !y {y=NR} END {exit !(x && y && x < y)}' "$1"; }
 check "W3.5 comes before W3.6" appears_before "$sk" '- **W3.5 Spec review**' '- **W3.6 Release.**'
