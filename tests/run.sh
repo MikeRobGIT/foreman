@@ -553,6 +553,38 @@ echo '{"pr": 0, "append": [{"id": "FM-2", "note": "spec parked (open question): 
 python3 "$root/scripts/bk.py" "$T/bk" "$T/park-bad.json" >/dev/null 2>&1
 check "bk.py refuses a parked note that quotes a placeholder id" test $? = 1
 
+echo "## SKILL.md: spec phase"
+sk=$root/skills/foreman/SKILL.md
+check "SKILL.md is the foreman skill (guards the negative check below)" grep -qx 'name: foreman' "$sk"
+check "'skip brainstorming' is gone" bash -c "! grep -q 'skip brainstorming' '$sk'"
+check "...while the Worker contract is still there" grep -qx '### Worker contract' "$sk"
+while IFS= read -r s; do check "SKILL.md has: $s" grep -qF -- "$s" "$sk"; done <<'EOF'
+- **W3.5 Spec review**
+- **W3.6 Release.**
+  2b. **Spec reviewer**
+### Worker spec phase
+SPEC READY <absolute worktree path> <branch> <spec path> <sha>
+foreman-worker: <batch> spec-phase
+Parallel mode: no code before the batch's spec is released
+in parallel mode a W4.2b verdict on the merge SHA
+## Deviations after release
+superpowers:brainstorming
+python3 $FOREMAN/hooks.py release <batch> <sha>
+$FOREMAN/review.sh --spec <spec path> <fork base>
+grep -n '⟦FILL' <spec path>
+grep '^## ' ${CLAUDE_PLUGIN_ROOT}/templates/spec.md | while IFS= read -r h; do grep -qxF "$h" <spec path> || echo "missing section: $h"; done
+spec parked (<reason>): <spec path>
+| `design_spec_dir` |
+| `spec_review_rounds` |
+| `spec_phase_timeout` |
+EOF
+appears_before() { awk -v a="$2" -v b="$3" 'index($0, a) && !x {x=NR} index($0, b) && !y {y=NR} END {exit !(x && y && x < y)}' "$1"; }
+check "W3.5 comes before W3.6" appears_before "$sk" '- **W3.5 Spec review**' '- **W3.6 Release.**'
+check "W3.6 comes before W4" appears_before "$sk" '- **W3.6 Release.**' '- **W4 Each report'
+check "the spec phase is inside the Worker contract" appears_before "$sk" '### Worker contract' '**Step 2 is the spec phase**'
+check "...and ends before the Backlog UI section" appears_before "$sk" '**Step 2 is the spec phase**' '## Backlog UI'
+check "plugin version 0.5.0" grep -qF '"version": "0.5.0"' "$root/.claude-plugin/plugin.json"
+
 echo "## backlog.py + ui.py"
 check "test_backlog.py" python3 "$root/tests/test_backlog.py"
 check "test_ui_api.py" python3 "$root/tests/test_ui_api.py"
