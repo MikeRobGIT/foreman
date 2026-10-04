@@ -1713,6 +1713,14 @@ class TrailerGuardTest(Case):
             self.assertIn('Co-Authored-By', self.fx.bash(command) or '', command)
         self.assertIsNone(self.fx.bash('git merge -m "Merge main" origin/main'))
 
+    def test_an_unreadable_git_merge_is_checked_on_its_raw_text(self):
+        # an unbalanced quote: the scan can't read it, so shellscan's fallback offers `git merge` as a candidate
+        self.fx.start_run()
+        for command in ('git merge -m "x\nCo-Authored-By: a origin/main', 'git merge --message "x\nCo-Authored-By: a',
+                        'git fetch && git merge -m "x\nCo-Authored-By: a origin/main'):
+            self.assertIn('starts with "Co-Authored-By"', self.fx.bash(command) or '', command)
+        self.assertIsNone(self.fx.bash('git merge -m "Merge main\nall good origin/main'))
+
     def test_gh_pr_new_messages_are_read_like_gh_pr_create(self):
         for command in ('gh pr new --title t --body "x\nCo-Authored-By: a"', 'gh pr new -t "Co-Authored-By: a"',
                         'gh pr new --title t --body "x\nCo-Authored-By: a'):   # the last one the scan can't read
