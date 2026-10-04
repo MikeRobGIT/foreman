@@ -293,7 +293,7 @@ W1-W6 to keep them apart from steps 0-12; W6's stop conditions replace the auton
        copied and nothing else is pending. The local branch keeps the commit until W5.
 
     The rows stay `ready`; the status becomes `parked: <reason>`.
-- **W4 Each report, as it arrives** (a report is a claim; re-read everything):
+- **W4 Each report, as it arrives** (a report is a claim; re-read everything; a `SPEC READY` goes to W3.5, never here):
   1. **Verify on the head SHA.** The latest run of every `required_ci` check on that SHA is green (list
      check runs with pagination); every `review_bots` entry has reviewed that SHA (the config's definition,
      else a review on that SHA that is not a quota, rate-limit or trial notice); read the inline threads,
@@ -301,6 +301,39 @@ W1-W6 to keep them apart from steps 0-12; W6's stop conditions replace the auton
      `UNKNOWN` a few times, then move on and come back). Step 7's ceiling applies.
   2. **Audit the diff** (`git diff --name-status` of the fetched head against its merge base): non-empty,
      only owned files plus what the report lists (tests, `parallel_shared_files`), no unexplained deletion.
+     For a spec-phase batch, also check these:
+     - The spec file, up to its `## Deviations after release` heading, is byte-identical to the released SHA's
+       copy. This prints nothing when it is:
+       `cmp <(git show <released sha>:<spec path> | perl -0pe 's/\s+\z/\n/') <(git show <head>:<spec path> | perl -0pe 's/\n## Deviations after release\n.*//s; s/\s+\z/\n/')`
+     - Every touched file is in the spec's Implementation outline, or is a test file its Tests section names, or
+       is listed in the report as changed by the gate (formatters), or is covered by a deviation. The batch's
+       spec file is allowed.
+  2b. **Spec reviewer** (spec-phase batches). Dispatch a read-only reviewer in the background (`Agent`,
+     `subagent_type: Explore`, `model: opus`; W3.5's reviewer-model note applies) on the SHA W4.1 verified,
+     with a 20-minute reviewer timer (W3.5's clock). Give it the spec, the PR diff and the deviations section.
+     It does four things:
+     - checks the code against the spec;
+     - reports deviations the spec doesn't list;
+     - rules on each listed deviation: acceptable, or a finding;
+     - confirms that each file the report lists as gate-changed has formatting-only hunks and is owned by no
+       other batch. Anything else is an unlisted deviation.
+
+     It returns Critical, Important and Minor findings, plus a ruling per deviation.
+     - **Part of the auto-merge gate.** A Critical or Important finding, or a deviation ruled unacceptable,
+       blocks the merge like any review finding, and goes to the worker as a W4.4 finding. In `--auto-merge`
+       its rulings stand. In manual mode the human sees them at W4.5.
+     - **If it fails or times out,** re-dispatch it once. If it fails again, don't auto-merge that PR: leave it
+       open with a note, carry on with the wave, and list it in the run report for the human.
+     - **If the head moves,** run it again on the new SHA. W4.6 merges only a SHA whose W4.2b verdict is clean.
+     - **A deviation that adds a file outside the outline, or changes a row's acceptance,** gets one spec round
+       before merge. It runs only after W4.2b has ruled, and only when W4.2b didn't rule it unacceptable (an
+       unacceptable one goes straight to W4.4).
+       - The round skips W3.5's pre-checks and runs only W3.5's read-only reviewer, with no chain: the chain's
+         prompt reviews an unbuilt change.
+       - The reviewer reviews the spec's deviations section against
+         `git diff $(git merge-base origin/<default> <head>) <head>`, minus the spec file. That leaves out main's
+         changes merged in at contract step 8.
+       - A failure is a W4.4 finding sent to the worker. It never parks a built PR.
   3. **Surface.** Decide it yourself from the diff, using step 9's definition. If there is one, run step 9
      serially on the PR head merged onto current main (`git fetch origin +pull/<n>/head:pr-<n>`, a throwaway
      branch off main with that merge; the running dev server serves whatever is checked out, and a server you
@@ -311,10 +344,12 @@ W1-W6 to keep them apart from steps 0-12; W6's stop conditions replace the auton
   4. **Findings** (a real Critical/Important finding, a red or missing check, a failed audit or browser
      check) go back to the worker (`SendMessage`; if it cannot be resumed, run `python3 $FOREMAN/hooks.py stopping
      <batch>` before any TaskStop of it, remove its worktree, and launch a new worker on the branch whose prompt again
-     starts `foreman-worker: <batch>`), then W4.1 again.
-  5. **Approve.** Manual mode: present the ready PRs with their evidence and head SHAs, and stop; the human
+     starts `foreman-worker: <batch>`), then W4.1 again. For a spec-phase batch that prompt
+     begins `foreman-worker: <batch>`, without ` spec-phase` because the spec is already released, names the
+     spec path, and its first step is `git switch <local branch>` (the branch the spec phase made).
+  5. **Approve.** Manual mode: present the ready PRs with their evidence, head SHAs and, for spec-phase batches, their deviations with W4.2b's rulings, and stop; the human
      approves a PR at a SHA. This stop is a pause, not the run's end: don't run `run-end` here.
-  6. **Merge.** Reply to and resolve every thread (step 8's triage), post the merge summary, check the PR's
+  6. **Merge.** Spec-phase batches merge only at a SHA with a clean W4.2b verdict. Reply to and resolve every thread (step 8's triage), post the merge summary, check the PR's
      commit messages for trailers the user forbids (pass `--subject`/`--body` without them if needed), then
      `gh pr merge --match-head-commit <the SHA verified in W4.1, or approved in W4.5>` with the repo's merge
      method (step 12) and without `--delete-branch` (the worktree holds the branch). If the merge is refused
