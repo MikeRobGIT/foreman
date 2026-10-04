@@ -1341,8 +1341,8 @@ def changed_paths(top, everything):
 
 def under(top, cwd, path):
     """`path` as written in `cwd`, relative to the checkout's top level. A path the shell expands at run time (`$(...)`,
-    backticks, `$VAR`: the scan blanks a substitution with NUL bytes) can be anything: Unreadable."""
-    if re.search('[$`' + shellscan.FILL + ']', path):
+    backticks, `$VAR`, `{a,../b}`; the scan blanks a substitution with NUL bytes) can be anything: Unreadable."""
+    if re.search('[${`' + shellscan.FILL + ']', path):
         raise Unreadable(path)
     return os.path.relpath(os.path.realpath(os.path.join(cwd, path)), os.path.realpath(top))
 

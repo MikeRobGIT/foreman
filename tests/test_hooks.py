@@ -2596,7 +2596,8 @@ class SpecGateTest(Case):
         # `$(...)` used to raise in under() (a NUL byte the scan blanked the substitution with): main failed open
         for cmd in ('git commit -m x $(git diff --name-only)', 'git commit -m x `git diff --name-only`',
                     'git commit -m x "$(git diff --name-only)"', 'git commit -m x $FILES',
-                    'git commit -m x docs/superpowers/specs/$NAME', 'git add $(git ls-files -m) && git commit -m x'):
+                    'git commit -m x docs/superpowers/specs/$NAME', 'git add $(git ls-files -m) && git commit -m x',
+                    'git commit -m x docs/superpowers/specs/{plan.md,../../app.py}'):   # brace expansion: two words
             why, err = self.judged(cmd, agent='a1')
             self.assertIn("foreman couldn't tell what this commit would include", why or '', cmd)
             self.assertNotIn('foreman hook error', err, cmd)
