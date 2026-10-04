@@ -107,8 +107,9 @@ W1-W6 to keep them apart from steps 0-12; W6's stop conditions replace the auton
 ### Orchestrator
 
 - **W1 Precondition.** Step 0. Remove worktrees whose PR merged or closed (`git worktree remove`; never
-  `--force` over unpushed work, never touch the worktree of a worker that has not reported), then
-  `git worktree prune`.
+  `--force` over unpushed work, never touch the worktree of a worker that has not reported; `SPEC READY` is not a report), then
+  `git worktree prune`. A parked batch's worktree is removed at parking (W3.6, the one `--force` exception);
+  its branch is deleted after W5 commits its spec.
 - **W2 Pick and batch.**
   - Pool: `status: ready` rows (list them with grep and read only the rows you pick; backlogs get large),
     filtered by `tag:<x>` if given, minus rows that are `risk: high`, match `parallel_skip`, name a step-3
@@ -245,6 +246,53 @@ W1-W6 to keep them apart from steps 0-12; W6's stop conditions replace the auton
   8. **Reviewer model.** Before the first dispatch, check whether the project or the user defines its own
      `Explore` agent (`grep -l '^name: Explore' .claude/agents/*.md ~/.claude/agents/*.md`). One that does keeps
      its own `model:`; record that model, not `opus`, as the reviewer in the run report.
+- **W3.6 Release.**
+  - **Releasing** a batch takes two steps:
+    1. `python3 $FOREMAN/hooks.py release <batch> <sha>`. The hooks record it, bound to this session.
+       - Exit 0: recorded; send the message.
+       - Exit 3 ("hooks inactive": no run marker touched since the batch name's time): send the message; nothing
+         gates the worker.
+       - Exit 1 (not recorded): don't send; retry once. If the retry also exits 1, park the batch ("release could
+         not be recorded"), unless `spec_gate` is in the config's `hooks_disabled`: then send the message,
+         because nothing gates the worker. A released worker that the spec gate still denies would stall.
+       - Any other exit (2: usage, e.g. an unresolved `$FOREMAN`): fix the command and run it again.
+    2. `SendMessage`: "Spec approved at `<sha>` (round <r>). Minor findings to answer in the PR body: <list, or
+       none>. Implement it: Worker contract steps 3-8, on this same branch." Stamp the silence clock; status
+       `released`.
+  - **`--auto-merge`:** release each batch as soon as it passes.
+  - **Manual mode:** hold passed batches until every batch of the wave is `passed` or `parked` (the bounds
+    guarantee that it happens). Then send a notification ("foreman: spec checkpoint ready, N passed, M parked"),
+    with the session's push-notification tool if it has one, else a plain message. Present ONE table: batch,
+    rows, spec path, rounds, each reviewer's final verdict, the remaining Minor findings, open questions. Ask
+    which batches to release, as a multi-select question; with more than 4 batches, split it into several
+    questions or let the human answer in text. The human may comment on other batches, in the question's notes
+    or in a reply.
+    - **Selected:** released.
+    - **Commented:** one comment round, with the comments sent as findings. It's always allowed, is exempt from
+      `spec_review_rounds` and `spec_phase_timeout`, and its timer is `parallel_worker_timeout`.
+      Batches that pass it come back together at ONE follow-up checkpoint, which offers only release or park.
+      A batch that fails it is parked.
+    - **Neither:** parked ("not released by the human").
+  - **Parking** (a bound, an open question, the checkpoint, W6's stuck spec-phase worker):
+    1. Kill the round's chain and reviewer if they're running. Read the pid in `<log>.pid` and run
+       `kill -TERM <pid>`: review.sh then kills its running adapter's process group, removes `<log>.pid` and
+       exits. Wait for `<log>.pid` to disappear (check every 2 s, at most 30 s; if it is still there, carry on
+       and say so in the run report): a TaskStop before that would orphan the adapter. Then TaskStop the chain's
+       background task and the reviewer. Run `python3 $FOREMAN/hooks.py stopping <batch>`; exit 3 means the
+       hooks aren't firing, which is harmless. Then stop the worker (TaskStop) and the batch's timers.
+    2. Copy every spec in the worktree to `$(git rev-parse --git-common-dir)/foreman/parked/<batch>/`, which
+       outlives the session's scratch. Copy committed and uncommitted ones alike, including a park before the
+       first `SPEC READY`, when the state table has no spec path yet. The files are the union of:
+       - `git -C <worktree> status --porcelain --untracked-files=all -- {{design_spec_dir}}`;
+       - `git -C <worktree> diff --name-only <fork base> HEAD -- {{design_spec_dir}}`. With no fork base yet,
+         use `$(git -C <worktree> merge-base origin/<default> HEAD)`.
+
+       W5 commits these copies, or writes `no spec` when there are none.
+    3. Name the branch and its SHA in the run report.
+    4. `git worktree remove --force <worktree>`. This is the one exception to W1's no-`--force` rule: the spec is
+       copied and nothing else is pending. The local branch keeps the commit until W5.
+
+    The rows stay `ready`; the status becomes `parked: <reason>`.
 - **W4 Each report, as it arrives** (a report is a claim; re-read everything):
   1. **Verify on the head SHA.** The latest run of every `required_ci` check on that SHA is green (list
      check runs with pagination); every `review_bots` entry has reviewed that SHA (the config's definition,
