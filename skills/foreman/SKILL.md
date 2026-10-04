@@ -100,7 +100,8 @@ browser-verify are all still fully enforced.
 The slow part of a pass is waiting (gate, CI, bots), not coding. Parallel mode overlaps the waits: up to
 N **workers** run steps 2-8 on separate batches, each in its own git worktree, and ONE **orchestrator**
 (this session) owns every shared resource: picking batches, merging, the browser, the local database, the
-backlog, the rules files and generated files. Every non-negotiable holds for every PR. Steps are labelled
+backlog, the rules files and generated files. Every non-negotiable holds for every PR. Each batch first writes a
+design spec, which is reviewed until solid (W3.5) and released (W3.6) before any code. Steps are labelled
 W1-W6 to keep them apart from steps 0-12; W6's stop conditions replace the autonomous loop's Termination list.
 
 ### Orchestrator
@@ -119,13 +120,20 @@ W1-W6 to keep them apart from steps 0-12; W6's stop conditions replace the auton
     batches that import it wait for it.
   - At most `parallel_ui_max` batches with an app surface. Print the plan (batch, rows, owned files,
     surface yes/no) before launching.
+  - **Batch names** are `<YYYYMMDD-HHMM>-w<n><x>`: the invocation's start in local time (`date +%Y%m%d-%H%M`), the
+    wave number and a letter (e.g. `20261002-1530-w1a`). They are unique across invocations and `/loop` ticks; the
+    hooks key their state files on them and read the time to judge a fresh run marker.
+  - **Parked rows** (W3.6). A row stays out of the pool, until the human edits the note away, when its note
+    contains `spec parked (open question)` or `spec parked (not released by the human)`, or when it has two
+    `spec parked (` notes. Any other `spec parked (` row is eligible again, and its worker starts from the
+    committed parked spec (Worker spec phase step 4).
 - **W3 Launch.** One `Agent` call per batch in one message (general-purpose, `isolation: "worktree"`,
-  named, background). The prompt's FIRST line is exactly `foreman-worker: <batch>` (the hooks brief and
+  named, background). The prompt's FIRST line is exactly `foreman-worker: <batch> spec-phase` (the hooks brief and
   check tagged workers; see **Hooks**). A batch name must match `[A-Za-z0-9_-]+`: the tag grammar and the
   `hooks.py` CLIs reject anything else, and a name with a space silently disables the briefing and the report
-  check. Then the **Worker contract** from this file copied in (a worker cannot read this command; keep the
+  check. Then the **Worker contract** and **Worker spec phase** from this file copied in (a worker cannot read this command; keep the
   copy even though the hooks also brief it), plus the batch's rows, owned files, a unique test-data id prefix
-  and the resolved absolute `$FOREMAN` path. Keep a short state table (batch, rows, PR, verified SHA, status)
+  and the resolved absolute `$FOREMAN` path. Keep a short state table (columns in the sub-bullet below)
   instead of re-reading reports. Before launching, check that each `reviewers` entry's CLI is on PATH
   (`command -v`) and that the `permissions.allow` entries listed in the Hooks section of
   `${CLAUDE_PLUGIN_ROOT}/README.md` are in `~/.claude/settings.json`, `.claude/settings.json` or
@@ -133,6 +141,15 @@ W1-W6 to keep them apart from steps 0-12; W6's stop conditions replace the auton
   chain already falls through on quota, credits, auth and unknown models. Missing permission entries are for the
   user, not the workers: warn the user, because a background worker that hits a permission prompt it can't show
   is denied and stalls.
+  - **Spec phase.** Every batch starts with the spec phase (Worker contract step 2). The tag's ` spec-phase` suffix
+    (W3 above) opts the batch into the hooks' spec gate (no code before release) and their spec-phase report check.
+    The prompt also carries the absolute path `${CLAUDE_PLUGIN_ROOT}/templates/spec.md`, the resolved
+    `{{design_spec_dir}}`, and the line "Your batch starts with the spec phase: write and commit the spec, report
+    `SPEC READY`, and wait for the release." Workers launch together; each batch then moves through spec, review
+    and build on its own.
+  - **State table** columns: batch, rows, owned files, worktree, branch, spec path, fork base, round, pinned SHA,
+    released SHA, PR, verified SHA, the clock's timestamps and timer task ids (W3.5), and status (`spec`,
+    `review <r>`, `passed`, `parked: <reason>`, `released`, `PR #<n>`).
 - **W4 Each report, as it arrives** (a report is a claim; re-read everything):
   1. **Verify on the head SHA.** The latest run of every `required_ci` check on that SHA is green (list
      check runs with pagination); every `review_bots` entry has reviewed that SHA (the config's definition,
@@ -194,10 +211,16 @@ You run steps 2-8 on your batch in your own worktree, with these overrides:
 - First read the project config (guardrails, `shared_resources`) and every `{{rules_glob}}` file for your area.
   Then run `{{worktree_setup}}` in your worktree (default `$FOREMAN/wt-setup.sh <worktree>`: copies
   `worktree_env_files` from the main checkout, runs `worktree_install`, then `stale_check`).
-- Step 2: your batch is the approved scope. Write a short plan in the PR body; skip brainstorming and
-  plan-approval gates. If a row needs a product decision, do the decidable part and report the rest.
-- Own only your files (and your own entries in `parallel_shared_files`); if you need another file, stop and report.
-- Remote work: the `git`+`gh` column of the merge-tool mapping; open the PR ready for review.
+- **Step 2 is the spec phase** when your prompt's first line ends in ` spec-phase`: follow **Worker spec phase**
+  (copied into your prompt). Until the orchestrator releases your spec, edit and commit nothing outside
+  `{{design_spec_dir}}`, and push nothing. A tag without ` spec-phase` means your batch's spec was released
+  before you started: do Worker spec phase step 8.
+- Own only your files (and your own entries in `parallel_shared_files`, and your batch's spec file); if you need
+  another file, stop and report (in the spec phase: a scope request in the outline). A message "owned files now
+  also include <file>" adds that file.
+- Remote work: the `git`+`gh` column of the merge-tool mapping; open the PR ready for review. Your branch
+  already exists (the spec phase made it): skip `git switch -c`, and commit with explicit paths, or `git add -A`
+  only once the spec phase is over.
 - Step 6: run the reviewer chain, `$FOREMAN/review.sh origin/main <scratch>/<batch>-review.log` (in the
   background; it can take 15 minutes), AND a read-only reviewer subagent of a tool-restricted type (e.g.
   Explore) when you have one. Name the reviewer that ran (`<log>.reviewer`) in the PR; when the chain is
@@ -221,16 +244,54 @@ You run steps 2-8 on your batch in your own worktree, with these overrides:
   would have caught them).
 - Attribution and temp files: the user's and the repo's rules override harness defaults (e.g. no
   `Co-Authored-By`); temp files go in the scratchpad under your batch name.
-- Never merge. Poll for new bot comments after your last push, and stop pushing once you report.
+- Never merge. Poll for new bot comments after your last push, and stop pushing once you send your final report
+  (`SPEC READY` is not one).
 - During a run, hooks enforce part of this contract: a push needs a gate receipt for the pushed tree; no merge,
-  no force-push, no rebase, no backlog, rules or config edits; no forbidden trailer lines; and a final report
+  no force-push, no rebase, no backlog, rules or config edits; no forbidden trailer lines; before a spec-phase
+  batch's release, no edit or commit outside `{{design_spec_dir}}`, no push, and a stop without `SPEC READY` is
+  sent back once; and a final report
   without one valid fenced `json` block is sent back once.
-- Report: PR URL, head SHA, check states on it, unresolved threads, per-row changes, evidence, files outside
+- Report: PR URL, head SHA, the spec path and its deviations after release, check states on it, unresolved
+  threads, per-row changes, evidence, files outside
   your owned list, declined items and why, surface verdict with steps and predictions (and the check script's
   path), RULE NOTES, NEW ROWS, RETRO, risks. End with ONE fenced `json` block the orchestrator feeds to
   `bookkeeping_tool`: `{"done": [{"id", "note"}], "append": [{"id", "note"}], "new_rows": ["| <prefix>-NEW-a | title | risk | ready | acceptance | source |"],
   "rule_notes": [{"file", "old", "new"}]}` (`old` is the exact sentence, one match; a raw ` | ` in a note or a row
   shifts the table's columns: write `\|`; the orchestrator adds `pr` and numbers `<prefix>-NEW-*` from the real max id).
+  The block may also carry `"spec": "<spec path>"`, which `bk.py` ignores.
+
+### Worker spec phase
+
+You are in it when your prompt's first line ends in ` spec-phase`.
+1. After the setup above, read your rows, the `{{rules_glob}}` files for the area and recent feedback memories.
+2. Explore before designing: read the code the rows name; `git grep` every caller and every writer of each
+   function, column, status or file the change touches; for each write, find which client or credentials
+   perform it, which roles or permissions reach that path, and why row-level security or permissions allow it;
+   note which rules entries apply.
+3. Invoke `superpowers:brainstorming` for its exploration and design discipline, with these overrides, which
+   win over the skill's own text: always write the spec file from the template, whatever path the skill would
+   classify the batch as (a "bounded" batch still gets a spec); no visual companion, no per-section approval
+   and no questions to the user (a question the code can't answer goes under **Open questions**); the
+   orchestrator's release is the skill's HARD-GATE approval, so never end a turn with a question: end the spec
+   phase with `SPEC READY`; don't invoke `writing-plans`: write the Implementation outline section instead.
+4. Write the spec from the template (its absolute path is in your prompt) to
+   `{{design_spec_dir}}/<YYYY-MM-DD>-<row ids joined by ->-design.md`. Replace every `⟦FILL: …⟧` marker; a
+   section with nothing in it reads "None — <reason>". A file outside your owned files goes in the outline as a
+   `- **Scope request:**` line. If `{{design_spec_dir}}` already holds a parked spec for these rows
+   (`Status: parked`), start from it: delete its `Status: parked` line and its old Review responses, then revise
+   it. Commit it with `git add -- <spec path> && git commit -m "<message>"` in a call of its own, never `git add -A`,
+   as your branch's first commit. Don't push. The build phase continues on this same branch.
+5. Report with `SPEC READY <absolute worktree path> <branch> <spec path> <sha>` as the FIRST line of your final
+   message, then up to five summary lines, and stop. `SPEC READY` is not your final report.
+6. If you stop without `SPEC READY` (a question, a context limit, an error), the orchestrator resumes you once:
+   finish the spec, put questions under Open questions, and end with `SPEC READY` as the first line.
+7. On findings: revise the spec as a new commit (never an amend), answer every finding under **Review
+   responses** (fixed, or declined with the reason), and report `SPEC READY` again.
+8. On release ("Spec approved at `<sha>` …"): build it, the Worker contract's steps 3-8, on this same branch.
+   The spec body is frozen at release: a change after it goes only in an appended `## Deviations after release`
+   section, one entry per deviation with its reason, and in the PR body. The PR's first commit is the spec. Answer
+   the release message's Minor findings in the PR body. If a row needs a product decision, do the decidable part
+   and report the rest.
 
 ## Hooks
 

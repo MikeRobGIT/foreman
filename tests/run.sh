@@ -59,7 +59,7 @@ check "bk.py parses the template backlog" grep -q "dry run: ok, 1 new rows from 
 
 echo "## SKILL.md wires the hooks"
 SK=$root/skills/foreman/SKILL.md
-check "W3 tags every worker" grep -q 'FIRST line is exactly `foreman-worker: <batch>`' "$SK"
+check "W3 tags every worker, spec-phase" grep -q 'FIRST line is exactly `foreman-worker: <batch> spec-phase`' "$SK"
 check "every termination runs run-end" test "$(grep -c 'hooks.py run-end' "$SK")" -ge 4
 check "step 12 pins the verified SHA" grep -q 'gh pr merge <n> --squash --match-head-commit' "$SK"
 check "stopping before each TaskStop" test "$(grep -c 'hooks.py stopping' "$SK")" -ge 2
