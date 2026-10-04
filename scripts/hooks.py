@@ -678,16 +678,25 @@ GH_MERGE_VALUE_OPTS = ('-t', '--subject', '-b', '--body', '-F', '--body-file', '
                        '--author-email')
 
 
+# a heredoc, a here-string or `< file`; group 1 is the target glued to the operator ('' when it is the next word)
+STDIN_REDIRECT = re.compile(r'^\d*(?:<<<?-?|<(?![<>(]))(.*)$')
+
+
 def positionals(args, value_opts):
-    out, i = [], 0
+    """The words that are neither options, their values nor a stdin redirect: `git commit -F - <<EOF` feeds its
+    message to git, it names no path. An output redirect is not skipped: the shell writes the file first."""
+    out, i, opts = [], 0, True
     while i < len(args):
         a = args[i]
-        if a == '--':
-            return out + args[i + 1:]
-        if a in value_opts:
-            i += 2
+        m = STDIN_REDIRECT.match(a)
+        if m:
+            i += 1 if m.group(1) else 2   # a bare `<<` or `<` takes the next word as its delimiter or file
             continue
-        if not a.startswith('-'):
+        if opts and a == '--':
+            opts = False
+        elif opts and a in value_opts:
+            i += 1
+        elif not opts or not a.startswith('-'):
             out.append(a)
         i += 1
     return out
@@ -1275,6 +1284,7 @@ HANDLERS['permission'] = permission
 GIT_COMMIT_VALUE_OPTS = ('-m', '--message', '-F', '--file', '-C', '--reuse-message', '-c', '--reedit-message', '-t',
                          '--template', '--author', '--date', '--cleanup', '--fixup', '--squash', '--trailer',
                          '--pathspec-from-file')
+GT_VALUE_OPTS = ('-m', '--message', '-o', '--onto')   # the short options `gt create` and `gt modify` give a value to
 COMMITS = (('git', 'commit'), ('gt', 'create'), ('gt', 'modify'))
 OWN_CALL = 'commit in its own call (after `git add <spec path>`), so foreman can see what it commits'
 
@@ -1327,19 +1337,22 @@ def changed_paths(top, everything):
 
 
 def under(top, cwd, path):
-    """`path` as written in `cwd`, relative to the checkout's top level."""
+    """`path` as written in `cwd`, relative to the checkout's top level. A path the shell expands at run time (`$(...)`,
+    backticks, `$VAR`: the scan blanks a substitution with NUL bytes) can be anything: Unreadable."""
+    if re.search('[$`' + shellscan.FILL + ']', path):
+        raise Unreadable(path)
     return os.path.relpath(os.path.realpath(os.path.join(cwd, path)), os.path.realpath(top))
 
 
-def commit_words(args):
-    """`git commit`'s words with each short-flag cluster split as git reads it, left to right: the first letter that
-    takes a value takes the rest of the cluster as that value (`-mtest` is `-m test`), or the next word when it
+def commit_words(args, value_opts=GIT_COMMIT_VALUE_OPTS):
+    """A commit command's words with each short-flag cluster split as it reads them, left to right: the first letter
+    that takes a value takes the rest of the cluster as that value (`-mtest` is `-m test`), or the next word when it
     ends the cluster (`-am msg` is `-a -m msg`)."""
     out = []
     for a in args:
         k = None
         if re.match(r'^-[A-Za-z]+$', a):
-            k = next((i for i, ch in enumerate(a) if i and '-' + ch in GIT_COMMIT_VALUE_OPTS), None)
+            k = next((i for i, ch in enumerate(a) if i and '-' + ch in value_opts), None)
         if k is None:
             out.append(a)
         else:
@@ -1347,12 +1360,20 @@ def commit_words(args):
     return out
 
 
+def own_command(c, seg):
+    """True when c is the program of the segment's own words. A command found inside `bash -c`, `eval` or a shell's
+    heredoc takes its wrapper's segment, and the wrapper's script runs (and may write) before it."""
+    pre = c.pre or []
+    return (len(seg.words or []) > len(pre) and seg.words[:len(pre)] == pre
+            and os.path.basename(seg.words[len(pre)]) == c.prog)
+
+
 def alone(c, sc):
     """True when nothing but `cd`, `pushd` and `git add` runs before the top-level command c in its call. Anything
     else (a redirect, a script, `git rm`, `git mv`, `git apply --cached`, ...) may write files or stage paths after
     this hook has read the tree, so a commit that follows it can't be judged."""
     k = next((i for i, s in enumerate(sc.segs) if (s.start, s.end) == (c.start, c.end)), None)
-    if k is None:
+    if k is None or not own_command(c, sc.segs[k]):
         return False
     adds = {(a.start, a.end) for a in sc.cmds if (a.prog, a.sub) == ('git', 'add')}
     return all(s.words == [] or (bool(s.words) and (s.words[0] in ('cd', 'pushd') or (s.start, s.end) in adds))
@@ -1368,9 +1389,10 @@ def would_commit(c, sc, top):
                 paths |= set(changed_paths(top, everything=True))
             paths |= {under(top, a.cwd, p) for p in named if p != '.'}
     if c.prog == 'gt':
-        if has_flag(c.args, ('--all', '-a')):
+        gt_args = commit_words(c.args, GT_VALUE_OPTS)
+        if has_flag(gt_args, ('--all', '-a')):
             paths |= set(changed_paths(top, everything=True))
-        elif has_flag(c.args, ('--update', '-u')):
+        elif has_flag(gt_args, ('--update', '-u')):
             paths |= set(changed_paths(top, everything=False))
         return paths
     args = commit_words(c.args)

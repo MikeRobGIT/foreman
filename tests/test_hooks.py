@@ -2564,6 +2564,69 @@ class SpecGateTest(Case):
         why = self.fx.bash('git commit -m "$msg" $(echo app.py', agent='a1', cwd=self.wt)
         self.assertIn("foreman couldn't tell what this commit would include", why)
 
+    def judged(self, command, **kw):
+        """(the deny reason or None, stderr) of a Bash call run in the worktree."""
+        out, err = self.fx.hook('pretool', self.fx.payload('Bash', {'command': command}, cwd=self.wt, **kw))
+        return (out['hookSpecificOutput']['permissionDecisionReason'] if out else None), err
+
+    def test_a_pathspec_expanded_at_run_time_is_unreadable_not_a_crash(self):
+        # `$(...)` used to raise in under() (a NUL byte the scan blanked the substitution with): main failed open
+        for cmd in ('git commit -m x $(git diff --name-only)', 'git commit -m x `git diff --name-only`',
+                    'git commit -m x "$(git diff --name-only)"', 'git commit -m x $FILES',
+                    'git commit -m x docs/superpowers/specs/$NAME', 'git add $(git ls-files -m) && git commit -m x'):
+            why, err = self.judged(cmd, agent='a1')
+            self.assertIn("foreman couldn't tell what this commit would include", why or '', cmd)
+            self.assertNotIn('foreman hook error', err, cmd)
+            self.assertEqual(self.judged(cmd), (None, ''), cmd)   # the main session's identical call
+
+    def test_a_substitution_in_a_message_is_not_a_pathspec(self):
+        write(self.spec(), '# spec\n')
+        self.assertEqual(self.judged(f'git add {self.spec()} && git commit -m "$(date)" -m `date`', agent='a1'), (None, ''))
+
+    def test_a_message_from_a_heredoc_is_not_a_pathspec(self):
+        # `git commit -F - <<'EOF'` reads its message from the heredoc: `<<EOF` is the message source, not a path
+        write(self.spec(), '# spec\n')
+        add = 'git add -- docs/superpowers/specs/plan.md && git commit -F -'
+        for cmd in (f"{add} <<'EOF'\nspec: draft\nEOF", f'{add} <<EOF\nspec: draft\nEOF', f'{add} <<-EOF\nspec: draft\nEOF',
+                    f'{add} << EOF\nspec: draft\nEOF', f'{add} << "EOF"\nspec: draft\nEOF', f'{add} <<< "spec: draft"',
+                    f'{add} < msg.txt', f'{add} <<\'EOF\' docs/superpowers/specs/plan.md\nspec: draft\nEOF'):
+            self.assertEqual(self.judged(cmd, agent='a1'), (None, ''), cmd)
+
+    def test_a_commit_from_a_heredoc_that_includes_code_is_still_denied(self):
+        write(os.path.join(self.wt, 'app.py'), 'print(2)\n')
+        write(self.spec(), '# spec\n')
+        for cmd in ("git add -- app.py && git commit -F - <<'EOF'\nwip\nEOF",
+                    "git add -- app.py docs/superpowers/specs/plan.md && git commit -F - <<EOF\nwip\nEOF",
+                    "git commit -F - <<'EOF' app.py\nwip\nEOF", "git commit -F - -- app.py <<'EOF'\nwip\nEOF",
+                    "git commit -F - < msg.txt app.py", 'git commit -am x <<< "wip"'):
+            why = self.judged(cmd, agent='a1')[0] or ''
+            self.assertIn('this commit would include app.py', why, cmd)
+            self.assertNotIn('<<', why, cmd)
+
+    def test_an_output_redirect_is_still_read_as_a_pathspec(self):
+        # the shell truncates app.py before `-a` reads it: at hook time the tree is clean and the commit looks empty
+        for cmd in ('git commit -am x > app.py', 'git commit -am x >app.py', 'git commit -am x >> app.py'):
+            self.assertIn('app.py', self.judged(cmd, agent='a1')[0] or '', cmd)
+
+    def test_a_commit_inside_a_wrapper_is_not_alone(self):
+        # the wrapper's script writes before its commit, which the staged / -a read at hook time can't see
+        for cmd in ("bash -c 'echo x > app.py && git commit -am x'", "sh -c 'echo x > app.py && git commit -am x'",
+                    'eval "echo x > app.py && git commit -am x"', "bash <<'EOF'\necho x > app.py\ngit commit -am x\nEOF",
+                    "bash -c 'git commit -m x'", f"cd {self.wt} && bash -c 'git commit -m x'"):
+            self.assertIn(self.OWN_CALL, self.judged(cmd, agent='a1')[0] or '', cmd)
+            self.assertEqual(self.judged(cmd), (None, ''), cmd)   # the main session's identical call
+
+    def test_an_attached_gt_message_is_not_a_flag_cluster(self):
+        # `-mupdate` holds an `a` and a `u`, but it is a message: it must not read as `-a` or `-u`
+        self.commit_spec()
+        git(self.wt, 'add', self.spec())
+        write(os.path.join(self.wt, 'app.py'), 'print(2)\n')   # modified, not staged: only a real -a or -u reaches it
+        for cmd in ('gt create -mupdate', 'gt modify -mupdate', 'gt create -m update', 'gt create -oauth'):   # -o is --onto
+            self.assertEqual(self.judged(cmd, agent='a1'), (None, ''), cmd)
+        for cmd in ('gt create -am x', 'gt create -a -mupdate', 'gt create -amupdate', 'gt modify -um update',
+                    'gt modify -cam x'):   # gt's -c is a flag (git's takes a value): the `a` after it is still `-a`
+            self.assertIn('this commit would include app.py', self.judged(cmd, agent='a1')[0] or '', cmd)
+
     def test_the_target_is_judged_in_its_own_checkout(self):
         # the worker stands in the main checkout; the file is the worktree's
         self.assertIsNone(self.fx.edit(self.spec(), agent='a1'))
