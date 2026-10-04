@@ -348,7 +348,8 @@ W1-W6 to keep them apart from steps 0-12; W6's stop conditions replace the auton
      <batch>` before any TaskStop of it, remove its worktree, and launch a new worker on the branch whose prompt again
      starts `foreman-worker: <batch>`), then W4.1 again. For a spec-phase batch that prompt
      begins `foreman-worker: <batch>`, without ` spec-phase` because the spec is already released, names the
-     spec path, and its first step is `git switch <local branch>` (the branch the spec phase made).
+     spec path and the release message's Minor findings, and carries W3's copies of the Worker contract and
+     Worker spec phase, and its first step is `git switch <local branch>` (the branch the spec phase made).
   5. **Approve.** Manual mode: present the ready PRs with their evidence, head SHAs and, for spec-phase batches, their deviations with W4.2b's rulings, and stop; the human
      approves a PR at a SHA. This stop is a pause, not the run's end: don't run `run-end` here.
   6. **Merge.** Spec-phase batches merge only at a SHA with a clean W4.2b verdict. Reply to and resolve every thread (step 8's triage), post the merge summary, check the PR's
