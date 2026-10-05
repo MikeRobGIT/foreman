@@ -1665,6 +1665,54 @@ def release_check(h, repo, batch, sha):
                + WAY_OUT)
 
 
+def stopped_record(repo, sid, batch):
+    """hooks.py's `<batch>.stopped` record ({time}) in this session, or None (never the batches.py `stopped` stamp)."""
+    for d in repo.dirs:
+        r = state.read_json(batch_file(d, sid, batch, 'stopped'))
+        if isinstance(r, dict):
+            return r
+    return None
+
+
+def worker_of(repo, h, tid, names):
+    """The run's batch whose worker `tid` names without a task record: `fw-<batch>`, `fw-<batch>-<k>`, or an agent id
+    the agent map tags as a worker of that batch; else None."""
+    for n in names:
+        if tid == f'fw-{n}' or re.fullmatch(re.escape(f'fw-{n}-') + r'\d+', tid):
+            return n
+    e = agent_entry(repo, h.sid, tid)
+    return e['batch'] if isinstance(e, dict) and e.get('batch') in names else None
+
+
+def taskstop_guard(h, ti):
+    """Duty 4: TaskStop takes a recorded task id, never a batch name, and stops a worker only after `stopping`."""
+    repo = repo_at(h.cwd) if not h.agent else None
+    if not h.active(repo, 'batch_state'):
+        return
+    raw = ti.get('task_id') or ti.get('shell_id')
+    tid = raw.split('@', 1)[0].strip() if isinstance(raw, str) else ''
+    run = {b['batch']: b for b in batch_store(repo, h).batches()}
+    h.touch.add(repo)
+    if not tid:
+        h.deny(f'TaskStop needs a task id; the ids are in `python3 {HERE}/batches.py show <batch>`' + WAY_OUT)
+        return
+    recorded = [(n, t) for n, b in run.items() for t in b.get('tasks') or [] if t.get('id') == tid]
+    if tid in run and not recorded:
+        h.deny('TaskStop takes a task id, not a batch name; the ids are in '
+               f'`python3 {HERE}/batches.py show {tid}`' + WAY_OUT)
+        return
+    live = [(n, t) for n, t in recorded if t.get('kind') == 'worker' and t.get('live')]
+    if live:
+        n, t = max(live, key=lambda x: float(x[1].get('added', 0)))
+        stop = stopped_record(repo, h.sid, n)
+        ok = stop is not None and float(stop.get('time', 0)) >= float(t.get('added', 0))
+    else:
+        n = worker_of(repo, h, tid, run)
+        ok = n is None or stopped_record(repo, h.sid, n) is not None
+    if not ok:
+        h.deny(f'run `python3 {HERE}/hooks.py stopping {n}` first, then TaskStop {tid}' + WAY_OUT)
+
+
 # ---- pretool / posttool ---------------------------------------------------------------------------
 
 def run_piece(piece, *args):
@@ -1692,6 +1740,8 @@ def pretool(h):
                 run_piece(EDIT_PIECES[k], h, repo, path)
     elif tool == 'AskUserQuestion':
         run_piece(checkpoint_gate, h, ti)
+    elif tool == 'TaskStop':
+        run_piece(taskstop_guard, h, ti)
     briefing_text = None
     if not h.denies:   # a denied call carries no briefing: it may not be shown, and `briefed` would be spent
         try:

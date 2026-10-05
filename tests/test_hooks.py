@@ -3156,5 +3156,57 @@ class BatchStateReleaseTest(BatchStateCase):
         self.assertFalse(self.released(self.b1))
 
 
+class BatchStateTaskStopTest(BatchStateCase):
+    """Duty 4: the TaskStop guard, and piece 11 off."""
+
+    def test_taskstop_needs_an_id_never_a_batch_name(self):
+        self.batches('set', self.b1, 'status=spec')
+        self.batches('task', self.b1, 'add', 'timer', 'bg123')
+        self.assertIn('TaskStop needs a task id', self.stop())
+        self.assertIn('TaskStop needs a task id', self.stop(task_id=''))
+        self.assertIn('not a batch name', self.stop(task_id=self.b1))
+        self.assertIn(f'batches.py show {self.b1}', self.stop(shell_id=self.b1))
+        self.assertIsNone(self.stop(task_id='bg123'))
+        self.assertIsNone(self.stop(task_id='some-other-task'))
+
+    def test_a_worker_is_stopped_only_after_stopping(self):
+        fw = 'fw-' + self.b1
+        self.batches('set', self.b1, 'status=spec')
+        self.batches('task', self.b1, 'add', 'worker', fw)
+        for ti in ({'task_id': fw}, {'shell_id': fw}, {'task_id': fw + '@foreman-team'}):
+            self.assertIn(f'hooks.py stopping {self.b1}` first', self.stop(**ti) or '', ti)
+        self.fx.bash(f'python3 {HOOKS} stopping {self.b1}')
+        self.assertIsNone(self.stop(task_id=fw))
+        time.sleep(0.01)
+        self.batches('task', self.b1, 'add', 'worker', fw + '-2')    # a replacement launched after `stopping`
+        self.assertIn('stopping', self.stop(task_id=fw + '-2') or '')
+        self.fx.bash(f'python3 {HOOKS} stopping {self.b1}')
+        self.assertIsNone(self.stop(task_id=fw + '-2'))
+
+    def test_an_unrecorded_worker_id_counts_as_a_worker(self):
+        self.batches('set', self.b1, 'status=spec')
+        self.assertIn('stopping', self.stop(task_id='fw-' + self.b1) or '')
+        self.assertIn('stopping', self.stop(task_id=f'fw-{self.b1}-3') or '')
+        state.write_json(os.path.join(self.fx.state, 'batches', 'S1', 'agents', 'a77'),
+                         {'batch': self.b1, 'spec': True, 'briefed': True, 'time': time.time()})
+        self.assertIn('stopping', self.stop(task_id='a77') or '')
+        self.fx.bash(f'python3 {HOOKS} stopping {self.b1}')
+        for tid in ('fw-' + self.b1, f'fw-{self.b1}-3', 'a77'):
+            self.assertIsNone(self.stop(task_id=tid), tid)
+
+    def test_no_run_or_disabled_gates_nothing(self):
+        self.passed(self.b1)
+        os.remove(os.path.join(self.fx.state, 'runs', 'S1.json'))
+        self.assertIsNone(self.ask())
+        self.assertIsNone(self.stop())
+        self.run_marker()
+        write(os.path.join(self.fx.work, '.claude/foreman.config.md'),
+              CONFIG.replace('---\n', '---\nhooks_disabled: [batch_state]\n', 1))
+        self.assertIsNone(self.ask())
+        self.assertIsNone(self.bash(f'python3 {HOOKS} run-end'))
+        self.assertIsNone(self.release(self.b1, 'd' * 40))
+        self.assertIsNone(self.bash(f'python3 {SCRIPTS}/batches.py show', agent='a1'))
+
+
 if __name__ == '__main__':
     unittest.main()
