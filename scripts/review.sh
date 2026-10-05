@@ -6,7 +6,8 @@
 #     `# foreman: reads-repo` run (the others fall through in _lib.sh). Adapters see FOREMAN_REVIEW_MODE.
 # Exit 0: a real review is in <logfile>; <logfile>.reviewer names the reviewer (`use model effort`).
 # Exit 1: the chain is exhausted (or empty); <logfile>.reviewer says `none`. Either way <logfile>.attempts
-# lists every reviewer tried and why it fell through.
+# lists every reviewer tried and why it fell through, and <logfile>.entry holds the 1-based chain position of
+# the reviewer that landed, or 0 when none did (batches.py add-round's `entry`); a killed run writes no .entry.
 # Exit 2: a usage error, a missing --spec file, or not in a git repo.
 # Exit 143: TERM or INT; the running adapter's process group gets TERM, then KILL 2s later, and no other
 # adapter starts.
@@ -50,6 +51,7 @@ export FOREMAN_MAX_DIFF_KB=$(cfg reviewer_max_diff_kb 200)
 poll=${FOREMAN_WATCH_POLL:-5}
 
 mkdir -p "$(dirname "$logfile")"
+rm -f "$logfile.entry"
 echo $$ >"$logfile.pid"
 trap 'rm -f "$logfile.pid"' EXIT
 # The handler ignores a repeated TERM/INT first: bash would re-run it on `exit`, and that nested exit skips the EXIT trap.
@@ -95,6 +97,7 @@ while IFS=$'\t' read -r use model effort; do
   if [ "$rc" = 0 ] && [ -s "$out" ]; then
     cp "$out" "$logfile"
     echo "$use $model $effort" >"$logfile.reviewer"
+    echo "$i" >"$logfile.entry"
     note "$i $use ($model $effort): review landed in $(( $(date +%s) - start ))s"
     rm -rf "$work"
     exit 0
@@ -106,5 +109,6 @@ done < <(cfg chain)
 
 [ "$i" -gt 0 ] || note "no reviewer chain configured (config \`reviewers\` or \`extra_reviewers\`)"
 echo none >"$logfile.reviewer"
+echo 0 >"$logfile.entry"
 note "chain exhausted: no cross-model review ran (raw output kept in $work)"
 exit 1

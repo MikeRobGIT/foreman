@@ -595,6 +595,17 @@ check "...which ends before the Hooks section" appears_before "$sk" '### Worker 
 check "...and the Hooks section comes before the Backlog UI section" appears_before "$sk" '## Hooks' '## Backlog UI'
 check "plugin version 0.5.0" grep -qF '"version": "0.5.0"' "$root/.claude-plugin/plugin.json"
 
+echo "## review.sh .entry and cfg.chain(use_env=False)"
+cd "$R"
+chain 60 30 200 quota good >"$T/chain.md"; rv
+check ".entry: a fall-through to the second entry writes 2" test "$(cat "$T/out/review.log.entry" 2>/dev/null)" = 2
+chain 60 30 200 quota >"$T/chain.md"; rv
+check ".entry: an exhausted chain writes 0" test "$(cat "$T/out/review.log.entry" 2>/dev/null)" = 0
+check ".entry: a TERM-killed run writes none" test ! -e "$T/out/term.log.entry"
+mkdir -p "$T/ue/.claude" && printf -- '---\nreviewers:\n  - { use: codex, model: m }\n---\n' >"$T/ue/.claude/foreman.config.md"
+check "cfg.chain(use_env=False) ignores FOREMAN_CONFIG" test "$(cd "$root/scripts" && FOREMAN_CONFIG=$T/chain.md python3 -c "import cfg; print(cfg.chain('$T/ue', use_env=False)[0][0], cfg.chain('$T/ue')[0][0])")" = "codex quota"
+cd "$T"
+
 echo "## backlog.py + ui.py"
 check "test_backlog.py" python3 "$root/tests/test_backlog.py"
 check "test_ui_api.py" python3 "$root/tests/test_ui_api.py"
