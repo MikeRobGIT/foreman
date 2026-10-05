@@ -1,6 +1,7 @@
 #!/bin/bash
 # Claude Code CLI in print mode: plan mode, a read-only tool allowlist, every other prompt auto-denied.
 # stream-json so the stall watchdog sees progress; the review is the final `result` event.
+# foreman: reads-repo
 . "$(dirname "$0")/_lib.sh"
 args=(-p --output-format stream-json --verbose --permission-mode plan --permission-prompts none
   --allowedTools "Read,Grep,Glob,Bash(git diff:*),Bash(git log:*),Bash(git show:*)"

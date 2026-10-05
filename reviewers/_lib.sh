@@ -14,6 +14,13 @@ ERR=$log.err
 
 fall() { echo "fall through: $*" >&2; exit 10; }
 
+# Spec mode (review.sh --spec): only a reviewer that reads the repo can check a design against the code.
+# Every adapter without a `# foreman: reads-repo` line falls through here, at source time, before it
+# builds a diff or calls its CLI.
+if [ "${FOREMAN_REVIEW_MODE:-}" = spec ] && ! grep -q '^# foreman: reads-repo' "$0"; then
+  fall "spec mode needs an adapter that reads the repo (no '# foreman: reads-repo' line in $(basename "$0"))"
+fi
+
 # run_tool <stderr-regex> <stdout-regex> <stdin-file> <cmd...>
 # Runs the tool with stdout -> $OUT and stderr -> $ERR. Returns 10 as soon as either regex matches
 # (killing the tool: opencode retries a 429 forever), else the tool's exit code. Match only lines that

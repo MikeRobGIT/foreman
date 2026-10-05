@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Fold /foreman worker reports into the backlog and the rules files.
 
-Usage: bk.py <repo-dir> [--dry-run] report.json [report.json ...]
+Usage: bk.py <repo-dir> [--dry-run] [--no-fetch] report.json [report.json ...]
 
 The backlog path (`backlog_path`) and the row id prefix (`id_prefix`, default IB) come from the
 project's foreman config (see cfg.py). The examples below use the default prefix.
@@ -19,8 +19,10 @@ adds `pr`):
 
 - `done` flips a `ready` row to `done (#pr)` and appends `**DONE (#pr):** note` to its
   acceptance column. `append` adds a note to any row without touching its status.
-- `IB-NEW-x` placeholders are numbered from the backlog's real max id, per report, and
-  rewritten everywhere in that report's text (workers' own numbering always collided).
+- `IB-NEW-x` placeholders are numbered from the real max id, per report, and rewritten everywhere
+  in that report's text (workers' own numbering always collided). The max covers this file,
+  origin's default branch and every open backlog UI branch (`backlog/ui-*`, fetched first unless --no-fetch), so a
+  new row never takes an id an unmerged UI PR already uses.
 - A new row must have exactly 5 ` | ` separators (a stray pipe shifts the table's columns)
   and no newline (rows stay single-line).
 - A rule note applies only when `old` matches exactly once; anything else is reported.
@@ -30,10 +32,12 @@ adds `pr`):
 import json
 import os
 import re
+import subprocess
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import cfg  # noqa: E402
+import backlog  # noqa: E402
 
 
 def walk(value, fn):
@@ -47,7 +51,7 @@ def walk(value, fn):
 
 
 def main():
-    args = [a for a in sys.argv[1:] if a != '--dry-run']
+    args = [a for a in sys.argv[1:] if a not in ('--dry-run', '--no-fetch')]
     dry = '--dry-run' in sys.argv
     if len(args) < 2:
         raise SystemExit(__doc__)
@@ -57,13 +61,19 @@ def main():
     BACKLOG = cfg.get(repo, 'backlog_path', '.claude/improvement-backlog.md')
     P = cfg.get(repo, 'id_prefix', 'IB')
     E = re.escape(P)
-    ROW = re.compile(rf'^\| {E}-(\d+) \|')
+    ROW = backlog.row_pattern(P)
     NEW = re.compile(rf'{E}-NEW-[A-Za-z0-9]+')
 
     path = os.path.join(repo, BACKLOG)
     lines = open(path).read().split('\n')
     ids = [int(m.group(1)) for l in lines for m in [ROW.match(l)] if m]
-    next_id = max(ids) + 1
+    if '--no-fetch' not in sys.argv:
+        try:  # best effort: a prompt or a stalled remote must not hang the loop's bookkeeping
+            subprocess.run(['git', 'fetch', '-q', '--prune', 'origin', backlog.UI_REFSPEC], cwd=repo, capture_output=True,
+                           stdin=subprocess.DEVNULL, env={**os.environ, 'GIT_TERMINAL_PROMPT': '0'}, timeout=30)
+        except subprocess.TimeoutExpired:
+            pass
+    next_id = first_id = max(max(ids), backlog.reserved_max_id(repo, BACKLOG, P)) + 1
     anchor = max(n for n, l in enumerate(lines) if (m := ROW.match(l)) and int(m.group(1)) == max(ids))
 
     def find(id_):
@@ -143,10 +153,11 @@ def main():
             log.append(f'append {a["id"]}')
 
         for row in rep.get('new_rows', []):
-            if '\n' in row:
+            issue = (backlog.line_problems(row) or [None])[0]
+            if issue == ('newline',):
                 problems.append(f'{row[:12]}: new row has a newline')
-            elif row.count(' | ') != 5:
-                problems.append(f'{row[:12]}: {row.count(" | ")} " | " separators, want 5 (escape a pipe as \\|)')
+            elif issue:
+                problems.append(f'{row[:12]}: {issue[1]} " | " separators, want 5 (escape a pipe as \\|)')
             else:
                 new_rows.append(row)
                 log.append(f'new    {row[:60]}')
@@ -174,7 +185,7 @@ def main():
         print('\nPROBLEMS (nothing written):\n  ' + '\n  '.join(problems))
         raise SystemExit(1)
     if dry:
-        print(f'\ndry run: ok, {len(new_rows)} new rows from {P}-{max(ids) + 1}')
+        print(f'\ndry run: ok, {len(new_rows)} new rows from {P}-{first_id}')
         return
     open(path, 'w').write('\n'.join(lines))
     for f, t in edits.items():

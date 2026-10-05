@@ -12,6 +12,10 @@
 # A waiting run clears a stale slot: owner file untouched for 90+ minutes (its holder died), or no owner
 # file and the directory older than 10 minutes (its taker died before writing one). Never remove a
 # fresh slot by hand. Exits with the command's exit code, or 3 when no slot frees up in time.
+#
+# The command runs from the checkout's top level. When it passes, is exactly one argument equal to the config's
+# `gate`, and no --name was given, a gate receipt is minted for the working tree (state.py mint): the hooks
+# then allow a push of that tree. Untracked files the command creates are left out of the receipt.
 set -uo pipefail
 
 here=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
@@ -59,12 +63,30 @@ done
 [ -n "$slot" ] || { echo "gate-lock: no free slot in $root after $tries tries" >&2; exit 3; }
 
 echo "$owner $(date '+%Y-%m-%d %H:%M:%S')" > "$root/$slot/owner"
-( while sleep "${FOREMAN_LOCK_BEAT:-60}"; do kill -0 $$ 2>/dev/null && touch "$root/$slot/owner" 2>/dev/null || exit; done ) &
+# The heartbeat's own output goes to /dev/null: its `sleep` outlives the script by up to a beat, and a caller
+# capturing gate-lock's output would otherwise wait for it.
+( while sleep "${FOREMAN_LOCK_BEAT:-60}"; do kill -0 $$ 2>/dev/null && touch "$root/$slot/owner" 2>/dev/null || exit; done ) >/dev/null 2>&1 &
 beat=$!
-release() { kill "$beat" 2>/dev/null; rm -f "$root/$slot/owner"; rmdir "$root/$slot" 2>/dev/null; }
+before=""
+release() { kill "$beat" 2>/dev/null; rm -f "$root/$slot/owner"; rmdir "$root/$slot" 2>/dev/null; [ -z "$before" ] || rm -f "$before"; }
 trap release EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
 
 echo "gate-lock: $owner holds $root/$slot" >&2
+top=$(/usr/bin/git rev-parse --show-toplevel 2>/dev/null) || top=""
+if [ -n "$top" ]; then
+  cd "$top" || exit 2
+  before=$(mktemp "${TMPDIR:-/tmp}/foreman-untracked.XXXXXX")
+  /usr/bin/git ls-files --others --exclude-standard -z >"$before" 2>/dev/null
+fi
 if [ $# -eq 1 ]; then bash -c "$1"; else "$@"; fi
+rc=$?
+if [ -n "$before" ]; then
+  # an empty gate never mints: with no `gate` key cfg.py prints nothing, and '' would equal it
+  if [ "$rc" = 0 ] && [ -z "$name" ] && [ $# -eq 1 ] && [ -n "$1" ] && [ "$1" = "$(python3 "$here/cfg.py" "$main" gate)" ]; then
+    python3 "$here/state.py" mint "$top" "$owner" "$1" "$before" >/dev/null ||
+      echo "gate-lock: could not mint a gate receipt" >&2
+  fi
+fi
+exit "$rc"
