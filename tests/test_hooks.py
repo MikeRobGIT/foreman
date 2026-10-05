@@ -2935,5 +2935,139 @@ class SessionStartTest(Case):
         self.assertEqual(sorted(os.listdir(self.fx.tmp)), before)
 
 
+class BatchStateCheckpointTest(BatchStateCase):
+    """Duty 2: the checkpoint gate on AskUserQuestion."""
+
+    def test_a_question_is_gated_until_the_table_is_in_the_assistants_text(self):
+        self.passed(self.b1)
+        self.batches('set', self.b2, 'status=parked', 'reason=open-question')
+        why = self.ask()
+        self.assertIn(f'run `python3 {SCRIPTS}/batches.py table checkpoint {self.wave}`', why)
+        self.assertIn('hooks_disabled: [batch_state]', why)
+        table = self.batches('table', 'checkpoint', self.wave)
+        self.tool_result(table)
+        d = dict(self.fx.payload('AskUserQuestion', {'questions': [{'question': 'Q?', 'header': 'Release'}]}),
+                 transcript_path=self.main)
+        out, _ = self.fx.hook('pretool', d)                    # shown, not in the text yet: the table rides along
+        self.assertEqual(out['hookSpecificOutput']['updatedInput']['questions'][0]['question'],
+                         table.rstrip('\n') + '\n\nQ?')
+        self.assertEqual(out['hookSpecificOutput']['permissionDecision'], 'ask')
+        self.say('Spec checkpoint:\n\n' + table + '\nWhich batches should I release?')
+        self.assertIsNone(self.ask())
+        self.assertIsNone(self.ask(question='Anything else?'))   # any header is gated, and passes once pasted
+
+    def test_a_question_under_any_header_is_gated_at_the_checkpoint(self):
+        self.passed(self.b1)
+        why = self.call('AskUserQuestion', {'questions': [{'question': 'Should I approve the plan as written?',
+                                                           'header': 'Approve', 'multiSelect': False,
+                                                           'options': []}]})[0]
+        self.assertIn(f'run `python3 {SCRIPTS}/batches.py table checkpoint {self.wave}`', why)
+        self.assertIn('hooks_disabled: [batch_state]', why)
+
+    def test_a_stale_stamp_and_a_re_padded_paste(self):
+        self.passed(self.b1)
+        table = self.batches('table', 'checkpoint', self.wave)
+        notes = os.path.join(self.fx.tmp, 'm.txt')
+        write(notes, 'rename the helper\n')
+        self.batches('note', self.b1, 'minors', notes)
+        self.say(table)
+        self.assertIn('the table changed since it was shown', self.ask())
+        table = self.batches('table', 'checkpoint', self.wave)
+        lines = table.splitlines()
+        padded = [lines[0], '  ' + lines[1].replace('|', ' |  '), '| --- ' * 9 + '|'] + [l.replace(' | ', '  |   ') for l in lines[3:]]
+        self.say('\n'.join(padded))
+        self.assertIsNone(self.ask())
+
+    def test_a_pipe_in_a_minor_finding_and_a_fenced_paste_round_trip(self):
+        self.passed(self.b1)
+        notes = os.path.join(self.fx.tmp, 'm.txt')
+        write(notes, 'split `a | b` into two cases\n')
+        self.batches('note', self.b1, 'minors', notes)
+        table = self.batches('table', 'checkpoint', self.wave)
+        self.assertIn('split `a \\| b` into two cases', table)
+        self.say('```\n' + table + '```')
+        self.assertIsNone(self.ask())
+
+    def test_only_the_checkpoint_moment_is_gated(self):
+        self.assertIsNone(self.ask())                                   # no batch files
+        self.batches('set', self.b1, 'status=review')
+        self.assertIsNone(self.ask(question='Merge PR #12 now that it is released?'))   # nothing passed
+        self.passed(self.b1)
+        self.batches('set', self.b2, 'status=review')
+        self.assertIsNone(self.ask())                                   # a batch of the wave is still in review
+        self.batches('set', self.b2, 'status=parked', 'reason=no-pass')
+        self.assertIsNotNone(self.ask())
+
+    def test_two_waves_at_the_checkpoint_need_both_tables(self):
+        w2 = name_at(self.t0 + 600, 'w2a')
+        self.passed(self.b1)
+        self.passed(w2)
+        self.say(self.batches('table', 'checkpoint', self.wave))
+        self.assertIn(f'table checkpoint {w2[:-1]}', self.ask())
+        self.say(self.batches('table', 'checkpoint', w2[:-1]))
+        self.assertIsNone(self.ask())
+
+    def test_a_comment_round_that_ends_passed_again_is_gated_again(self):
+        self.passed(self.b1)
+        self.say(self.batches('table', 'checkpoint', self.wave))
+        self.assertIsNone(self.ask())
+        self.batches('stamp', self.b1, 'comment_sent')
+        self.assertIsNone(self.ask())                                   # in review: not the checkpoint
+        self.batches('add-round', self.b1, 'r=2', 'sha=' + 'd' * 40, 'entry=0', 'explore=pass', 'crit=0', 'imp=0',
+                     'minor=0')
+        self.passed(self.b1, 'd' * 40)
+        self.assertIn('the table changed since it was shown', self.ask())
+        self.say(self.batches('table', 'checkpoint', self.wave))
+        self.assertIsNone(self.ask())
+
+    def test_the_third_deny_against_one_table_passes_and_a_new_table_resets_the_count(self):
+        self.passed(self.b1)
+        self.assertIsNotNone(self.ask())
+        self.assertIsNotNone(self.ask())
+        why, err = self.call('AskUserQuestion', {'questions': []})
+        self.assertIsNone(why)
+        self.assertIn('let this call through after 2 denies', err)
+        self.passed(self.b2)                                            # the table changes: the count starts again
+        self.assertIsNotNone(self.ask())
+
+    def test_a_corrupt_batch_file_and_an_unreadable_transcript_fail_open(self):
+        self.passed(self.b1)
+        self.batches('table', 'checkpoint', self.wave)
+        os.remove(self.main)
+        why, err = self.call('AskUserQuestion', {'questions': []})
+        self.assertIsNone(why)
+        self.assertIn('could not read the transcript', err)
+        write(os.path.join(self.fx.state, 'batches', 'S1', 'state', self.b2 + '.json'), '{torn')
+        why, err = self.call('AskUserQuestion', {'questions': []})
+        self.assertIsNone(why)
+        self.assertIn('foreman hook error: checkpoint_gate', err)
+
+
+class TranscriptTailTest(InProcess):
+    """assistant_lines reads a transcript from its end and stops at the first entry older than the stamp."""
+
+    def test_reading_stops_at_the_first_older_entry_from_the_end(self):
+        now = time.time()
+        path = os.path.join(self.fx.tmp, 't.jsonl')
+        # an out-of-order first line: a reader that scanned forward and filtered by time would find it
+        lines = [{'type': 'assistant', 'timestamp': iso(now + 100), 'message': {'content': [{'type': 'text', 'text': 'EARLY'}]}},
+                 {'type': 'user', 'timestamp': iso(now - 100), 'message': {'content': 'old'}},
+                 {'type': 'assistant', 'timestamp': iso(now + 5), 'message': {'content': [{'type': 'text', 'text': 'a  b\nc'}]}}]
+        write(path, '\n'.join(json.dumps(e) for e in lines) + '\nnot json\n')
+        self.assertEqual(hooks.assistant_lines(path, now), {'ab', 'c'})
+
+    def test_a_large_transcript_stays_fast(self):
+        path = os.path.join(self.fx.tmp, 'big.jsonl')
+        old = json.dumps({'type': 'assistant', 'timestamp': iso(time.time() - 7200),
+                          'message': {'content': [{'type': 'text', 'text': 'x' * 400}]}}) + '\n'
+        with open(path, 'w') as f:
+            f.write(old * 100_000)   # about 50 MB
+            f.write(json.dumps({'type': 'assistant', 'timestamp': iso(time.time()),
+                                'message': {'content': [{'type': 'text', 'text': '| t |'}]}}) + '\n')
+        start = time.time()
+        self.assertEqual(hooks.assistant_lines(path, time.time() - 60), {'|t|'})
+        self.assertLess(time.time() - start, 0.5)
+
+
 if __name__ == '__main__':
     unittest.main()

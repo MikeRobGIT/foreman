@@ -15,6 +15,7 @@ WANT = {
     ('SessionEnd', None): 'session-end',
     ('PreToolUse', 'Bash'): 'pretool',
     ('PreToolUse', 'Edit|Write|MultiEdit|NotebookEdit'): 'pretool',
+    ('PreToolUse', 'AskUserQuestion|TaskStop'): 'pretool',
     ('PostToolUse', 'Edit|Write|MultiEdit'): 'posttool',
     ('PostToolUse', 'Bash'): 'posttool',
     ('SubagentStart', None): 'subagent-start',

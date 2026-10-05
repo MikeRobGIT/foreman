@@ -158,6 +158,7 @@ class Hook:
         self.agent = inp.get('agent_id')
         self.cwd = inp.get('cwd') or os.getcwd()
         self.denies = []
+        self.updated = None   # a new tool_input to run the call with (piece 11, probe P3)
         self.touch = set()
         self._active = {}
 
@@ -1472,6 +1473,132 @@ BASH_PIECES[10] = spec_gate
 EDIT_PIECES[10] = spec_gate_edit
 
 
+# ---- piece 11: batch state (worker deny, checkpoint gate, report gate, TaskStop guard, release check) ------------
+
+WAY_OUT = ' (to turn this check off: `hooks_disabled: [batch_state]` in the foreman config)'
+
+
+def batch_store(repo, h):
+    return batches.Store(repo.main, repo.dirs, h.sid)
+
+
+def squash(line):
+    return re.sub(r'\s+', '', line)
+
+
+def reverse_lines(f, block=1 << 16):
+    """The lines of a binary file, last first, read in blocks from its end."""
+    f.seek(0, os.SEEK_END)
+    pos, rest = f.tell(), b''
+    while pos > 0:
+        n = min(block, pos)
+        pos -= n
+        f.seek(pos)
+        parts = (f.read(n) + rest).split(b'\n')
+        rest = parts[0]
+        yield from reversed(parts[1:])
+    yield rest
+
+
+def assistant_lines(path, since):
+    """The whitespace-free lines of the assistant text blocks a transcript holds from `since` (epoch seconds, floored
+    to the second like the transcript's ISO timestamps) on. Read from the end, it stops at the first entry older than
+    `since`, so a long run's transcript costs only its tail. Raises OSError when the transcript can't be read."""
+    if not path:
+        raise OSError('no transcript_path')
+    since, out = int(since), set()
+    with open(path, 'rb') as f:
+        for raw in reverse_lines(f):
+            try:
+                e = json.loads(raw)
+            except ValueError:
+                continue
+            if not isinstance(e, dict):
+                continue
+            t = iso_time(e['timestamp']) if isinstance(e.get('timestamp'), str) else None
+            if t is not None and t < since:
+                break
+            msg = e.get('message')
+            if e.get('type') != 'assistant' or not isinstance(msg, dict) or not isinstance(msg.get('content'), list):
+                continue
+            for b in msg['content']:
+                if isinstance(b, dict) and b.get('type') == 'text' and isinstance(b.get('text'), str):
+                    out.update(squash(line) for line in b['text'].splitlines())
+    return out
+
+
+def pasted(text, path, at):
+    """True when every line of `text` is a line of the assistant's own text written since `at`, whitespace ignored.
+    A tool result doesn't count: the human sees only the assistant's text."""
+    have = assistant_lines(path, at)
+    return all(squash(line) in have for line in text.splitlines() if squash(line))
+
+
+def table_problem(h, store, name, text, cmd, where):
+    """None when the stamp `name` holds `text` and its lines were pasted after it, else the deny reason. An unreadable
+    transcript fails open."""
+    shown = store.read(name)
+    if not isinstance(shown, dict):
+        return f'run `{cmd}` and paste its output as text {where}'
+    if shown.get('text') != text:
+        return f'the table changed since it was shown; run `{cmd}` again and paste its output as text {where}'
+    try:
+        if pasted(text, h.inp.get('transcript_path'), float(shown.get('at', 0))):
+            return None
+    except OSError as e:
+        print(f'foreman: batch_state could not read the transcript ({e}), so the table check is skipped', file=sys.stderr)
+        return None
+    return (f"paste the output of `{cmd}` as text {where}: a tool result doesn't count, because the human sees only "
+            'your text')
+
+
+def escaped(repo, store, name, tid):
+    """The way out of a deny loop: after two denies against one unchanged table (id `tid`), the third call passes."""
+    seen = store.read(name)
+    count = int(seen.get('count', 0)) if isinstance(seen, dict) and seen.get('id') == tid else 0
+    if count >= 2:
+        print(f'foreman: batch_state let this call through after {count} denies against the same table',
+              file=sys.stderr)
+        return True
+    state.write_json(store.path(repo.dirs[0], name), {'id': tid, 'count': count + 1})
+    return False
+
+
+def effective(repo, h, b):
+    """A batch's status at the checkpoint: a `passed` batch whose release hooks.py recorded counts as released."""
+    st = b.get('status') or 'spec'
+    return 'released' if st == 'passed' and released(repo, h.sid, b['batch']) else st
+
+
+def checkpoint_gate(h, ti):
+    """Duty 2: at the checkpoint moment (a wave of the run has a passed batch and none in spec or review), every
+    AskUserQuestion needs that wave's current checkpoint table pasted in the assistant's text."""
+    repo = repo_at(h.cwd) if not h.agent else None
+    if not h.active(repo, 'batch_state'):
+        return
+    store = batch_store(repo, h)
+    waves, tables = {}, []
+    for b in store.batches():
+        waves.setdefault(batches.wave_of(b['batch']), []).append(b)
+    for wave, bs in sorted(waves.items()):
+        st = {effective(repo, h, b) for b in bs}
+        if 'passed' not in st or st & {'spec', 'review'}:
+            continue
+        h.touch.add(repo)
+        text, tid = batches.render_checkpoint(store, wave, bs)
+        why = table_problem(h, store, f'{wave}.shown', text, f'python3 {HERE}/batches.py table checkpoint {wave}',
+                            'before asking')
+        shown = store.read(f'{wave}.shown')
+        if why and isinstance(shown, dict) and shown.get('text') == text:   # shown, not yet in the transcript (P3)
+            tables.append(text)
+        elif why and not escaped(repo, store, f'{wave}.denies', tid):
+            h.deny(why + WAY_OUT)
+    questions = ti.get('questions')
+    if tables and not h.denies and isinstance(questions, list) and questions and isinstance(questions[0], dict):
+        first = dict(questions[0], question='\n\n'.join(tables + [str(questions[0].get('question', ''))]))
+        h.updated = dict(ti, questions=[first] + questions[1:])
+
+
 # ---- pretool / posttool ---------------------------------------------------------------------------
 
 def run_piece(piece, *args):
@@ -1497,6 +1624,8 @@ def pretool(h):
             repo = repo_at(path)
             for k in sorted(EDIT_PIECES):
                 run_piece(EDIT_PIECES[k], h, repo, path)
+    elif tool == 'AskUserQuestion':
+        run_piece(checkpoint_gate, h, ti)
     briefing_text = None
     if not h.denies:   # a denied call carries no briefing: it may not be shown, and `briefed` would be spent
         try:
@@ -1507,6 +1636,9 @@ def pretool(h):
         print(json.dumps({'hookSpecificOutput': {
             'hookEventName': 'PreToolUse', 'permissionDecision': 'deny',
             'permissionDecisionReason': 'foreman: ' + '; '.join(dict.fromkeys(h.denies))}}), flush=True)
+    elif h.updated is not None:
+        print(json.dumps({'hookSpecificOutput': {'hookEventName': 'PreToolUse', 'permissionDecision': 'ask',
+                                                 'updatedInput': h.updated}}), flush=True)
     elif briefing_text:
         print(json.dumps({'hookSpecificOutput': {'hookEventName': 'PreToolUse', 'additionalContext': briefing_text}}),
               flush=True)
