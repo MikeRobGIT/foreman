@@ -87,7 +87,8 @@ Run-only pieces act while the session's **run marker** exists: a prompt starting
 not `ui` or `init`) writes it, the skill runs `hooks.py run-end` when the run ends, `/clear` and logout delete it,
 and it expires after 48 hours. A session moved to the background, forked or resumed gets a new id; it keeps the run
 through an alias file `runs/<new id>.json`, found from the `continued-in` record ending the old transcript. `/clear`
-and logout leave a run another live session still owns, and end it once no session holds it.
+and logout leave a run another live session may still own; a marker no session holds any more expires by its
+48-hour TTL.
 
 | id | applies | what it does |
 |---|---|---|

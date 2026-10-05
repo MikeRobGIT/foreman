@@ -349,11 +349,12 @@ def carried(d, sid):
     return False
 
 
-def leave_run(sid, transcript_path):
+def leave_run(sid):
     """/clear or logout: this session leaves its run, which another live session may still own. A marker another live
     alias still names stays, marked `ended` (its TTL still runs). An alias is removed, and with it the marker it names
-    when no other alias names that marker and its session is gone too: it ended (`ended`), or its transcript records
-    the move to this session (a move to the background never ends the old id). `run-end` (end_run) removes all."""
+    when no other alias names that marker and its own session ended too (`ended`). A marker whose session moved to the
+    background without a SessionEnd can't be told from a live fork's, so it is kept and expires by its TTL. `run-end`
+    (end_run) removes all."""
     if not sid or os.sep in sid:
         return
     for home in {state.home(), state.DEFAULT_HOME}:
@@ -366,15 +367,13 @@ def leave_run(sid, transcript_path):
             run = alias_target(a)
             target = os.path.join(d, 'runs', f'{run}.json')
             m = state.read_json(target) if run else None
-            if (isinstance(m, dict) and 'alias' not in m and not carried(d, run)
-                    and (m.get('ended') or (transcript_path and continued_in(
-                        os.path.join(os.path.dirname(transcript_path), run + '.jsonl'), sid)))):
+            if isinstance(m, dict) and 'alias' not in m and m.get('ended') and not carried(d, run):
                 rm(target)
 
 
 def session_end(h):
     if h.inp.get('reason') in ('clear', 'logout'):
-        leave_run(h.sid, h.inp.get('transcript_path'))
+        leave_run(h.sid)
 
 
 def session_start(h):

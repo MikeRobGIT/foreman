@@ -3422,7 +3422,8 @@ class ContinuationTest(BatchStateCase):
         self.assertEqual(self.session_start(source='resume'), 'export FOREMAN_SESSION=S1\n')
 
     def test_clear_in_a_true_fork_leaves_the_live_original_its_run(self):
-        self.fork_alias()
+        self.continued()            # adopt's own path: the record it needs, then SessionStart fork; S1 still runs
+        self.session_start()
         self.session_end('S2')
         self.assertEqual((os.path.exists(self.runs_file('S2')), os.path.exists(self.runs_file('S1'))), (False, True))
         self.assertNotIn('ended', self.fx.marker())
@@ -3435,17 +3436,25 @@ class ContinuationTest(BatchStateCase):
         self.session_end('S2')
         self.assertEqual((os.path.exists(self.runs_file('S2')), os.path.exists(self.runs_file('S1'))), (False, False))
 
-    def test_clear_after_a_move_to_the_background_leaves_no_marker(self):
+    def test_clear_after_a_move_to_the_background_leaves_the_marker_to_its_ttl(self):
         self.continued()
         self.session_start()
-        self.session_end('S2')   # the original never saw a SessionEnd; its transcript records the move
-        self.assertEqual((os.path.exists(self.runs_file('S2')), os.path.exists(self.runs_file('S1'))), (False, False))
+        self.session_end('S2')   # a move and a true fork look alike: the original's marker is kept, to expire by TTL
+        self.assertEqual((os.path.exists(self.runs_file('S2')), os.path.exists(self.runs_file('S1'))), (False, True))
+        self.assertNotIn('ended', self.fx.marker())
 
     def test_a_new_run_in_the_original_forgets_that_it_ended(self):
         self.fork_alias()
         self.session_end('S1')
         self.fx.start_run('S1')
         self.assertNotIn('ended', self.fx.marker())
+
+    def test_a_new_run_in_the_continued_session_forgets_that_it_ended(self):
+        self.fork_alias()
+        self.session_end('S1')
+        self.fx.start_run('S2')   # resolves to the run's marker through the alias
+        self.assertNotIn('ended', self.fx.marker())
+        self.assertEqual(state.read_json(self.runs_file('S2'))['alias'], 'S1')
 
     def test_run_end_removes_every_alias_of_the_run(self):
         self.fork_alias('S2')
