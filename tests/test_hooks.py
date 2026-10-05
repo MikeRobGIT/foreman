@@ -2876,7 +2876,7 @@ class BatchStateCase(Case):
         d = self.fx.payload(tool, tool_input, sid=sid, agent=agent)
         d['transcript_path'] = self.main
         out, err = self.fx.hook('pretool', d)
-        if out and 'updatedInput' in out['hookSpecificOutput']:   # the table rode along (P3): not a clean pass
+        if out and 'updatedInput' in out['hookSpecificOutput']:   # no gate may rewrite the call: never a clean pass
             return 'updatedInput', err
         why = out['hookSpecificOutput'].get('permissionDecisionReason') if out else None
         return why, err
@@ -2991,15 +2991,39 @@ class BatchStateCheckpointTest(BatchStateCase):
         self.assertIn('hooks_disabled: [batch_state]', why)
         table = self.batches('table', 'checkpoint', self.wave)
         self.tool_result(table)
-        d = dict(self.fx.payload('AskUserQuestion', {'questions': [{'question': 'Q?', 'header': 'Release'}]}),
-                 transcript_path=self.main)
-        out, _ = self.fx.hook('pretool', d)                    # shown, not in the text yet: the table rides along
-        self.assertEqual(out['hookSpecificOutput']['updatedInput']['questions'][0]['question'],
-                         table.rstrip('\n') + '\n\nQ?')
-        self.assertEqual(out['hookSpecificOutput']['permissionDecision'], 'ask')
+        why = self.ask(question='Q?')                          # shown, not in the text yet: denied, not ridden along
+        self.assertIn(f'paste the output of `python3 {SCRIPTS}/batches.py table checkpoint {self.wave}` as text in a '
+                      'message of its own, make one more call, then ask; the hooks see your text only once the next '
+                      'call starts', why)
+        self.assertIn('hooks_disabled: [batch_state]', why)
         self.say('Spec checkpoint:\n\n' + table + '\nWhich batches should I release?')
         self.assertIsNone(self.ask())
         self.assertIsNone(self.ask(question='Anything else?'))   # any header is gated, and passes once pasted
+
+    def test_a_table_in_a_tool_result_is_denied_every_time_and_the_third_call_passes(self):
+        self.passed(self.b1)
+        self.tool_result(self.batches('table', 'checkpoint', self.wave))
+        for _ in range(2):
+            why = self.ask()
+            self.assertIn('as text in a message of its own, make one more call, then ask;', why)
+        self.assertIsNone(self.ask())                                   # the third deny against one table is the way out
+
+    def test_the_paste_in_its_own_message_releases_the_next_call_without_the_escape(self):
+        self.passed(self.b1)
+        table = self.batches('table', 'checkpoint', self.wave)
+        self.tool_result(table)
+        self.assertIsNotNone(self.ask())                                # deny 1 of 2: the escape is not reached
+        self.say(table)
+        self.assertIsNone(self.ask())                                   # the paste itself passes the call
+
+    def test_no_ask_user_question_call_is_ever_rewritten(self):
+        self.passed(self.b1)
+        table = self.batches('table', 'checkpoint', self.wave)
+        for step in (lambda: None, lambda: self.tool_result(table), lambda: self.say(table)):
+            step()
+            for _ in range(3):
+                self.assertNotEqual(self.call('AskUserQuestion', {'questions': [{'question': 'Q?', 'header': 'H'}]})[0],
+                                    'updatedInput')
 
     def test_a_question_under_any_header_is_gated_at_the_checkpoint(self):
         self.passed(self.b1)

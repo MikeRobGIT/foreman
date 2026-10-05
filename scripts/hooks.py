@@ -158,7 +158,6 @@ class Hook:
         self.agent = inp.get('agent_id')
         self.cwd = inp.get('cwd') or os.getcwd()
         self.denies = []
-        self.updated = None   # a new tool_input to run the call with (piece 11, probe P3)
         self.touch = set()
         self._active = {}
 
@@ -1538,7 +1537,8 @@ def pasted(text, path, at):
 
 def table_problem(h, store, name, text, cmd, where, again=None):
     """None when the stamp `name` holds `text` and its lines were pasted after it, else the deny reason. An unreadable
-    transcript fails open. `again` names the call to retry when the table was shown but isn't in the text yet (P3)."""
+    transcript fails open. `again` names what to do after the one more call when the table was shown but isn't in the
+    text yet (the hooks see the text only once the next call starts)."""
     shown = store.read(name)
     if not isinstance(shown, dict):
         return f'run `{cmd}` and paste its output as text {where}'
@@ -1551,8 +1551,8 @@ def table_problem(h, store, name, text, cmd, where, again=None):
         print(f'foreman: batch_state could not read the transcript ({e}), so the table check is skipped', file=sys.stderr)
         return None
     if again:
-        return (f'paste the output of `{cmd}` as text in a message of its own, make one more call, then run '
-                f'`{again}` again; the hooks see your text only once the next call starts')
+        return (f'paste the output of `{cmd}` as text in a message of its own, make one more call, then '
+                f'{again}; the hooks see your text only once the next call starts')
     return (f"paste the output of `{cmd}` as text {where}: a tool result doesn't count, because the human sees only "
             'your text')
 
@@ -1575,14 +1575,14 @@ def effective(repo, h, b):
     return 'released' if st == 'passed' and released(repo, h.sid, b['batch']) else st
 
 
-def checkpoint_gate(h, ti):
+def checkpoint_gate(h):
     """Duty 2: at the checkpoint moment (a wave of the run has a passed batch and none in spec or review), every
     AskUserQuestion needs that wave's current checkpoint table pasted in the assistant's text."""
     repo = repo_at(h.cwd) if not h.agent else None
     if not h.active(repo, 'batch_state'):
         return
     store = batch_store(repo, h)
-    waves, tables = {}, []
+    waves = {}
     for b in store.batches():
         waves.setdefault(batches.wave_of(b['batch']), []).append(b)
     for wave, bs in sorted(waves.items()):
@@ -1592,16 +1592,9 @@ def checkpoint_gate(h, ti):
         h.touch.add(repo)
         text, tid = batches.render_checkpoint(store, wave, bs)
         why = table_problem(h, store, f'{wave}.shown', text, f'python3 {HERE}/batches.py table checkpoint {wave}',
-                            'before asking')
-        shown = store.read(f'{wave}.shown')
-        if why and isinstance(shown, dict) and shown.get('text') == text:   # shown, not yet in the transcript (P3)
-            tables.append(text)
-        elif why and not escaped(repo, store, f'{wave}.denies', tid):
+                            'before asking', again='ask')
+        if why and not escaped(repo, store, f'{wave}.denies', tid):
             h.deny(why + WAY_OUT)
-    questions = ti.get('questions')
-    if tables and not h.denies and isinstance(questions, list) and questions and isinstance(questions[0], dict):
-        first = dict(questions[0], question='\n\n'.join(tables + [str(questions[0].get('question', ''))]))
-        h.updated = dict(ti, questions=[first] + questions[1:])
 
 
 def batch_call(h, sc, command):
@@ -1629,7 +1622,7 @@ def report_gate(h, sc):
     h.touch.add(repo)
     text, tid = batches.render_report(store, bs)
     why = table_problem(h, store, 'report.shown', text, f'python3 {HERE}/batches.py table report',
-                        'in the run report first', again='run-end')
+                        'in the run report first', again='run `run-end` again')
     if why and not escaped(repo, store, 'report.denies', tid):
         h.deny(why + WAY_OUT)
 
@@ -1758,7 +1751,7 @@ def pretool(h):
             for k in sorted(EDIT_PIECES):
                 run_piece(EDIT_PIECES[k], h, repo, path)
     elif tool == 'AskUserQuestion':
-        run_piece(checkpoint_gate, h, ti)
+        run_piece(checkpoint_gate, h)
     elif tool == 'TaskStop':
         run_piece(taskstop_guard, h, ti)
     briefing_text = None
@@ -1771,9 +1764,6 @@ def pretool(h):
         print(json.dumps({'hookSpecificOutput': {
             'hookEventName': 'PreToolUse', 'permissionDecision': 'deny',
             'permissionDecisionReason': 'foreman: ' + '; '.join(dict.fromkeys(h.denies))}}), flush=True)
-    elif h.updated is not None:
-        print(json.dumps({'hookSpecificOutput': {'hookEventName': 'PreToolUse', 'permissionDecision': 'ask',
-                                                 'updatedInput': h.updated}}), flush=True)
     elif briefing_text:
         print(json.dumps({'hookSpecificOutput': {'hookEventName': 'PreToolUse', 'additionalContext': briefing_text}}),
               flush=True)
