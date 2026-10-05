@@ -2909,6 +2909,14 @@ class BatchStateWorkerTest(BatchStateCase):
         for command in (f"python3 {script} note {self.b1} minors 'a;b'", f'python3 {script} set x rows=$X',
                         f'python3 {script} rm x', f'python3 {script} set x status=spec --force', f'python3 {script}'):
             self.assertFalse(allowed(command), command)
+        quoted = f"python3 {script} set {self.b1} status=spec 'owned=app/home/[account]/page.tsx,app/(marketing)/a.tsx'"
+        self.assertTrue(allowed(quoted))
+        self.assertFalse(allowed(quoted, agent='a1'))
+
+    def test_a_worker_never_runs_batches_py_with_a_quoted_path(self):
+        script = os.path.join(SCRIPTS, 'batches.py')
+        command = f"python3 {script} set {self.b1} 'owned=app/home/[account]/page.tsx,app/(marketing)/a.tsx'"
+        self.assertIn('only the orchestrator writes batch state', self.bash(command, agent='a1') or '')
 
     def test_prune_ages_out_old_state_files(self):
         d = os.path.join(self.fx.state, 'batches', 'S0', 'state')

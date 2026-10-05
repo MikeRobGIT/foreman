@@ -115,6 +115,17 @@ class CommandTest(Base):
         self.assertIn(self.b1, listing)
         self.assertIn('worker:fw-' + self.b1, listing)
 
+    def test_next_js_paths_round_trip(self):
+        owned = 'app/home/[account]/page.tsx,app/(marketing)/layout.tsx,app/[...slug]/@modal/(.)x+y.tsx'
+        spec = 'docs/specs/app/(marketing)/[id]-design.md'
+        wt = os.path.join(self.tmp, 'wt/[x]/(y)')
+        self.ok('set', self.b1, 'owned=' + owned, 'spec=' + spec, 'worktree=' + wt, 'reviewer_model=opus[1m]')
+        b = self.show(self.b1)
+        self.assertEqual((b['owned'], b['spec'], b['worktree'], b['reviewer_model']), (owned, spec, wt, 'opus[1m]'))
+        for kv in ('owned=a b.tsx', 'owned=a;b', 'owned=$X', 'owned=a{b}', "owned=a'b", 'worktree=rel/[x]',
+                   'rows=IB-[1]'):
+            self.assertIn('bad value for', self.refused('set', self.b1, kv), kv)
+
     def test_refusals(self):
         self.assertIn('unknown key: colour', self.refused('set', self.b1, 'colour=red'))
         self.assertIn('bad value for status: done', self.refused('set', self.b1, 'status=done'))

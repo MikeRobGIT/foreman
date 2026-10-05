@@ -38,6 +38,7 @@ RUN_TTL = 48 * 3600
 NAME = re.compile(r'^[A-Za-z0-9_-]+$')
 SHA = re.compile(r'^[0-9a-f]{7,40}$')
 TOKEN = re.compile(r'^[A-Za-z0-9_.,/:@+-]+$')
+PATHS = re.compile(r'[A-Za-z0-9_.,/:@+()\[\]-]+')   # TOKEN plus the brackets and parens of Next.js routes
 TASK_ID = re.compile(r'^[A-Za-z0-9_.:@-]+$')
 INT = re.compile(r'^(0|[1-9][0-9]*)$')
 STATUSES = ('spec', 'review', 'passed', 'released', 'pr', 'parked')
@@ -52,12 +53,12 @@ REASONS = {
 FIELDS = {
     'status': lambda v: v in STATUSES,
     'reason': lambda v: v in REASONS,
-    'rows': TOKEN.match, 'owned': TOKEN.match, 'branch': TOKEN.match, 'spec': TOKEN.match,
-    'worktree': lambda v: TOKEN.match(v) and v.startswith('/'),
+    'rows': TOKEN.match, 'owned': PATHS.fullmatch, 'branch': TOKEN.match, 'spec': PATHS.fullmatch,
+    'worktree': lambda v: PATHS.fullmatch(v) and v.startswith('/'),
     'fork_base': SHA.match, 'sha': SHA.match, 'reviewed_sha': SHA.match, 'released_sha': SHA.match,
     'verified_sha': SHA.match,
     'pr': lambda v: INT.match(v) and v != '0',
-    'reviewer_model': TOKEN.match,
+    'reviewer_model': PATHS.fullmatch,
 }
 COUNTERS = ('pr_rounds', 'bounces')
 TEXTS = ('minors', 'questions', 'park_note')

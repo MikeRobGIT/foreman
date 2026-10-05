@@ -157,8 +157,10 @@ W1-W6 to keep them apart from steps 0-12; W6's stop conditions replace the auton
     and build on its own.
   - **Batch state** is one file per batch, written only with `python3 $FOREMAN/batches.py` (the hooks deny a
     worker's call). The status band, the checkpoint and report tables and the hooks' gates read these files, so
-    record each step as it happens. Every argument is one plain word; free text (Minor findings, open questions,
-    a park note) goes in a scratch file passed to `note`. A refused call (exit 1) names the problem: fix the
+    record each step as it happens. Every argument is one plain word; wrap a `key=value` word holding `[`, `]`,
+    `(` or `)` in single quotes (`'owned=app/home/[account]/page.tsx'`): an unquoted `[…]` fails under zsh and
+    `(` is shell syntax in any shell. Free text (Minor findings, open questions, a park note) goes in a scratch
+    file passed to `note`. A refused call (exit 1) names the problem: fix the
     command and run it again, and never drop a state change. `batches.py show <batch>` prints the record with
     its live task ids and its remaining spec-phase time.
     - At launch, for each batch: `set <batch> status=spec rows=<id,…> owned=<file,…>`, then

@@ -626,6 +626,7 @@ decision: the spec phase parks them `open question` if they do.
 named `fw-<batch>`, never the bare batch name
 `set <batch> status=spec rows=<id,…> owned=<file,…>`
 `task <batch> add worker fw-<batch>`
+in single quotes (`'owned=app/home/[account]/page.tsx'`): an unquoted `[…]` fails under zsh and
 ToolSearch `select:TaskStop,Monitor`
 TaskStop takes only an id `batches.py` recorded
 Label every open question `- **Blocking:**` (the batch can't be built as
