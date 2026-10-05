@@ -49,7 +49,9 @@ check "template: commented-out reviewers = empty chain" test -z "$(tc chain)"
 check "template: timeout" test "$(tc reviewer_timeout_seconds)" = 900
 check "template: empty list" test -z "$(tc required_ci)"
 check "template: gate_exempt" test "$(tc gate_exempt | tr '\n' ' ')" = "docs/** **/*.md "
-check "template: hook lists default empty" test -z "$(tc forbid_trailers)$(tc hooks_disabled)"
+check "template: hooks_disabled defaults empty" test -z "$(tc hooks_disabled)"
+check "template: forbid_trailers ships the attribution default" test "$(tc forbid_trailers | tr '\n' '|')" = 'Co-Authored-By|Claude-Session|/^\W*Generated with \[?Claude Code/|'
+check "template: the hooks_disabled comment names batch_state" grep -qF 'spec_gate, batch_state, status_pane' "$root/templates/foreman.config.md"
 check "template: design_spec_dir" test "$(tc design_spec_dir)" = "docs/superpowers/specs"
 check "template: all six hook keys present" test "$(grep -c -E '^(forbid_trailers|gate_exempt|worker_agent_types|hooks_disabled|design_spec_dir|status_pane):' "$root/templates/foreman.config.md")" = 6
 mkdir -p "$T/tpl/.claude" && cp "$root/templates/improvement-backlog.md" "$T/tpl/.claude/" && printf -- '---\n---\n' >"$T/tpl/.claude/foreman.config.md"
@@ -605,6 +607,11 @@ check ".entry: a TERM-killed run writes none" test ! -e "$T/out/term.log.entry"
 mkdir -p "$T/ue/.claude" && printf -- '---\nreviewers:\n  - { use: codex, model: m }\n---\n' >"$T/ue/.claude/foreman.config.md"
 check "cfg.chain(use_env=False) ignores FOREMAN_CONFIG" test "$(cd "$root/scripts" && FOREMAN_CONFIG=$T/chain.md python3 -c "import cfg; print(cfg.chain('$T/ue', use_env=False)[0][0], cfg.chain('$T/ue')[0][0])")" = "codex quota"
 cd "$T"
+
+echo "## templates: open-question labels"
+check "spec template: Open questions names the Blocking label" grep -qF -- '`- **Blocking:**`' "$root/templates/spec.md"
+check "spec template: ...the Non-blocking label" grep -qF -- '`- **Non-blocking:**`' "$root/templates/spec.md"
+check "spec template: ...and None — <reason>" grep -qF -- '"None — <reason>"' "$root/templates/spec.md"
 
 echo "## backlog.py + ui.py"
 check "test_backlog.py" python3 "$root/tests/test_backlog.py"

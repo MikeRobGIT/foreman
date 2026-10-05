@@ -3208,5 +3208,50 @@ class BatchStateTaskStopTest(BatchStateCase):
         self.assertIsNone(self.bash(f'python3 {SCRIPTS}/batches.py show', agent='a1'))
 
 
+def template_trailers_line():
+    """The template's own `forbid_trailers:` line, so the test follows the shipped default."""
+    with open(os.path.join(HERE, '..', 'templates', 'foreman.config.md'), encoding='utf-8') as f:
+        return next(l for l in f if l.startswith('forbid_trailers:'))
+
+
+class TemplateTrailerTest(Case):
+    config = CONFIG.replace('forbid_trailers: [Co-Authored-By, Claude-Session, Generated with]\n', template_trailers_line())
+
+    def test_the_default_refuses_the_footer_and_nothing_like_it(self):
+        self.assertIn('Generated with', self.fx.bash(
+            'git commit -m "fix: x" -m "🤖 Generated with [Claude Code](https://claude.com/claude-code)"'))
+        self.assertIn('Generated with', self.fx.bash('gh pr create --title t --body "Generated with Claude Code"'))
+        self.assertIn('Co-Authored-By', self.fx.bash('git commit -m "x" -m "Co-Authored-By: a <a@b>"'))
+        for msg in ('the footer reads Generated with Claude Code', 'Generated with protoc 25.1'):
+            self.assertIsNone(self.fx.bash(f'git commit -m "x" -m "{msg}"'), msg)
+
+
+class AbsoluteGitTest(Case):
+    """`/usr/bin/git commit` and `/usr/bin/git push` are judged like `git commit` and `git push` (pieces 1, 2, 10)."""
+
+    def setUp(self):
+        super().setUp()
+        self.fx.start_run()
+        git(self.fx.work, 'switch', '-q', '-c', 'feat')
+
+    def test_the_gate_before_a_push(self):
+        self.fx.commit('app.py', 'print(2)\n')
+        self.assertIn('no passing gate for this tree', self.fx.bash('/usr/bin/git push -u origin HEAD'))
+        self.fx.gate()
+        self.assertIsNone(self.fx.bash('/usr/bin/git push -u origin HEAD'))
+
+    def test_the_worker_guard(self):
+        self.assertIn('no force-push', self.fx.bash('/usr/bin/git push --force', agent='a1'))
+        self.assertIn('no rebase', self.fx.bash('/usr/bin/git rebase origin/main', agent='a1'))
+
+    def test_the_spec_gate(self):
+        state.write_json(os.path.join(self.fx.state, 'batches', 'S1', 'agents', 'a1'),
+                         {'batch': 'w1b', 'spec': True, 'briefed': True, 'time': time.time()})
+        write(os.path.join(self.fx.work, 'app.py'), 'print(3)\n')
+        git(self.fx.work, 'add', 'app.py')
+        self.assertIn('this commit would include app.py', self.fx.bash('/usr/bin/git commit -m wip', agent='a1'))
+        self.assertIn("isn't released yet", self.fx.bash('/usr/bin/git push -u origin HEAD', agent='a1'))
+
+
 if __name__ == '__main__':
     unittest.main()
