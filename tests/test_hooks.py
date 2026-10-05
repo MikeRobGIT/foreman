@@ -2852,6 +2852,8 @@ class BatchStateCase(Case):
         d = self.fx.payload(tool, tool_input, sid=sid, agent=agent)
         d['transcript_path'] = self.main
         out, err = self.fx.hook('pretool', d)
+        if out and 'updatedInput' in out['hookSpecificOutput']:   # the table rode along (P3): not a clean pass
+            return 'updatedInput', err
         why = out['hookSpecificOutput'].get('permissionDecisionReason') if out else None
         return why, err
 
