@@ -97,7 +97,7 @@ and it expires after 48 hours.
 | `report_check` | tagged workers | a tagged worker's final report must end with a valid `json` block that `bk.py --dry-run` accepts; it is sent back once |
 | `script_allow` | run | `gate-lock.sh`, `wt-setup.sh`, `review.sh`, `bk.py`, `hooks.py` and `batches.py` (main session only) run without a permission prompt, in strict shapes only |
 | `spec_gate` | run, `spec-phase` workers | edits and commits stay in `design_spec_dir`, and nothing is pushed, until the orchestrator runs `hooks.py release <batch> <sha>` |
-| `batch_state` | run, orchestrator | a worker's `batches.py` call is denied; at the spec checkpoint every question waits for the current `batches.py table checkpoint` in the orchestrator's text, and `run-end` for `batches.py table report` (the third try against one unchanged table goes through); TaskStop needs a recorded task id, never a batch name, and stops a worker only after `hooks.py stopping`; `hooks.py release` needs a passed batch at its reviewed SHA and, in a manual run, the checkpoint table pasted after the pass |
+| `batch_state` | run, orchestrator | a worker's `batches.py` call is denied; at the spec checkpoint every question waits for the current `batches.py table checkpoint` in the orchestrator's text, and `run-end` for `batches.py table report` (the third try against one unchanged table goes through); TaskStop is refused with no id or with a batch name, and for a worker before `hooks.py stopping` (an id it doesn't know passes); `hooks.py release` needs a passed batch at its reviewed SHA and, in a manual run, the checkpoint table pasted after the pass |
 | `status_pane` | run | a band above the prompt: one line per batch (its status with the round or PR, and for a PR its CI, bots, unresolved threads and merge state); without batch files, one line per worker worktree |
 
 Turn pieces off per repo with `hooks_disabled: [<id>, …]` in the config. Your own `! <command>` is never checked:
@@ -127,7 +127,7 @@ Replace `/path/to/foreman` with the plugin's install path (the absolute path `/f
 covers a call made with the hooks off.
 
 **RTK.** An RTK Bash hook (`rtk hook claude` in a `PreToolUse` entry) rewrites `git …` to `rtk git …`, and Claude
-Code's worktree guard refuses that in a worktree-isolated worker, so the worker can't commit. Run RTK through a
+Code's worktree guard refuses that in a worktree-isolated worker, so the worker can't push. Run RTK through a
 wrapper that leaves `git` alone inside a worktree, and point the settings hook's `command` at it in place of
 `rtk hook claude`; `/foreman parallel` then stops warning about it:
 

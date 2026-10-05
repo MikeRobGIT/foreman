@@ -35,12 +35,12 @@ import cfg  # noqa: E402
 import state  # noqa: E402
 
 RUN_TTL = 48 * 3600
-NAME = re.compile(r'^[A-Za-z0-9_-]+$')
-SHA = re.compile(r'^[0-9a-f]{7,40}$')
-TOKEN = re.compile(r'^[A-Za-z0-9_.,/:@+-]+$')
+NAME = re.compile(r'[A-Za-z0-9_-]+')   # these validators take fullmatch: `^…$` with match lets a final newline in
+SHA = re.compile(r'[0-9a-f]{7,40}')
+TOKEN = re.compile(r'[A-Za-z0-9_.,/:@+-]+')
 PATHS = re.compile(r'[A-Za-z0-9_.,/:@+()\[\]-]+')   # TOKEN plus the brackets and parens of Next.js routes
-TASK_ID = re.compile(r'^[A-Za-z0-9_.:@-]+$')
-INT = re.compile(r'^(0|[1-9][0-9]*)$')
+TASK_ID = re.compile(r'[A-Za-z0-9_.:@-]+')
+INT = re.compile(r'0|[1-9][0-9]*')
 STATUSES = ('spec', 'review', 'passed', 'released', 'pr', 'parked')
 REASONS = {
     'open-question': 'open question', 'no-pass': 'no pass in {n} rounds', 'timed-out': 'spec phase timed out',
@@ -53,11 +53,11 @@ REASONS = {
 FIELDS = {
     'status': lambda v: v in STATUSES,
     'reason': lambda v: v in REASONS,
-    'rows': TOKEN.match, 'owned': PATHS.fullmatch, 'branch': TOKEN.match, 'spec': PATHS.fullmatch,
+    'rows': TOKEN.fullmatch, 'owned': PATHS.fullmatch, 'branch': TOKEN.fullmatch, 'spec': PATHS.fullmatch,
     'worktree': lambda v: PATHS.fullmatch(v) and v.startswith('/'),
-    'fork_base': SHA.match, 'sha': SHA.match, 'reviewed_sha': SHA.match, 'released_sha': SHA.match,
-    'verified_sha': SHA.match,
-    'pr': lambda v: INT.match(v) and v != '0',
+    'fork_base': SHA.fullmatch, 'sha': SHA.fullmatch, 'reviewed_sha': SHA.fullmatch, 'released_sha': SHA.fullmatch,
+    'verified_sha': SHA.fullmatch,
+    'pr': lambda v: INT.fullmatch(v) and v != '0',
     'reviewer_model': PATHS.fullmatch,
 }
 COUNTERS = ('pr_rounds', 'bounces')
@@ -183,7 +183,7 @@ class Store:
         since = self.started()
         out = []
         for n in sorted(names):
-            if NAME.match(n) and (since is None or batch_time(n) >= since):
+            if NAME.fullmatch(n) and (since is None or batch_time(n) >= since):
                 b = self.read(n + '.json')
                 if isinstance(b, dict):
                     out.append(b)
@@ -206,7 +206,7 @@ def session_id(dirs, given):
         if len({s for _, s in live}) > 1:
             print(f'batches.py: {len({s for _, s in live})} live runs; using session {sid}, the most recently touched '
                   '(pass --session <id> to pick another)', file=sys.stderr)
-    if not NAME.match(sid):
+    if not NAME.fullmatch(sid):
         raise Usage(f'bad session id: {sid}')
     return sid
 
@@ -243,7 +243,7 @@ def stamp(b, kind):
 
 def update(store, name, change):
     """Read-modify-write one batch under the lock; `change(b)` edits the record (new on first use)."""
-    if not NAME.match(name):
+    if not NAME.fullmatch(name):
         raise Usage(f'bad batch name: {name}')
     with store.lock():
         b = store.read(name + '.json') or new_batch(name)
@@ -265,6 +265,8 @@ def cmd_set(store, name, args):
                 raise Fail(f"status=released needs released_sha equal to reviewed_sha ({b.get('reviewed_sha') or 'unset'})")
             if st == 'parked' and not b.get('reason'):
                 raise Fail('status=parked needs reason=<reason>')
+            if st == 'pr' and 'pr' not in kv:
+                raise Fail('status=pr needs pr=<n> in the same call')
         if 'reviewed_sha' in kv:
             if kv.get('status') != 'passed':
                 raise Fail('reviewed_sha=<sha> goes with status=passed in the same call')
@@ -304,6 +306,8 @@ def cmd_stamp(store, name, kind):
         raise Usage(f'stamp takes one of {", ".join(STAMPS)}')
 
     def change(b):
+        if kind == 'comment_sent' and b.get('status') != 'passed':
+            raise Fail(f"stamp comment_sent needs status=passed ({b.get('status') or 'spec'})")
         stamp(b, kind)
         if kind == 'comment_sent':
             b['status'] = 'review'
@@ -312,7 +316,7 @@ def cmd_stamp(store, name, kind):
 
 
 def cmd_task(store, name, args):
-    if args[:1] == ['add'] and len(args) == 3 and args[1] in KINDS and TASK_ID.match(args[2]):
+    if args[:1] == ['add'] and len(args) == 3 and args[1] in KINDS and TASK_ID.fullmatch(args[2]):
         def change(b):
             tasks = b.setdefault('tasks', [])
             if not any(t['id'] == args[2] and t['kind'] == args[1] and t['live'] for t in tasks):
@@ -333,12 +337,12 @@ def cmd_task(store, name, args):
 
 
 def fallthrough_ok(v):
-    return all(re.match(r'^[A-Za-z0-9_-]+:(' + '|'.join(WHYS) + r')$', x) for x in v.split(','))
+    return all(re.fullmatch(r'[A-Za-z0-9_-]+:(' + '|'.join(WHYS) + r')', x) for x in v.split(','))
 
 
-ROUND = {'r': lambda v: INT.match(v) and v != '0', 'sha': SHA.match, 'entry': INT.match,
+ROUND = {'r': lambda v: INT.fullmatch(v) and v != '0', 'sha': SHA.fullmatch, 'entry': INT.fullmatch,
          'fallthrough': fallthrough_ok, 'explore': lambda v: v in ('pass', 'revise', 'none'),
-         'crit': INT.match, 'imp': INT.match, 'minor': INT.match}
+         'crit': INT.fullmatch, 'imp': INT.fullmatch, 'minor': INT.fullmatch}
 
 
 def cmd_add_round(store, name, args):
@@ -382,7 +386,7 @@ def spec_eligible(use, model, _effort):
     """True when review.sh --spec would run this entry: its adapter carries `# foreman: reads-repo` and, for
     `custom`, its command uses both {prompt_file} and {base} (custom.sh falls through otherwise)."""
     path = os.path.join(HERE, '..', 'reviewers', f'{use}.sh')
-    if not NAME.match(use or '') or not os.path.isfile(path):
+    if not NAME.fullmatch(use or '') or not os.path.isfile(path):
         return False
     with open(path, encoding='utf-8') as f:
         if not re.search(r'^# foreman: reads-repo', f.read(), re.M):
@@ -413,7 +417,7 @@ def cmd_show(store, args):
     if len(names) > 1:
         raise Usage('show takes at most one batch')
     if names:
-        b = store.read(names[0] + '.json') if NAME.match(names[0]) else None
+        b = store.read(names[0] + '.json') if NAME.fullmatch(names[0]) else None
         if b is None:
             raise Fail(f'no batch {names[0]} in session {store.sid}')
         out = computed(b, settings(store), time.time())
@@ -527,7 +531,7 @@ def render_report(store, batches):
 
 
 def cmd_table(store, args):
-    if args[:1] == ['checkpoint'] and len(args) == 2 and NAME.match(args[1]):
+    if args[:1] == ['checkpoint'] and len(args) == 2 and NAME.fullmatch(args[1]):
         wave = args[1]
         with store.lock():
             bs = [b for b in store.batches() if wave_of(b['batch']) == wave]
@@ -568,7 +572,7 @@ def run(argv):
     if cmd == 'table':
         return cmd_table(store, rest)
     name, more = rest[0], rest[1:]
-    if not NAME.match(name):
+    if not NAME.fullmatch(name):
         raise Usage(f'bad batch name: {name}')
     if cmd == 'set':
         return cmd_set(store, name, more)

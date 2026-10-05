@@ -634,6 +634,8 @@ EOF
 check "W2 no longer filters rows that need a human decision" bash -c "! grep -qF 'need a human decision, or are named' '$sk'"
 check "W3 keeps no state table in context" bash -c "! grep -qF 'Keep a short state table' '$sk'"
 check "P2 (wrapper): W3 points at README's RTK recipe" grep -qF "point the user at README's **RTK** recipe" "$sk"
+check "P2: under RTK the worker can't push (its commits run)" grep -qF "  push. Then point the user at README's **RTK** recipe" "$sk"
+check "W3 loads TaskStop and Monitor before launching" appears_before "$sk" 'Before launching, load the deferred tools with ToolSearch `select:TaskStop,Monitor`.' '- At launch, for each batch:'
 echo "## SKILL.md 0.5.1: W3.5"
 while IFS= read -r s; do check "SKILL.md has: $s" grep -qF -- "$s" "$sk"; done <<'EOF'
 **Open questions are labelled.**
@@ -651,7 +653,10 @@ Every timer is a Bash `run_in_background` `sleep`; a foreground `sleep` is refus
 which is `stamp <batch> comment_sent`
 `set <batch> reviewer_model=<model>`
 TaskStop the superseded one by its recorded id, `task <batch> done <id>`, record the re-dispatch with
+It counts as a bounce: `python3 $FOREMAN/batches.py bump <batch> bounces`, `stamp <batch> sent` and
+Non-blocking questions don't block a pass; they
 EOF
+check "W3.5: the label decides, not the scope" bash -c "! grep -qF 'Open questions outside the batch' '$sk'"
 oq() { awk '/^## Open questions$/{f=1;next} /^## /{f=0} f && NF && !/^- \*\*(Blocking|Non-blocking):\*\* / && !/^None — / && !/^  /' "$1"; }
 check "SKILL.md's label pre-check is oq()'s awk" grep -qF "awk '/^## Open questions\$/{f=1;next} /^## /{f=0} f && NF && !/^- \*\*(Blocking|Non-blocking):\*\* / && !/^None — / && !/^  /' <spec path>" "$sk"
 printf '## Open questions\n\n- **Blocking:** who owns the setting?\n  (it decides the column)\n- **Non-blocking:** the colour\n\n## Review responses\n\n- free text\n' >"$T/oq1.md"
@@ -709,6 +714,8 @@ while IFS= read -r s; do check "README has: $s" grep -qF -- "$s" "$rd"; done <<'
 `bk.py`, `hooks.py` and `batches.py` (main session only) run without a permission prompt
 EOF
 check "P2 (wrapper): README has the RTK recipe" grep -qF 'exec rtk hook claude <<<"$input"' "$rd"
+check "P2: README says the worker can't push" grep -qF "so the worker can't push. Run RTK" "$rd"
+check "README: TaskStop refusals as the guard has them" grep -qF 'TaskStop is refused with no id or with a batch name, and for a worker before `hooks.py stopping`' "$rd"
 echo "## backlog.py + ui.py"
 check "test_backlog.py" python3 "$root/tests/test_backlog.py"
 check "test_ui_api.py" python3 "$root/tests/test_ui_api.py"

@@ -2963,6 +2963,17 @@ class SessionStartTest(Case):
         with open(env_file) as f:
             self.assertEqual(f.read(), 'export OTHER=1\nexport FOREMAN_SESSION=S-123\n')
 
+    def test_a_file_without_a_final_newline_gets_one_first(self):
+        for before, after in (('export OTHER=1', 'export OTHER=1\n'), ('', ''), (None, '')):
+            env_file = os.path.join(self.fx.tmp, 'env2.sh')
+            if os.path.exists(env_file):
+                os.remove(env_file)
+            if before is not None:
+                write(env_file, before)
+            self.start(CLAUDE_ENV_FILE=env_file)
+            with open(env_file) as f:
+                self.assertEqual(f.read(), after + 'export FOREMAN_SESSION=S-123\n', repr(before))
+
     def test_nothing_without_an_env_file(self):
         before = sorted(os.listdir(self.fx.tmp))
         self.start()
@@ -3122,6 +3133,14 @@ class BatchStateReportTest(BatchStateCase):
         self.say('Run complete.')                                       # an earlier message's paste counts too
         for command in forms:
             self.assertIsNone(self.bash(command), command)
+
+    def test_a_report_shown_but_not_yet_in_the_text_says_to_paste_it_in_a_message_of_its_own(self):
+        self.batches('set', self.b1, 'status=spec')
+        self.tool_result(self.batches('table', 'report'))
+        why = self.bash(f'python3 {HOOKS} run-end') or ''
+        self.assertIn(f'paste the output of `python3 {SCRIPTS}/batches.py table report` as text in a message of its '
+                      'own, make one more call, then run `run-end` again; the hooks see your text only once the next '
+                      'call starts', why)
 
     def test_run_end_with_no_batch_files_passes(self):
         self.run_marker(sid='S2')

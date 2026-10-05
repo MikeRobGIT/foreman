@@ -261,8 +261,10 @@ def session_start(h):
     $CLAUDE_ENV_FILE, which batches.py reads. Nothing is written when the harness sets no env file."""
     path = os.environ.get('CLAUDE_ENV_FILE')
     if path and BATCH.match(h.sid):
-        with open(path, 'a', encoding='utf-8') as f:
-            f.write(f'export FOREMAN_SESSION={h.sid}\n')
+        with open(path, 'a+', encoding='utf-8') as f:
+            f.seek(0)
+            text = f.read()
+            f.write(('\n' if text and not text.endswith('\n') else '') + f'export FOREMAN_SESSION={h.sid}\n')
 
 
 HANDLERS['run-start'] = run_start
@@ -1534,9 +1536,9 @@ def pasted(text, path, at):
     return all(squash(line) in have for line in text.splitlines() if squash(line))
 
 
-def table_problem(h, store, name, text, cmd, where):
+def table_problem(h, store, name, text, cmd, where, again=None):
     """None when the stamp `name` holds `text` and its lines were pasted after it, else the deny reason. An unreadable
-    transcript fails open."""
+    transcript fails open. `again` names the call to retry when the table was shown but isn't in the text yet (P3)."""
     shown = store.read(name)
     if not isinstance(shown, dict):
         return f'run `{cmd}` and paste its output as text {where}'
@@ -1548,6 +1550,9 @@ def table_problem(h, store, name, text, cmd, where):
     except OSError as e:
         print(f'foreman: batch_state could not read the transcript ({e}), so the table check is skipped', file=sys.stderr)
         return None
+    if again:
+        return (f'paste the output of `{cmd}` as text in a message of its own, make one more call, then run '
+                f'`{again}` again; the hooks see your text only once the next call starts')
     return (f"paste the output of `{cmd}` as text {where}: a tool result doesn't count, because the human sees only "
             'your text')
 
@@ -1624,7 +1629,7 @@ def report_gate(h, sc):
     h.touch.add(repo)
     text, tid = batches.render_report(store, bs)
     why = table_problem(h, store, 'report.shown', text, f'python3 {HERE}/batches.py table report',
-                        'in the run report first')
+                        'in the run report first', again='run-end')
     if why and not escaped(repo, store, 'report.denies', tid):
         h.deny(why + WAY_OUT)
 
@@ -1698,7 +1703,8 @@ def worker_of(repo, h, tid, names):
 
 
 def taskstop_guard(h, ti):
-    """Duty 4: TaskStop takes a recorded task id, never a batch name, and stops a worker only after `stopping`."""
+    """Duty 4: TaskStop is refused with no id or a batch name, and for a worker before `stopping`; an id it doesn't
+    know passes."""
     repo = repo_at(h.cwd) if not h.agent else None
     if not h.active(repo, 'batch_state'):
         return

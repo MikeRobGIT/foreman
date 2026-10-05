@@ -148,7 +148,7 @@ W1-W6 to keep them apart from steps 0-12; W6's stop conditions replace the auton
   is denied and stalls. Also warn when one of those three settings files has a `PreToolUse` Bash hook that runs
   `rtk hook` directly (`grep -n 'rtk hook' ~/.claude/settings.json .claude/settings.json .claude/settings.local.json`
   prints it): RTK rewrites a worker's `git` to `rtk git`, which the worktree guard refuses, so the worker can't
-  commit. Then point the user at README's **RTK** recipe: a wrapper that leaves `git` alone in a worktree is fine.
+  push. Then point the user at README's **RTK** recipe: a wrapper that leaves `git` alone in a worktree is fine.
   - **Spec phase.** Every batch starts with the spec phase (Worker contract step 2). The tag's ` spec-phase` suffix
     (W3 above) opts the batch into the hooks' spec gate (no code before release) and their spec-phase report check.
     The prompt also carries the absolute path `${CLAUDE_PLUGIN_ROOT}/templates/spec.md`, the resolved
@@ -163,6 +163,7 @@ W1-W6 to keep them apart from steps 0-12; W6's stop conditions replace the auton
     file passed to `note`. A refused call (exit 1) names the problem: fix the
     command and run it again, and never drop a state change. `batches.py show <batch>` prints the record with
     its live task ids and its remaining spec-phase time.
+    - Before launching, load the deferred tools with ToolSearch `select:TaskStop,Monitor`.
     - At launch, for each batch: `set <batch> status=spec rows=<id,…> owned=<file,…>`, then
       `task <batch> add worker fw-<batch>` and `stamp <batch> sent`, then start its timer (W3.5's clock) and
       `task <batch> add timer <id>`.
@@ -172,7 +173,6 @@ W1-W6 to keep them apart from steps 0-12; W6's stop conditions replace the auton
     - TaskStop takes only an id `batches.py` recorded: a worker's `fw-<batch>`, an unnamed reviewer's agent id
       from its Agent result, a background Bash task's id; never a batch name. The hooks deny a TaskStop without
       an id, with a batch name, or for a worker before `hooks.py stopping <batch>`.
-    - Before the first timer, load the deferred tools with ToolSearch `select:TaskStop,Monitor`.
 - **W3.5 Spec review**, for each batch on its own as its `SPEC READY` arrives (other batches keep moving).
   `SPEC READY` is the first line of the worker's last message that starts with `SPEC READY ` (a preface line
   before it is fine): `SPEC READY <worktree> <branch> <spec path> <sha>`. Read it from the right: the SHA is the
@@ -247,8 +247,9 @@ W1-W6 to keep them apart from steps 0-12; W6's stop conditions replace the auton
        `SendMessage`, with the Minor ones marked optional, then `stamp <batch> sent` and a new timer. The next
        `SPEC READY` starts round r+1.
      - **Park** (W3.6): a bound below is exceeded. A verdict that rules an open question blocking parks the
-       batch right after that round (`reason=open-question`). Open questions outside the batch's scope don't
-       block a pass: they become row notes in the final report (do the decidable part).
+       batch right after that round (`reason=open-question`). Non-blocking questions don't block a pass; they
+       become row notes in the final report (do the decidable part). The label decides, not the scope: a
+       Blocking question parks the batch even when it lies outside the batch's rows.
      - **Never edit a worker's spec**, not even a typo: the hooks refuse a release at any SHA but the reviewed
        one. Minor findings go in the release message.
   4. **Reviewer failures.** A read-only reviewer that fails, or isn't back in 20 minutes, is re-dispatched once;
@@ -259,7 +260,8 @@ W1-W6 to keep them apart from steps 0-12; W6's stop conditions replace the auton
      a failure.
   5. **A stop without `SPEC READY`** (a question, a context limit, an error): `stamp <batch> stopped`, then resume
      the worker once with "finish the spec; questions go under Open questions; end with `SPEC READY` as the first
-     line". It counts as a bounce. A second such stop parks the batch ("spec incomplete").
+     line". It counts as a bounce: `python3 $FOREMAN/batches.py bump <batch> bounces`, `stamp <batch> sent` and
+     a new timer. A second such stop parks the batch ("spec incomplete").
      - **Stopped by the human:** when the stop notification, or a refused resume, says the user stopped the
        agent, don't resume or relaunch it: `stamp <batch> stopped`, then park (`reason=stopped-by-human`).
        Only those two signals count; any other stop takes the rule above.

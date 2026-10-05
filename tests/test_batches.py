@@ -179,6 +179,31 @@ class CommandTest(Base):
         b = self.show(self.b1)
         self.assertEqual(([k for k, _ in b['stamps']], b['reviewed_sha']), (['passed', 'passed'], SHA2))
 
+    def test_comment_sent_needs_a_passed_batch(self):
+        self.ok('set', self.b1, 'status=parked', 'reason=no-pass')
+        self.assertIn('stamp comment_sent needs status=passed (parked)', self.refused('stamp', self.b1, 'comment_sent'))
+        self.assertIn('(spec)', self.refused('stamp', self.b2, 'comment_sent'))   # no file yet
+        b = self.show(self.b1)
+        self.assertEqual((b['status'], b['reason'], b['stamps'][-1][0]), ('parked', 'no-pass', 'ended'))
+
+    def test_status_pr_needs_a_pr_number(self):
+        self.assertIn('status=pr needs pr=<n> in the same call', self.refused('set', self.b1, 'status=pr'))
+        self.ok('set', self.b1, 'status=pr', 'pr=12')
+        self.assertEqual(batches.status_cell(self.show(self.b1)), 'PR #12')
+
+    def test_a_trailing_newline_is_refused(self):
+        self.assertIn('bad value for rows', self.refused('set', self.b1, 'rows=IB-1\n'))
+        self.assertIn('bad value for sha', self.refused('set', self.b1, 'sha=' + SHA1 + '\n'))
+        self.assertIn('bad value for owned', self.refused('set', self.b1, 'owned=app.py\n'))
+        self.assertIn('bad value for r', self.refused('add-round', self.b1, 'r=1\n', 'sha=' + SHA1, 'entry=1',
+                                                      'explore=pass', 'crit=0', 'imp=0', 'minor=0'))
+        self.assertIn('bad value for fallthrough', self.refused('add-round', self.b1, 'r=1', 'sha=' + SHA1, 'entry=1',
+                                                                'fallthrough=codex:quota\n', 'explore=pass',
+                                                                'crit=0', 'imp=0', 'minor=0'))
+        self.assertEqual(self.run_cli('set', self.b1 + '\n', 'status=spec', '--session', 'S1').returncode, 2)
+        self.assertEqual(self.run_cli('show', '--session', 'S1\n').returncode, 2)
+        self.assertFalse(os.path.exists(self.file(self.b1)))
+
     def test_comment_sent_moves_a_passed_batch_back_to_review(self):
         self.round_at(self.b1, SHA1)
         self.ok('set', self.b1, 'status=passed', 'reviewed_sha=' + SHA1)
