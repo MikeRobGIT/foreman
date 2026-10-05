@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """foreman's settings hooks: one dispatcher, run by hooks/hooks.json as `python3 hooks.py <event>`.
 
-Hook mode, JSON on stdin: run-start, session-end, pretool, posttool, subagent-start, subagent-stop, permission.
+Hook mode, JSON on stdin: run-start, session-start, session-end, pretool, posttool, subagent-start, subagent-stop,
+permission, stop.
 (SessionEnd runs `session-end`, not `run-end`: the CLI verb never reads stdin, which a Bash call may hold open.)
 
 CLI mode, run from the orchestrator's Bash tool. `pretool` records the effect from its own hook input, so the
@@ -12,8 +13,9 @@ record lands where the hooks look and is bound to this session:
   hooks.py forget <batch>          drop the batch's hook state (W5)
   exit 0 = recorded, 1 = the record is missing, 3 = hooks inactive (no fresh run marker); run-end always 0
 
-Every hook fails open on its own errors (stderr note, exit 0). Three cases fail closed: an undeterminable push diff,
-a push or merge command the scan can't read, and a spec-phase commit whose contents can't be told.
+Every hook fails open on its own errors (stderr note, exit 0), and so does each piece of pretool: one piece's crash
+costs only its own decision. Three cases fail closed: an undeterminable push diff, a push or merge command the scan
+can't read, and a spec-phase commit whose contents can't be told.
 """
 import json
 import os
@@ -22,7 +24,7 @@ import sys
 import time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-FAST = re.compile(r'\b(git|gh|gt)\b|hooks\.py')
+FAST = re.compile(r'\b(git|gh|gt)\b|hooks\.py|batches\.py')
 RUN_TTL = 48 * 3600
 BATCH_TTL = 14 * 86400
 BATCH = re.compile(r'^[A-Za-z0-9_-]+$')
@@ -30,6 +32,8 @@ SHA = re.compile(r'^[0-9a-f]{7,40}$')
 CONTROL = ('run-end', 'release', 'stopping', 'forget')
 CONTROL_TEXT = re.compile(r'hooks\.py\S*\s+(run-end|release|stopping|forget)\b')
 RUN_END = re.compile(r'hooks\.py["\']?\s+run-end')   # posttool's pre-filter: one regex per Bash call
+BATCH_VERBS = ('set', 'note', 'bump', 'stamp', 'task', 'add-round', 'show', 'table', '--session')
+BATCH_TEXT = re.compile(r'batches\.py\S*\s+(set|note|bump|stamp|task|add-round|show|table|--session)\b')
 EDIT_TOOLS = ('Edit', 'Write', 'MultiEdit', 'NotebookEdit')
 BACKLOG_DEFAULT = '.claude/improvement-backlog.md'
 RULES_DEFAULT = '.claude/rules/*.md'
@@ -46,9 +50,10 @@ POST_EDIT = {}     # order -> fn(h, tool_input)
 
 def _load():
     """Imports the fast paths skip: a Bash call that names no git/gh/gt/hooks.py costs one json.load."""
-    global backlog, cfg, state, shellscan, subprocess, shlex, glob, tempfile
+    global backlog, batches, cfg, state, shellscan, subprocess, shlex, glob, tempfile
     sys.path.insert(0, HERE)
     import backlog  # noqa: F401
+    import batches  # noqa: F401
     import cfg  # noqa: F401
     import glob  # noqa: F401
     import shellscan  # noqa: F401
@@ -155,13 +160,25 @@ class Hook:
         self.denies = []
         self.touch = set()
         self._active = {}
+        self._sids = {}
 
     def deny(self, reason):
         self.denies.append(reason)
 
+    def run_sid(self, repo):
+        """The id this session's run state is kept under in `repo`: its own, or through an alias the run it continues.
+        A session with no runs file of its own tries adoption first (L5), once per process."""
+        if repo.top not in self._sids:
+            sid = batches.canonical(repo.dirs, self.sid)
+            if sid == self.sid and BATCH.match(sid) and not any(
+                    os.path.exists(os.path.join(d, 'runs', sid + '.json')) for d in repo.dirs):
+                sid = adopt(repo.dirs, sid, self.inp.get('transcript_path')) or sid
+            self._sids[repo.top] = sid
+        return self._sids[repo.top]
+
     def run_active(self, repo):
         if repo.top not in self._active:
-            self._active[repo.top] = marker(repo, self.sid) is not None
+            self._active[repo.top] = marker(repo, self.run_sid(repo)) is not None
         return self._active[repo.top]
 
     def active(self, repo, piece, run_only=True):
@@ -176,32 +193,90 @@ def cmd_repo(c, h):
 # ---- the run marker -------------------------------------------------------------------------------
 
 def marker(repo, sid):
-    """(path, data) of this session's live run marker, or None."""
+    """(path, data) of the live run marker of `sid`'s run (followed through an alias), or None."""
     if not sid or os.sep in sid:
         return None
+    sid = batches.canonical(repo.dirs, sid)
     for d in repo.dirs:
         p = os.path.join(d, 'runs', sid + '.json')
         m = state.read_json(p)
-        if isinstance(m, dict) and time.time() - float(m.get('touched', 0)) < RUN_TTL:
+        if isinstance(m, dict) and 'alias' not in m and time.time() - float(m.get('touched', 0)) < RUN_TTL:
             return p, m
     return None
 
 
 def touch_marker(repo, sid):
+    """Touch `sid`'s live run marker, and the alias that leads to it, which prune and the status band age alike."""
     m = marker(repo, sid)
     if m:
-        m[1]['touched'] = time.time()
-        state.write_json(m[0], m[1])
+        now = time.time()
+        state.write_json(m[0], dict(m[1], touched=now))
+        for d in repo.dirs:
+            p = os.path.join(d, 'runs', sid + '.json')
+            a = state.read_json(p)
+            if isinstance(a, dict) and 'alias' in a:
+                state.write_json(p, dict(a, touched=now))
+
+
+def continued_in(path, sid, tail=8192):
+    """True when the last `tail` bytes of the transcript `path` hold a `continued-in` record naming `sid`."""
+    try:
+        with open(path, 'rb') as f:
+            f.seek(max(0, f.seek(0, os.SEEK_END) - tail))
+            lines = f.read().split(b'\n')
+    except OSError:
+        return False
+    for raw in lines:
+        try:
+            e = json.loads(raw)
+        except ValueError:
+            continue
+        if isinstance(e, dict) and e.get('type') == 'continued-in' and e.get('continuedInSessionId') == sid:
+            return True
+    return False
+
+
+def live_run(d, name):
+    """True when `runs/<name>.json` in the state dir d is a live run marker (not an alias)."""
+    m = state.read_json(os.path.join(d, 'runs', name + '.json'))
+    return isinstance(m, dict) and 'alias' not in m and time.time() - float(m.get('touched', 0)) < RUN_TTL
+
+
+def adopt(dirs, sid, transcript_path):
+    """The run the new session `sid` continues, recorded as the alias `runs/<sid>.json` = {alias, touched} beside
+    its marker, or None. A session moved to the background, forked or resumed gets a new id, and the old transcript
+    (`<old id>.jsonl` beside the new one) ends with a `continued-in` record naming it; nothing in the hook input names
+    the old id. The old session is a live run's own (its marker) or one that continued it (an alias of a live marker),
+    and the alias written always names the run itself, so `canonical` stays one hop. A runs file that can't be read
+    is skipped."""
+    if not transcript_path or not BATCH.match(sid):
+        return None
+    for d in dirs:
+        for p in ls(d, 'runs/*.json'):
+            old = os.path.basename(p)[:-len('.json')]
+            try:
+                m = state.read_json(p)
+                run = m.get('alias', old)
+                ok = old != sid and BATCH.match(old) and BATCH.match(run) and run != sid and live_run(d, run)
+            except (AttributeError, TypeError, ValueError):
+                continue
+            if ok and continued_in(os.path.join(os.path.dirname(transcript_path), old + '.jsonl'), sid):
+                state.write_json(os.path.join(d, 'runs', sid + '.json'), {'alias': run, 'touched': time.time()})
+                return run
+    return None
 
 
 def prune(sd):
-    """Drop markers untouched for 48 hours and batch files older than 14 days."""
+    """Drop markers untouched for 48 hours, owed reports older than that, and batch files older than 14 days."""
     now = time.time()
     for p in ls(sd, 'runs/*.json'):
         m = state.read_json(p)
         if not isinstance(m, dict) or now - float(m.get('touched', 0)) >= RUN_TTL:
             rm(p)
-    for p in ls(sd, 'batches/*/*') + ls(sd, 'batches/*/agents/*'):
+    for p in ls(sd, 'runs/*.owed'):
+        if now - os.path.getmtime(p) >= RUN_TTL:
+            rm(p)
+    for p in ls(sd, 'batches/*/*') + ls(sd, 'batches/*/agents/*') + ls(sd, 'batches/*/state/*'):
         if os.path.isfile(p) and now - os.path.getmtime(p) >= BATCH_TTL:
             rm(p)
 
@@ -229,28 +304,99 @@ def run_start(h):
         return
     sd = repo.dirs[0]
     prune(sd)
-    p = os.path.join(sd, 'runs', h.sid + '.json')
+    p = os.path.join(sd, 'runs', h.run_sid(repo) + '.json')
     m = state.read_json(p)
     m = m if isinstance(m, dict) else {'started': time.time()}
     m.update(touched=time.time(), args=args)
+    m.pop('ended', None)   # a new run here: this session owns the marker again
     state.write_json(p, m)
 
 
+def alias_target(a):
+    """The run an alias file's data names, or None when it isn't a (valid) alias."""
+    t = a.get('alias') if isinstance(a, dict) else None
+    return t if isinstance(t, str) and BATCH.match(t) else None
+
+
+def aliases(d, run):
+    """The paths of every alias file in the state dir d that names `run`, with their data."""
+    return [(p, a) for p, a in ((p, state.read_json(p)) for p in ls(d, 'runs/*.json')) if alias_target(a) == run]
+
+
 def end_run(sid):
-    """Delete this session's run markers. A glob, no git: every SessionEnd hook shares 1.5 seconds."""
+    """Delete this session's run: its marker, or for an alias the marker it names, and every alias of that run (a
+    sibling left behind would keep a later run's marker on /clear). A glob, no git: every SessionEnd hook shares 1.5
+    seconds. An owed report (`.owed`) stays for the Stop hook."""
     if not sid or os.sep in sid:
         return
     for home in {state.home(), state.DEFAULT_HOME}:
         for p in ls(home, f'*/runs/{glob.escape(sid)}.json'):
+            d, run = os.path.dirname(os.path.dirname(p)), alias_target(state.read_json(p)) or sid
+            for q, _ in aliases(d, run):
+                rm(q)
+            rm(os.path.join(d, 'runs', run + '.json'))
             rm(p)
+
+
+def carried(d, sid):
+    """True when a live alias in the state dir d names `sid`'s run: another session carries it on."""
+    for _, a in aliases(d, sid):
+        try:
+            if time.time() - float(a.get('touched', 0)) < RUN_TTL:
+                return True
+        except (TypeError, ValueError):
+            continue
+    return False
+
+
+def leave_run(sid):
+    """/clear or logout: this session leaves its run, which another live session may still own. A marker another live
+    alias still names stays, marked `ended` (its TTL still runs). An alias is removed, and with it the marker it names
+    when no other alias names that marker and its own session ended too (`ended`). A marker whose session moved to the
+    background without a SessionEnd can't be told from a live fork's, so it is kept and expires by its TTL. `run-end`
+    (end_run) removes all."""
+    if not sid or os.sep in sid:
+        return
+    for home in {state.home(), state.DEFAULT_HOME}:
+        for p in ls(home, f'*/runs/{glob.escape(sid)}.json'):
+            d, a = os.path.dirname(os.path.dirname(p)), state.read_json(p)
+            if isinstance(a, dict) and 'alias' not in a and carried(d, sid):
+                state.write_json(p, dict(a, ended=True))
+                continue
+            rm(p)
+            run = alias_target(a)
+            target = os.path.join(d, 'runs', f'{run}.json')
+            m = state.read_json(target) if run else None
+            if isinstance(m, dict) and 'alias' not in m and m.get('ended') and not carried(d, run):
+                rm(target)
 
 
 def session_end(h):
     if h.inp.get('reason') in ('clear', 'logout'):
-        end_run(h.sid)
+        leave_run(h.sid)
+
+
+def session_start(h):
+    """Export this session's run id to every later Bash call (probe P1): append `export FOREMAN_SESSION=<id>` to
+    $CLAUDE_ENV_FILE, which batches.py reads. Nothing is written when the harness sets no env file. A session that
+    continues another under a new id (`source` fork or resume) first adopts that session's run (L5). It still exports
+    its own id: batches.py resolves it through the alias while the run lasts, and a later run started in this session
+    lives under this id once the alias is gone."""
+    sid = h.sid
+    if h.inp.get('source') in ('fork', 'resume'):
+        repo = repo_at(h.cwd)
+        if repo:
+            h.run_sid(repo)
+    path = os.environ.get('CLAUDE_ENV_FILE')
+    if path and BATCH.match(sid):
+        with open(path, 'a+', encoding='utf-8') as f:
+            f.seek(0)
+            text = f.read()
+            f.write(('\n' if text and not text.endswith('\n') else '') + f'export FOREMAN_SESSION={sid}\n')
 
 
 HANDLERS['run-start'] = run_start
+HANDLERS['session-start'] = session_start
 HANDLERS['session-end'] = session_end
 
 
@@ -296,27 +442,28 @@ def ends_run(sc):
     return False
 
 
-def runs_control(sc, text, cwd):
-    """True when the scanned command runs `<path>/hooks.py <control verb>` as a command: a word naming this
-    hooks.py (basename hooks.py, or the same realpath as control_call tests, so `hooks.py/`, `hooks.py/.` and a
-    symlink count) immediately followed by the verb, in a top-level segment or in the script a shell or eval is
-    given. A mention in a quoted string, a comment or a heredoc isn't a call. Text the scan couldn't read is
+def runs_control(sc, text, cwd, name='hooks.py', verbs=CONTROL, rx=CONTROL_TEXT):
+    """True when the scanned command runs `<path>/<name> <verb>` as a command (by default this hooks.py and its
+    control verbs; piece 11 asks about batches.py): a word naming the script (its basename, or the same realpath as
+    control_call tests, so `hooks.py/`, `hooks.py/.` and a symlink count) immediately followed by the verb, in a
+    top-level segment or in the script a shell or eval is given. A mention in a quoted string, a comment or a
+    heredoc isn't a call. Text the scan couldn't read is
     judged by its raw text. Not seen (accepted limit): a call built at run time, in a $(...) or fed to a shell's
     stdin. It tests a path the way control_call does, so a deny sees every call that would be recorded."""
     if not sc.ok:
-        return bool(CONTROL_TEXT.search(text.replace('\\\n', '')))
+        return bool(rx.search(text.replace('\\\n', '')))
     for seg in sc.segs:
         w = seg.words
         if w is None:
-            if CONTROL_TEXT.search(text[seg.start:seg.end].replace('\\\n', '')):
+            if rx.search(text[seg.start:seg.end].replace('\\\n', '')):
                 return True
             continue
-        if any(b in CONTROL and (os.path.basename(a) == 'hooks.py' or same_file(a, os.path.join(HERE, 'hooks.py')))
+        if any(b in verbs and (os.path.basename(a) == name or same_file(a, os.path.join(HERE, name)))
                for a, b in zip(w, w[1:])):
             return True
         if any(os.path.basename(a) in shellscan.SHELLS + ('eval',) for a in w):
             for script in (a for a in w if re.search(r'\s', a)):
-                if runs_control(shellscan.scan(script, seg.cwd), script, seg.cwd):
+                if runs_control(shellscan.scan(script, seg.cwd), script, seg.cwd, name, verbs, rx):
                     return True
     return False
 
@@ -356,28 +503,19 @@ def forget(repo, sid, batch):
 
 
 def pretool_control(h, repo, verb, rest):
-    d = repo.dirs[0]
+    d, sid = repo.dirs[0], h.run_sid(repo)
     if verb == 'release':
-        state.write_json(batch_file(d, h.sid, rest[0], 'released'), {'sha': rest[1], 'time': time.time()})
+        state.write_json(batch_file(d, sid, rest[0], 'released'), {'sha': rest[1], 'time': time.time()})
     elif verb == 'stopping':
-        state.write_json(batch_file(d, h.sid, rest[0], 'stopped'), {'time': time.time()})
+        state.write_json(batch_file(d, sid, rest[0], 'stopped'), {'time': time.time()})
     elif verb == 'forget':
-        forget(repo, h.sid, rest[0])
+        forget(repo, sid, rest[0])
     touch_marker(repo, h.sid)
-
-
-def batch_time(batch):
-    """Epoch seconds of a `YYYYMMDD-HHMM-...` batch name (local time), or 0 for an undated name."""
-    m = re.match(r'^(\d{8}-\d{4})-', batch)
-    try:
-        return time.mktime(time.strptime(m.group(1), '%Y%m%d-%H%M')) if m else 0
-    except ValueError:
-        return 0
 
 
 def fresh_marker(dirs, batch):
     """A live run marker in any session, touched after the batch name's time."""
-    since = batch_time(batch)
+    since = batches.batch_time(batch)
     for d in dirs:
         for p in ls(d, 'runs/*.json'):
             m = state.read_json(p)
@@ -468,7 +606,8 @@ def resolve_agent(repo, h):
     `time` repeats `start`: it is the key the report check reads (piece 7)."""
     if not h.agent or not h.sid or os.sep in h.agent + h.sid:
         return None
-    entry = agent_entry(repo, h.sid, h.agent)
+    sid = h.run_sid(repo)
+    entry = agent_entry(repo, sid, h.agent)
     if entry:
         return entry
     stem, ext = os.path.splitext(h.inp.get('transcript_path') or '')
@@ -483,7 +622,7 @@ def resolve_agent(repo, h):
         entry = {'batch': tag[0], 'spec': tag[1], 'briefed': False, 'start': start, 'time': start}
     else:
         entry = {'batch': None}
-    state.write_json(os.path.join(repo.dirs[0], 'batches', h.sid, 'agents', h.agent), entry)
+    state.write_json(os.path.join(repo.dirs[0], 'batches', sid, 'agents', h.agent), entry)
     return entry
 
 
@@ -591,10 +730,13 @@ def is_push_trigger(c):
     return (c.prog, c.sub) in (('git', 'push'), ('gh', 'pr create'), ('gh', 'pr new'), ('gt', 'submit'))
 
 
-# commands that move HEAD; `git checkout -- <path>` is an accepted false deny
+# commands that move HEAD; `git checkout -- <path>` is an accepted false deny. shellscan reads only gt's s, ss, m and c
+# aliases, so the others (co, u, d, sq, ab, r) and gh's `pr co` are listed as spelled
 HEAD_MOVERS = ({('git', s) for s in ('commit', 'merge', 'pull', 'rebase', 'cherry-pick', 'revert', 'am', 'reset',
-                                     'checkout', 'switch')}
-               | {('gt', s) for s in ('create', 'modify', 'sync')})
+                                     'checkout', 'switch', 'update-ref', 'commit-tree')}
+               | {('gt', s) for s in ('create', 'modify', 'sync', 'squash', 'sq', 'absorb', 'ab', 'fold', 'restack',
+                                      'checkout', 'co', 'up', 'u', 'down', 'd', 'r')}
+               | {('gh', 'pr checkout'), ('gh', 'pr co')})
 
 
 def moved_reason(repo):
@@ -677,16 +819,25 @@ GH_MERGE_VALUE_OPTS = ('-t', '--subject', '-b', '--body', '-F', '--body-file', '
                        '--author-email')
 
 
+# a heredoc, a here-string or `< file`; group 1 is the target glued to the operator ('' when it is the next word)
+STDIN_REDIRECT = re.compile(r'^\d*(?:<<<?-?|<(?![<>(]))(.*)$')
+
+
 def positionals(args, value_opts):
-    out, i = [], 0
+    """The words that are neither options, their values nor a stdin redirect: `git commit -F - <<EOF` feeds its
+    message to git, it names no path. An output redirect is not skipped: the shell writes the file first."""
+    out, i, opts = [], 0, True
     while i < len(args):
         a = args[i]
-        if a == '--':
-            return out + args[i + 1:]
-        if a in value_opts:
-            i += 2
+        m = STDIN_REDIRECT.match(a)
+        if m:
+            i += 1 if m.group(1) else 2   # a bare `<<` or `<` takes the next word as its delimiter or file
             continue
-        if not a.startswith('-'):
+        if opts and a == '--':
+            opts = False
+        elif opts and a in value_opts:
+            i += 1
+        elif not opts or not a.startswith('-'):
             out.append(a)
         i += 1
     return out
@@ -864,8 +1015,8 @@ def message_texts(c, sc, h):
     opts = MESSAGE_OPTS.get(c.prog, {}).get(c.sub)
     if opts is None:
         return None
-    if c.args is None:
-        return [c.text]
+    if c.args is None:   # unreadable: the raw text, and again with each quote opening a line (`-m "Co-Authored-By: x`)
+        return [c.text, re.sub(r'["\']', '\n', c.text)]
     texts = opt_values(c.args, opts[0]) + list(c.heredocs)
     for f in opt_values(c.args, opts[1]):
         if f == '-':
@@ -1049,8 +1200,8 @@ def take_briefing(h, repo):
     entry = resolve_agent(repo, h)
     if not entry or not entry.get('batch') or entry.get('briefed') or repo.disabled('worker_briefing'):
         return None
-    text = briefing(repo, entry['batch'], bool(entry.get('spec')), h.sid)
-    path = os.path.join(repo.dirs[0], 'batches', h.sid, 'agents', h.agent)
+    text = briefing(repo, entry['batch'], bool(entry.get('spec')), h.run_sid(repo))
+    path = os.path.join(repo.dirs[0], 'batches', h.run_sid(repo), 'agents', h.agent)
     state.ensure(os.path.dirname(path))
     try:
         fd = os.open(path + '.briefed', os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
@@ -1134,11 +1285,10 @@ def report_problem(msg, cwd):
 
 def stopping_allowed(repo, h, batch):
     """True when `hooks.py stopping <batch>` ran after this worker started (piece 7, probe P7)."""
-    stop = next((s for s in (state.read_json(batch_file(d, h.sid, batch, 'stopped')) for d in repo.dirs)
-                 if isinstance(s, dict)), None)
+    stop = stopped_record(repo, h.run_sid(repo), batch)
     if stop is None:
         return False
-    entry = agent_entry(repo, h.sid, h.agent)
+    entry = agent_entry(repo, h.run_sid(repo), h.agent)
     born = (entry or {}).get('time') or transcript_head(h.inp.get('agent_transcript_path') or '')[1]
     return born is None or float(born) < float(stop.get('time', 0))
 
@@ -1156,7 +1306,7 @@ def subagent_stop(h):
     if stopping_allowed(repo, h, batch):
         return
     msg = h.inp.get('last_assistant_message') or ''
-    if spec and not released(repo, h.sid, batch):
+    if spec and not released(repo, h.run_sid(repo), batch):
         if any(line.startswith('SPEC READY ') for line in msg.splitlines()):
             return
         why = ("you're in the spec phase: finish the spec and end with `SPEC READY <worktree> <branch> <spec path> "
@@ -1172,7 +1322,7 @@ HANDLERS['subagent-stop'] = subagent_stop
 
 # ---- piece 8: script allow ------------------------------------------------------------------------
 
-SCRIPTS = ('gate-lock.sh', 'wt-setup.sh', 'review.sh', 'bk.py', 'hooks.py')
+SCRIPTS = ('gate-lock.sh', 'wt-setup.sh', 'review.sh', 'bk.py', 'hooks.py', 'batches.py')
 OWN_OPTS = ('--', '--check', '--spec', '--dry-run')
 BAD_TEXT = re.compile(r'[\n\r`<>]|\$\(|\$\{')
 BAD_ARG = re.compile(r'[\'"$`\\;|&<>\x00-\x1f\x7f]')
@@ -1204,6 +1354,9 @@ def gate_args(repo):
 def script_args_ok(name, args, repo, h, cwd):
     if name == 'gate-lock.sh':
         return len(args) == 3 and plain(args[0]) and args[1] == '--' and args[2] in gate_args(repo)
+    if name == 'batches.py':   # the orchestrator's state writes: a known command, every argument one plain word
+        return (not h.agent and bool(args) and args[0] in BATCH_VERBS
+                and all(plain(a) or a in ('--json', '--session') for a in args))
     if not all(plain(a) for a in args):
         return False
     if name == 'wt-setup.sh':
@@ -1274,6 +1427,7 @@ HANDLERS['permission'] = permission
 GIT_COMMIT_VALUE_OPTS = ('-m', '--message', '-F', '--file', '-C', '--reuse-message', '-c', '--reedit-message', '-t',
                          '--template', '--author', '--date', '--cleanup', '--fixup', '--squash', '--trailer',
                          '--pathspec-from-file')
+GT_VALUE_OPTS = ('-m', '--message', '-o', '--onto')   # the short options `gt create` and `gt modify` give a value to
 COMMITS = (('git', 'commit'), ('gt', 'create'), ('gt', 'modify'))
 OWN_CALL = 'commit in its own call (after `git add <spec path>`), so foreman can see what it commits'
 
@@ -1285,7 +1439,7 @@ def gated_batch(h, repo):
     if not h.agent or not h.active(repo, 'spec_gate'):
         return None
     e = resolve_agent(repo, h)
-    if not e or not e.get('spec') or released(repo, h.sid, e.get('batch', '')):
+    if not e or not e.get('spec') or released(repo, h.run_sid(repo), e.get('batch', '')):
         return None
     return e['batch']
 
@@ -1326,19 +1480,23 @@ def changed_paths(top, everything):
 
 
 def under(top, cwd, path):
-    """`path` as written in `cwd`, relative to the checkout's top level."""
+    """`path` as written in `cwd`, relative to the checkout's top level. A path the shell expands at run time (`$(...)`,
+    backticks, `$VAR`, `{a,../b}`, a leading `~`; the scan blanks a substitution with NUL bytes) or git resolves against
+    the top level (`:/x`, `:(top)x`, `:^x`) can be anything: Unreadable."""
+    if re.search('[${`' + shellscan.FILL + ']', path) or path.startswith(('~', ':')):
+        raise Unreadable(path)
     return os.path.relpath(os.path.realpath(os.path.join(cwd, path)), os.path.realpath(top))
 
 
-def commit_words(args):
-    """`git commit`'s words with each short-flag cluster split as git reads it, left to right: the first letter that
-    takes a value takes the rest of the cluster as that value (`-mtest` is `-m test`), or the next word when it
+def commit_words(args, value_opts=GIT_COMMIT_VALUE_OPTS):
+    """A commit command's words with each short-flag cluster split as it reads them, left to right: the first letter
+    that takes a value takes the rest of the cluster as that value (`-mtest` is `-m test`), or the next word when it
     ends the cluster (`-am msg` is `-a -m msg`)."""
     out = []
     for a in args:
         k = None
         if re.match(r'^-[A-Za-z]+$', a):
-            k = next((i for i, ch in enumerate(a) if i and '-' + ch in GIT_COMMIT_VALUE_OPTS), None)
+            k = next((i for i, ch in enumerate(a) if i and '-' + ch in value_opts), None)
         if k is None:
             out.append(a)
         else:
@@ -1346,16 +1504,32 @@ def commit_words(args):
     return out
 
 
+def own_command(c, seg):
+    """True when c is the program of the segment's own words, behind nothing but `VAR=value` assignments and `env`.
+    A command found inside `bash -c`, `eval` or a shell's heredoc takes its wrapper's segment, and the wrapper's script
+    runs (and may write) before it. Any other prefix wraps it too: `xargs git commit` appends the pathspecs it reads
+    from stdin or a file, and a redirect (`> app.py git commit -am x`) writes before the commit reads the tree. An
+    assignment runs a substitution in its value first (`X=$(echo x > app.py) git commit`, also `<(...)`, backticks, and
+    those inside quotes, which the scan leaves as text): only a plain value counts."""
+    pre = c.pre or []
+    return (all((shellscan.ASSIGN.match(w) and not any(x in w for x in (shellscan.FILL, '`', '$('))) or w == 'env'
+                for w in pre) and len(seg.words or []) > len(pre)
+            and seg.words[:len(pre)] == pre and os.path.basename(seg.words[len(pre)]) == c.prog)
+
+
 def alone(c, sc):
     """True when nothing but `cd`, `pushd` and `git add` runs before the top-level command c in its call. Anything
     else (a redirect, a script, `git rm`, `git mv`, `git apply --cached`, ...) may write files or stage paths after
     this hook has read the tree, so a commit that follows it can't be judged."""
     k = next((i for i, s in enumerate(sc.segs) if (s.start, s.end) == (c.start, c.end)), None)
-    if k is None:
+    if k is None or not own_command(c, sc.segs[k]):
         return False
-    adds = {(a.start, a.end) for a in sc.cmds if (a.prog, a.sub) == ('git', 'add')}
-    return all(s.words == [] or (bool(s.words) and (s.words[0] in ('cd', 'pushd') or (s.start, s.end) in adds))
-               for s in sc.segs[:k])
+    by_span = {(s.start, s.end): s for s in sc.segs}
+    adds = {(a.start, a.end) for a in sc.cmds if (a.prog, a.sub) == ('git', 'add') and (a.start, a.end) in by_span
+            and own_command(a, by_span[(a.start, a.end)])}   # a `git add` inside a wrapper has its wrapper's span
+    return all(s.words == [] or (bool(s.words) and (
+        (s.words[0] in ('cd', 'pushd') and not any(re.search('[<>]', w) for w in s.words[1:]))   # `cd .>app.py` is one word
+        or (s.start, s.end) in adds)) for s in sc.segs[:k])
 
 
 def would_commit(c, sc, top):
@@ -1367,9 +1541,10 @@ def would_commit(c, sc, top):
                 paths |= set(changed_paths(top, everything=True))
             paths |= {under(top, a.cwd, p) for p in named if p != '.'}
     if c.prog == 'gt':
-        if has_flag(c.args, ('--all', '-a')):
+        gt_args = commit_words(c.args, GT_VALUE_OPTS)
+        if has_flag(gt_args, ('--all', '-a')):
             paths |= set(changed_paths(top, everything=True))
-        elif has_flag(c.args, ('--update', '-u')):
+        elif has_flag(gt_args, ('--update', '-u')):
             paths |= set(changed_paths(top, everything=False))
         return paths
     args = commit_words(c.args)
@@ -1428,7 +1603,280 @@ BASH_PIECES[10] = spec_gate
 EDIT_PIECES[10] = spec_gate_edit
 
 
+# ---- piece 11: batch state (worker deny, checkpoint gate, report gate, TaskStop guard, release check) ------------
+
+WAY_OUT = ' (to turn this check off: `hooks_disabled: [batch_state]` in the foreman config)'
+
+
+def batch_store(repo, h):
+    return batches.Store(repo.main, repo.dirs, h.run_sid(repo))
+
+
+def squash(line):
+    return re.sub(r'\s+', '', line)
+
+
+def reverse_lines(f, block=1 << 16):
+    """The lines of a binary file, last first, read in blocks from its end."""
+    f.seek(0, os.SEEK_END)
+    pos, rest = f.tell(), b''
+    while pos > 0:
+        n = min(block, pos)
+        pos -= n
+        f.seek(pos)
+        parts = (f.read(n) + rest).split(b'\n')
+        rest = parts[0]
+        yield from reversed(parts[1:])
+    yield rest
+
+
+def assistant_lines(path, since):
+    """The whitespace-free lines of the assistant text blocks a transcript holds from `since` (epoch seconds, floored
+    to the second like the transcript's ISO timestamps) on. Read from the end, it stops at the first entry older than
+    `since`, so a long run's transcript costs only its tail. Raises OSError when the transcript can't be read."""
+    if not path:
+        raise OSError('no transcript_path')
+    since, out = int(since), set()
+    with open(path, 'rb') as f:
+        for raw in reverse_lines(f):
+            try:
+                e = json.loads(raw)
+            except ValueError:
+                continue
+            if not isinstance(e, dict):
+                continue
+            t = iso_time(e['timestamp']) if isinstance(e.get('timestamp'), str) else None
+            if t is not None and t < since:
+                break
+            msg = e.get('message')
+            if e.get('type') != 'assistant' or not isinstance(msg, dict) or not isinstance(msg.get('content'), list):
+                continue
+            for b in msg['content']:
+                if isinstance(b, dict) and b.get('type') == 'text' and isinstance(b.get('text'), str):
+                    out.update(squash(line) for line in b['text'].splitlines())
+    return out
+
+
+def holds(have, text):
+    """True when every non-blank line of `text`, whitespace removed, is in the set `have`."""
+    return all(squash(line) in have for line in text.splitlines() if squash(line))
+
+
+def pasted(text, path, at):
+    """True when every line of `text` is a line of the assistant's own text written since `at`, whitespace ignored.
+    A tool result doesn't count: the human sees only the assistant's text."""
+    return holds(assistant_lines(path, at), text)
+
+
+def table_problem(h, store, name, text, cmd, where, again=None):
+    """None when the stamp `name` holds `text` and its lines were pasted after it, else the deny reason. An unreadable
+    transcript fails open. `again` names what to do after the one more call when the table was shown but isn't in the
+    text yet (the hooks see the text only once the next call starts)."""
+    shown = store.read(name)
+    if not isinstance(shown, dict):
+        return f'run `{cmd}` and paste its output as text {where}'
+    if shown.get('text') != text:
+        return f'the table changed since it was shown; run `{cmd}` again and paste its output as text {where}'
+    try:
+        if pasted(text, h.inp.get('transcript_path'), float(shown.get('at', 0))):
+            return None
+    except OSError as e:
+        print(f'foreman: batch_state could not read the transcript ({e}), so the table check is skipped', file=sys.stderr)
+        return None
+    if again:
+        return (f'paste the output of `{cmd}` as text in a message of its own, make one more call, then '
+                f'{again}; the hooks see your text only once the next call starts')
+    return (f"paste the output of `{cmd}` as text {where}: a tool result doesn't count, because the human sees only "
+            'your text')
+
+
+def escaped(repo, store, name, tid):
+    """The way out of a deny loop: after two denies against one unchanged table (id `tid`), the third call passes."""
+    seen = store.read(name)
+    count = int(seen.get('count', 0)) if isinstance(seen, dict) and seen.get('id') == tid else 0
+    if count >= 2:
+        print(f'foreman: batch_state let this call through after {count} denies against the same table',
+              file=sys.stderr)
+        return True
+    state.write_json(store.path(repo.dirs[0], name), {'id': tid, 'count': count + 1})
+    return False
+
+
+def effective(repo, h, b):
+    """A batch's status at the checkpoint: a `passed` batch whose release hooks.py recorded counts as released."""
+    st = b.get('status') or 'spec'
+    return 'released' if st == 'passed' and released(repo, h.run_sid(repo), b['batch']) else st
+
+
+def checkpoint_gate(h):
+    """Duty 2: at the checkpoint moment (a wave of the run has a passed batch and none in spec or review), every
+    AskUserQuestion needs that wave's current checkpoint table pasted in the assistant's text."""
+    repo = repo_at(h.cwd) if not h.agent else None
+    if not h.active(repo, 'batch_state'):
+        return
+    store = batch_store(repo, h)
+    waves = {}
+    for b in store.batches():
+        waves.setdefault(batches.wave_of(b['batch']), []).append(b)
+    for wave, bs in sorted(waves.items()):
+        st = {effective(repo, h, b) for b in bs}
+        if 'passed' not in st or st & {'spec', 'review'}:
+            continue
+        h.touch.add(repo)
+        text, tid = batches.render_checkpoint(store, wave, bs)
+        why = table_problem(h, store, f'{wave}.shown', text, f'python3 {HERE}/batches.py table checkpoint {wave}',
+                            'before asking', again='ask')
+        if why and not escaped(repo, store, f'{wave}.denies', tid):
+            h.deny(why + WAY_OUT)
+
+
+def batch_call(h, sc, command):
+    """Duty 1: a worker's `batches.py` call is denied; the main session's touches the run marker."""
+    if runs_control(sc, command, h.cwd, 'batches.py', BATCH_VERBS, BATCH_TEXT):
+        repo = repo_at(h.cwd)
+        if h.active(repo, 'batch_state'):
+            if h.agent:
+                h.deny('only the orchestrator writes batch state — a worker never runs batches.py')
+                return
+            h.touch.add(repo)   # the newest live marker is batches.py's session fallback
+
+
+def owed_path(d, sid):
+    return os.path.join(d, 'runs', sid + '.owed')
+
+
+def report_gate(h, sc):
+    """Duty 3: a `run-end` whose run has batches, before the current report is in the assistant's text, records the
+    report as owed and goes on. The paste usually rides in the same message as `run-end`, which PreToolUse can't see
+    (P3), so the Stop hook checks the turn's last text instead. Keyed on this session's own id: `run-end` deletes the
+    marker, and the Stop hook has only its own id. `since` (the current stamp's time, else a minute before now) bounds
+    the transcript the Stop hook searches; `repo` is the repo whose `hooks_disabled` it reads."""
+    if not ends_run(sc):
+        return
+    repo = repo_at(h.cwd)
+    if not h.active(repo, 'batch_state'):
+        return
+    store = batch_store(repo, h)
+    bs = store.batches()
+    if not bs:
+        return
+    h.touch.add(repo)
+    text, tid = batches.render_report(store, bs)
+    if table_problem(h, store, 'report.shown', text, 'table report', 'in the run report'):
+        shown = store.read('report.shown')
+        since = float(shown['at']) if isinstance(shown, dict) and shown.get('text') == text else time.time() - 60
+        state.write_json(owed_path(repo.dirs[0], h.sid),
+                         {'id': tid, 'text': text, 'blocked': 0, 'since': since, 'repo': repo.top})
+
+
+def manual_run(repo, h):
+    m = marker(repo, h.sid)
+    words = str((m[1] if m else {}).get('args') or '').split()
+    return not {'--auto-merge', 'loop'} & set(words)
+
+
+def checkpoint_shown(h, store, b):
+    """True when a checkpoint stamp written after the batch's latest pass lists it as passed, and was pasted."""
+    shown = store.read(batches.wave_of(b['batch']) + '.shown')
+    passes = [t for k, t in b.get('stamps') or [] if k == 'passed']
+    if not isinstance(shown, dict) or not passes or float(shown.get('at', 0)) <= passes[-1]:
+        return False
+    row = re.compile(r'\|\s*' + re.escape(b['batch']) + r'\s*\|.*\|\s*passed\s*\|')
+    if not any(row.fullmatch(line.strip()) for line in str(shown.get('text', '')).splitlines()):
+        return False
+    try:
+        return pasted(shown['text'], h.inp.get('transcript_path'), float(shown['at']))
+    except OSError as e:
+        print(f'foreman: batch_state could not read the transcript ({e}), so the table check is skipped', file=sys.stderr)
+        return True
+
+
+def spec_worker(repo, sid, batch):
+    """True when the agent map holds a spec-phase worker of `batch` in this session."""
+    return any(isinstance(e, dict) and e.get('batch') == batch and e.get('spec')
+               for d in repo.dirs for e in map(state.read_json, ls(os.path.join(d, 'batches', sid, 'agents'), '*')))
+
+
+def release_check(h, repo, batch, sha):
+    """Duty 5: `hooks.py release` records nothing unless the batch passed at this SHA and, in a manual run, its
+    checkpoint table was pasted after the pass."""
+    if not h.active(repo, 'batch_state'):
+        return
+    h.touch.add(repo)
+    store = batch_store(repo, h)
+    b = store.read(batch + '.json')
+    if b is None:
+        if spec_worker(repo, h.run_sid(repo), batch):
+            h.deny(f'record the batch with `python3 {HERE}/batches.py set {batch} …` first' + WAY_OUT)
+        return
+    if b.get('status') != 'passed' or not batches.same_sha(b.get('reviewed_sha'), sha):
+        h.deny(f"release only a passed batch at its reviewed SHA {b.get('reviewed_sha') or '(none)'}; a spec that "
+               'changed after review needs a new round' + WAY_OUT)
+    elif manual_run(repo, h) and not checkpoint_shown(h, store, b):
+        h.deny('show the checkpoint table first: run '
+               f'`python3 {HERE}/batches.py table checkpoint {batches.wave_of(batch)}` and paste its output as text'
+               + WAY_OUT)
+
+
+def stopped_record(repo, sid, batch):
+    """hooks.py's `<batch>.stopped` record ({time}) in this session, or None (never the batches.py `stopped` stamp)."""
+    for d in repo.dirs:
+        r = state.read_json(batch_file(d, sid, batch, 'stopped'))
+        if isinstance(r, dict):
+            return r
+    return None
+
+
+def worker_of(repo, h, tid, names):
+    """The run's batch whose worker `tid` names without a task record: `fw-<batch>`, `fw-<batch>-<k>`, or an agent id
+    the agent map tags as a worker of that batch; else None."""
+    for n in names:
+        if tid == f'fw-{n}' or re.fullmatch(re.escape(f'fw-{n}-') + r'\d+', tid):
+            return n
+    e = agent_entry(repo, h.run_sid(repo), tid)
+    return e['batch'] if isinstance(e, dict) and e.get('batch') in names else None
+
+
+def taskstop_guard(h, ti):
+    """Duty 4: TaskStop is refused with no id or a batch name, and for a worker before `stopping`; an id it doesn't
+    know passes."""
+    repo = repo_at(h.cwd) if not h.agent else None
+    if not h.active(repo, 'batch_state'):
+        return
+    raw = ti.get('task_id') or ti.get('shell_id')
+    tid = raw.split('@', 1)[0].strip() if isinstance(raw, str) else ''
+    run = {b['batch']: b for b in batch_store(repo, h).batches()}
+    h.touch.add(repo)
+    if not tid:
+        h.deny(f'TaskStop needs a task id; the ids are in `python3 {HERE}/batches.py show <batch>`' + WAY_OUT)
+        return
+    recorded = [(n, t) for n, b in run.items() for t in b.get('tasks') or [] if t.get('id') == tid]
+    if tid in run and not recorded:
+        h.deny('TaskStop takes a task id, not a batch name; the ids are in '
+               f'`python3 {HERE}/batches.py show {tid}`' + WAY_OUT)
+        return
+    live = [(n, t) for n, t in recorded if t.get('kind') == 'worker' and t.get('live')]
+    if live:
+        n, t = max(live, key=lambda x: float(x[1].get('added', 0)))
+        stop = stopped_record(repo, h.run_sid(repo), n)
+        ok = stop is not None and float(stop.get('time', 0)) >= float(t.get('added', 0))
+    else:
+        n = worker_of(repo, h, tid, run)
+        ok = n is None or stopped_record(repo, h.run_sid(repo), n) is not None
+    if not ok:
+        h.deny(f'run `python3 {HERE}/hooks.py stopping {n}` first, then TaskStop {tid}' + WAY_OUT)
+
+
 # ---- pretool / posttool ---------------------------------------------------------------------------
+
+def run_piece(piece, *args):
+    """One piece's call, isolated: a crash costs only that piece's decision (a stderr note), not the denies the other
+    pieces recorded or are yet to record, which main's fail-open handler would drop with it."""
+    try:
+        piece(*args)
+    except Exception as e:
+        print(f'foreman hook error: {piece.__name__}: {type(e).__name__}: {e}', file=sys.stderr)
+
 
 def pretool(h):
     tool = h.inp.get('tool_name')
@@ -1443,7 +1891,11 @@ def pretool(h):
             path = os.path.join(h.cwd, path)
             repo = repo_at(path)
             for k in sorted(EDIT_PIECES):
-                EDIT_PIECES[k](h, repo, path)
+                run_piece(EDIT_PIECES[k], h, repo, path)
+    elif tool == 'AskUserQuestion':
+        run_piece(checkpoint_gate, h)
+    elif tool == 'TaskStop':
+        run_piece(taskstop_guard, h, ti)
     briefing_text = None
     if not h.denies:   # a denied call carries no briefing: it may not be shown, and `briefed` would be spent
         try:
@@ -1466,14 +1918,23 @@ def pretool_bash(h, command):
     if h.agent and runs_control(sc, command, h.cwd) and repo_at(h.cwd):
         h.deny('only the orchestrator ends a run or releases a spec — a worker never runs hooks.py')
         return
+    run_piece(batch_call, h, sc, command)
+    if h.denies:
+        return
+    if not h.agent:
+        run_piece(report_gate, h, sc)
     call = control_call(command)
     if call and not h.agent:   # a subagent's call is never recorded, whatever the deny above saw
         repo = repo_at(h.cwd)
         if repo:
+            if call[0] == 'release':
+                run_piece(release_check, h, repo, *call[1])
+                if h.denies:   # nothing is recorded
+                    return
             pretool_control(h, repo, *call)
         return
     for k in sorted(BASH_PIECES):
-        BASH_PIECES[k](h, sc)
+        run_piece(BASH_PIECES[k], h, sc)
 
 
 def posttool(h):
@@ -1488,6 +1949,58 @@ def posttool(h):
 
 HANDLERS['pretool'] = pretool
 HANDLERS['posttool'] = posttool
+
+
+# ---- the end of a turn: the owed run report (piece 11, duty 3) ------------------------------------
+
+STOP_ASK = 'foreman: end the run report with the spec-phase table, pasted verbatim as text as the last thing in your reply:'
+
+
+def paid(h, owed):
+    """True when the owed report is in the turn's last text, or in the assistant text the transcript holds since
+    `since` (every message but the last is written by the time Stop fires; the last may not be yet)."""
+    if holds({squash(line) for line in (h.inp.get('last_assistant_message') or '').splitlines()}, owed['text']):
+        return True
+    try:
+        return pasted(owed['text'], h.inp.get('transcript_path'), float(owed.get('since') or 0))
+    except OSError:
+        return False
+
+
+def turn_end(h):
+    """The Stop hook (main session only). A report `run-end` left owed must be in the turn's text: handed back once
+    with one block (every owed report together), and dropped at the next turn end either way, so a session can never
+    be held. A turn already continued by a Stop hook (`stop_hook_active`) is never blocked. A debt is dropped silently
+    when its repo has `batch_state` off, or when the run is still live (the `run-end` never ran)."""
+    if not h.sid or os.sep in h.sid:
+        return
+    ask = []
+    for home in {state.home(), state.DEFAULT_HOME}:
+        for p in ls(home, f'*/runs/{glob.escape(h.sid)}.owed'):
+            owed = state.read_json(p)
+            if not isinstance(owed, dict) or not isinstance(owed.get('text'), str):
+                rm(p)
+                print(f'foreman: dropped an unreadable owed run report ({p})', file=sys.stderr)
+                continue
+            top = owed.get('repo')
+            repo = repo_at(top if isinstance(top, str) else h.cwd)
+            if repo and (repo.disabled('batch_state') or marker(repo, h.sid)):
+                rm(p)
+            elif paid(h, owed):
+                rm(p)
+            elif owed.get('blocked') or h.inp.get('stop_hook_active'):
+                rm(p)
+                print('foreman: the run report was not pasted; ending anyway', file=sys.stderr)
+            else:
+                ask.append((p, owed))
+    for p, owed in ask:
+        state.write_json(p, dict(owed, blocked=1))
+    if ask:
+        print(json.dumps({'decision': 'block',
+                          'reason': STOP_ASK + '\n\n' + '\n\n'.join(owed['text'] for _, owed in ask)}))
+
+
+HANDLERS['stop'] = turn_end
 
 
 # ---- dispatcher -----------------------------------------------------------------------------------

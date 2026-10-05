@@ -3,7 +3,9 @@
 A Claude Code plugin that works through an improvement backlog one PR at a time: pick the next `ready`
 row, plan, implement test-first, open a PR, get a cross-model review, wait for the PR bots and CI,
 address comments, verify in the browser, then stop for your merge (or merge itself with `--auto-merge`).
-`parallel N` runs N workers in separate git worktrees while one orchestrator owns merging.
+`parallel N` runs N workers in separate git worktrees while one orchestrator owns merging. Each parallel batch
+first writes a design spec that is reviewed until solid (and, in manual mode, approved by you at one checkpoint
+per wave) before any code.
 
 ## Install
 
@@ -25,7 +27,7 @@ Then, in a project: `/foreman init`, review the two files it writes, commit them
 | `/foreman` | one pass on the topmost `ready` row; stops before merge |
 | `/foreman IB-12` | one pass on that row (the only way to run a `risk: high` row) |
 | `/foreman --auto-merge` (or `loop`) | keep going: merge each fully green pass, then take the next row |
-| `/foreman parallel 4 [--auto-merge]` | up to 4 worktree workers per wave |
+| `/foreman parallel 4 [--auto-merge]` | up to 4 worktree workers per wave; each batch's spec is reviewed before code (see **Spec phase**) |
 | `/foreman tag:e2e` | only rows whose title contains `[e2e]` |
 | `/foreman:pr-address-comments [pr]` | triage and fix a PR's review comments (step 8 calls it) |
 
@@ -33,6 +35,28 @@ Then, in a project: `/foreman init`, review the two files it writes, commit them
 can't start it on its own (the Skill tool refuses it). `pr-address-comments` stays model-invocable because
 foreman's step 8 invokes it. Bare `/foreman` works when no other command is named `foreman`; the full name
 is `/foreman:foreman`.
+
+## Spec phase (parallel mode)
+
+In `parallel N`, every batch starts with a spec, not code:
+- **The spec.** The worker explores the code, writes `<design_spec_dir>/<date>-<rows>-design.md` from
+  `templates/spec.md`, and commits it as the branch's first commit.
+- **The review.** The orchestrator reviews it in rounds: the reviewer chain in spec mode
+  (`review.sh --spec`), plus a read-only Claude reviewer that derives its own list of callers and writers
+  before it reads the spec's list. A round with no Critical or Important finding passes.
+- **The release.** `--auto-merge` releases a passed spec at once. A manual run holds passed specs for one
+  checkpoint per wave and notifies you when it is ready.
+- **Parking.** A batch that can't pass within `spec_review_rounds` rounds, or within `spec_phase_timeout`
+  minutes of worker time, is parked, and so is one whose spec has a `Blocking` open question or whose worker you
+  stopped. Its spec is committed with a `Status: parked` line, and its rows get a note.
+- **The tables.** Batch state lives on disk (`scripts/batches.py`), not in the orchestrator's context. The
+  checkpoint table and the run report's spec-phase table are printed from it, and with the hooks enabled the
+  checkpoint question waits until the table is in the orchestrator's text, and a run report missing from it is
+  handed back once at the end of the turn.
+
+With the hooks enabled (0.4.0), a worker can't edit or commit code before its spec is released. The spec stays
+frozen after release; any change goes in a `## Deviations after release` section, which a reviewer rules on
+before merge.
 
 ## Backlog UI
 
@@ -61,7 +85,10 @@ worker's commit whose contents can't be told.
 
 Run-only pieces act while the session's **run marker** exists: a prompt starting `/foreman` (or `/loop … /foreman`;
 not `ui` or `init`) writes it, the skill runs `hooks.py run-end` when the run ends, `/clear` and logout delete it,
-and it expires after 48 hours.
+and it expires after 48 hours. A session moved to the background, forked or resumed gets a new id; it keeps the run
+through an alias file `runs/<new id>.json`, found from the `continued-in` record ending the old transcript. `/clear`
+and logout leave a run another live session may still own; a marker no session holds any more expires by its
+48-hour TTL.
 
 | id | applies | what it does |
 |---|---|---|
@@ -72,9 +99,10 @@ and it expires after 48 hours.
 | `backlog_check` | foreman repo | after an Edit/Write of the backlog, problem rows (wrong `\|` count, duplicate ids) are reported back |
 | `worker_briefing` | tagged workers | a subagent whose prompt starts `foreman-worker: <batch>` gets the Worker contract, rendered |
 | `report_check` | tagged workers | a tagged worker's final report must end with a valid `json` block that `bk.py --dry-run` accepts; it is sent back once |
-| `script_allow` | run | `gate-lock.sh`, `wt-setup.sh`, `review.sh`, `bk.py` and `hooks.py` run without a permission prompt, in strict shapes only |
+| `script_allow` | run | `gate-lock.sh`, `wt-setup.sh`, `review.sh`, `bk.py`, `hooks.py` and `batches.py` (main session only) run without a permission prompt, in strict shapes only |
 | `spec_gate` | run, `spec-phase` workers | edits and commits stay in `design_spec_dir`, and nothing is pushed, until the orchestrator runs `hooks.py release <batch> <sha>` |
-| `status_pane` | run | a band above the prompt: one line per worker worktree with its PR, state, head SHA, CI, bots, unresolved threads and merge state |
+| `batch_state` | run, orchestrator | a worker's `batches.py` call is denied; at the spec checkpoint every question is denied until the current `batches.py table checkpoint` is in the orchestrator's text, pasted in a message of its own (a table not yet in the transcript is denied too; the hook never edits the question; the third try against one unchanged table goes through); a `run-end` before `batches.py table report` is in the orchestrator's text leaves the report owed, and the end of the turn (a `Stop` hook) hands it back once, then lets the session stop; TaskStop is refused with no id or with a batch name, and for a worker before `hooks.py stopping` (an id it doesn't know passes); `hooks.py release` needs a passed batch at its reviewed SHA and, in a manual run, the checkpoint table pasted after the pass |
+| `status_pane` | run | a band above the prompt: one line per batch (its status with the round or PR, and for a PR its CI, bots, unresolved threads and merge state); without batch files, one line per worker worktree |
 
 Turn pieces off per repo with `hooks_disabled: [<id>, …]` in the config. Your own `! <command>` is never checked:
 it's the override. The status band is a mod: like every mod it runs in-process and unsandboxed. It only reads (git,
@@ -89,12 +117,34 @@ and stalls. `script_allow` covers foreman's own scripts; add the rest of the wor
   "permissions": {
     "allow": [
       "Bash(sleep:*)", "Bash(date +%s)", "Bash(kill -TERM:*)",
-      "Bash(git add:*)", "Bash(git commit:*)", "Bash(git fetch:*)", "Bash(git merge:*)", "Bash(git push:*)", "Bash(git worktree:*)",
+      "Bash(git add:*)", "Bash(git commit:*)", "Bash(git fetch:*)", "Bash(git merge:*)", "Bash(git push:*)", "Bash(git switch:*)", "Bash(git worktree:*)",
       "Bash(gh pr create:*)", "Bash(gh pr view:*)", "Bash(gh pr checks:*)", "Bash(gh pr comment:*)", "Bash(gh pr edit:*)", "Bash(gh api:*)",
-      "Bash(node --check:*)"
+      "Bash(node --check:*)",
+      "Bash(python3 /path/to/foreman/scripts/batches.py:*)"
     ]
   }
 }
+```
+
+Replace `/path/to/foreman` with the plugin's install path (the absolute path `/foreman` writes for `$FOREMAN`, minus
+`/scripts`). `script_allow` already lets the orchestrator's `batches.py` calls through while a run is live; the entry
+covers a call made with the hooks off.
+
+**RTK.** An RTK Bash hook (`rtk hook claude` in a `PreToolUse` entry) rewrites `git …` to `rtk git …`, and Claude
+Code's worktree guard refuses that in a worktree-isolated worker, so the worker can't push. Run RTK through a
+wrapper that leaves `git` alone inside a worktree, and point the settings hook's `command` at it in place of
+`rtk hook claude`; `/foreman parallel` then stops warning about it:
+
+```bash
+#!/usr/bin/env bash
+# ~/.claude/hooks/rtk-unless-worktree-git: rtk's Bash hook, except git inside a Claude worktree
+input=$(cat)
+cwd=$(jq -r '.cwd // empty' <<<"$input")
+cmd=$(jq -r '.tool_input.command // empty' <<<"$input")
+case "$cwd" in
+  */.claude/worktrees/*) grep -qE '(^|[;&|( ])git( |$)' <<<"$cmd" && exit 0 ;;
+esac
+exec rtk hook claude <<<"$input"
 ```
 
 **Limits.**
@@ -128,6 +178,7 @@ Main keys: `backlog_path`, `id_prefix` (row ids, default `IB`), `rules_glob`, `g
 `post_merge_check`, `merge_tool`, `required_ci`, `review_bots`, `reviewers` (+ `reviewer_timeout_seconds`,
 `reviewer_stall_seconds`, `reviewer_max_diff_kb`), `dev_url`, `dev_restart`, `e2e`, `browser_lib`,
 `pre_browser_check`, `worktree_env_files`, `worktree_install`, `stale_check`, `gate_slots`, `parallel_*`,
+`spec_review_rounds`, `spec_phase_timeout`,
 `shared_resources`. Hooks: `forbid_trailers`, `gate_exempt`, `worker_agent_types`, `hooks_disabled`,
 `design_spec_dir`, `status_pane`.
 
@@ -157,40 +208,50 @@ fell through. **Every provider in the chain may receive your diff.**
 
 | adapter | how it runs | read-only by | status |
 |---|---|---|---|
-| `codex` | `codex -m M -c model_reasoning_effort=E --sandbox read-only review --base B` | sandbox | verified (CLI 0.160.0, gpt-6.1-sol) |
-| `opencode` | `opencode run --pure --format json -m M --variant E` | `OPENCODE_PERMISSION` denies edit/web/task, bash only `git diff/log/show/status` | verified (zai-coding-plan/glm-5.3) |
-| `claude` | `claude -p --permission-mode plan --permission-prompts none --allowedTools Read,Grep,Glob,Bash(git diff/log/show:*)` | plan mode, allowlist | verified (haiku) |
-| `muse` | `muse exec --approval-mode never --disable-write --disable-shell --disable-web-tools --prompt-file …` | only the three `--disable-*` flags: `--approval-mode never` auto-allows every tool call (a probe without them ran a shell command and wrote a file); tests fail if one is dropped | verified (muse-spark-1.3-contributor) |
+| `codex` | review: `codex -m M -c model_reasoning_effort=E --sandbox read-only review --base B`; spec: `… --sandbox read-only exec --ephemeral --color never -o <log> -` (prompt on stdin) | sandbox | verified (CLI 0.160.0, gpt-6.1-sol); spec mode verified 2026-10-04 |
+| `opencode` | `opencode run --pure --format json -m M --variant E` | `OPENCODE_PERMISSION` denies edit/web/task, bash only `git diff/log/show/status` | verified (zai-coding-plan/glm-5.3); spec mode verified 2026-10-04 |
+| `claude` | `claude -p --permission-mode plan --permission-prompts none --allowedTools Read,Grep,Glob,Bash(git diff/log/show:*)` | plan mode, allowlist | verified (haiku); spec mode verified 2026-10-04 |
+| `muse` | `muse exec --approval-mode never --disable-write --disable-shell --disable-web-tools --prompt-file …` | only the three `--disable-*` flags: `--approval-mode never` auto-allows every tool call (a probe without them ran a shell command and wrote a file); tests fail if one is dropped | verified (muse-spark-1.3-contributor); spec mode verified 2026-10-04 (reads the repo under --disable-shell) |
 | `prime-agent` | `prime-agent -p --no-tools --no-session --offline -nc` (prompt + diff on stdin) | no tools | verified (default model) |
 | `agy` | `agy -p … --mode plan --sandbox --output-format json` | diff in prompt, plan mode | unverified (not signed in) |
 | `pi` | `pi -p --no-session --tools read,grep,find,ls` | tool allowlist | unverified (not installed) |
 | `openclaw` | `openclaw agent exec --message-file - --config <deny exec/write/edit/process>` | config deny list | unverified (not installed) |
 | `hermes` | `hermes -z -t safe` | `safe` toolset | unverified (not installed) |
-| `custom` | the legacy `extra_reviewers` command, run with `bash -c` | whatever the command does | — |
+| `custom` | the legacy `extra_reviewers` command, run with `bash -c`; `{prompt_file}` and `{base}` are substituted (shell-quoted) | whatever the command does | — |
 
 Repo-reading adapters (codex, opencode, claude) should come first: diff-in-prompt adapters see only the
 diff. No adapter runs with a bypass, yolo or skip-permissions flag.
 
+The spec phase runs `scripts/review.sh --spec <spec path> <fork base> <log>`. It uses
+`templates/spec-review-prompt.md`, and only adapters that read the repo themselves (marked
+`# foreman: reads-repo`): codex (`codex exec`), claude, opencode (its `plan` agent), muse (its read tools under `--disable-shell`), and `custom` when its
+command uses both `{prompt_file}` and `{base}`. Every other adapter falls through. If no adapter is left, the
+orchestrator runs two Claude reviewers instead. On TERM, review.sh kills the running adapter's process group and
+exits 143. `<log>.pid` holds its pid while it runs.
+
 Writing an adapter: `reviewers/<name>.sh <base> <model> <effort> <prompt_file> <log>`, source `_lib.sh`,
 exit 0 with the review in `<log>`, exit 10 to fall through. Add `# foreman: no-stall-watch` if the CLI prints
-nothing until it finishes.
+nothing until it finishes, and `# foreman: reads-repo` if the reviewer reads the repo itself: only those run in
+spec mode (`FOREMAN_REVIEW_MODE=spec`; `_lib.sh` makes the others fall through).
 
 ## Scripts
 
 | script | use |
 |---|---|
-| `scripts/review.sh <base> <log>` | the reviewer chain |
+| `scripts/review.sh [--spec <spec path>] <base> <log>` | the reviewer chain; `--spec` reviews a batch spec (exit 0 landed, 1 exhausted, 2 hard error, 143 terminated) |
 | `scripts/gate-lock.sh [--name L] <owner> -- <cmd>` | run a gate holding one of `gate_slots` slots shared by every worktree of the repo (`~/.claude/gate-locks/<repo>`); stale slots (holder dead 90+ min) are reclaimed; exits with the command's code |
 | `scripts/wt-setup.sh <worktree>` / `--check <dir>` | copy env files, install, stale-install check; `--check` with no `stale_check` configured fails |
 | `scripts/bk.py <repo> [--dry-run] <reports...>` | fold worker JSON reports into the backlog and rules files; writes nothing on any mismatch |
 | `scripts/cfg.py <repo> <key> [default]` | read a config key (no PyYAML needed) |
 | `scripts/hooks.py <event>` | the hooks' dispatcher; orchestrator CLIs `run-end` (always exits 0), `release <batch> <sha>`, `stopping <batch>`, `forget <batch>` (these three exit 3 when the hooks are inactive) |
 | `scripts/state.py <path>` | print the repo's state dir (`~/.claude/foreman/<repo-key>`, or under `$FOREMAN_HOME`) |
+| `scripts/batches.py <command> …` | the parallel spec phase's batch state (`set`, `note`, `bump`, `stamp`, `task`, `add-round`, `show`) and its two tables (`table checkpoint <wave>`, `table report`); orchestrator only |
 
 ## Tests
 
 ```bash
-tests/run.sh                       # offline: config parsing, bk.py, worktree setup, gate locks, the chain with fake reviewers, the hooks, the mod's formatter
+tests/run.sh                       # offline: config parsing, bk.py, worktree setup, gate locks, the chain with fake reviewers (incl. spec mode), the spec template, the hooks, the mod's formatter, SKILL.md spec-phase text
+SPEC=docs/superpowers/specs/x-design.md tests/real-reviewers.sh <fork base> /tmp/rrs codex=gpt-6.1-sol:medium   # a real spec-mode run
 tests/e2e-hooks.sh                 # headless end-to-end of the hooks with haiku workers, in a throwaway repo; spends quota
 tests/real-reviewers.sh main /tmp/rr codex=gpt-6.1-sol:medium claude=haiku:low   # real runs, in a throwaway repo; spends quota
 ```

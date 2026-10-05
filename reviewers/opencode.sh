@@ -2,11 +2,14 @@
 # opencode CLI. Reads the repo itself; OPENCODE_PERMISSION denies edits, web fetches and every shell
 # command except read-only git. `--variant` is the reasoning effort. opencode can exit 0 on a model error
 # and retries a 429 forever, so JSON `"type":"error"` events (and retry/rate-limit lines) fall through early.
+# Spec mode runs the read-only `plan` agent.
+# foreman: reads-repo
 . "$(dirname "$0")/_lib.sh"
 export OPENCODE_PERMISSION='{"edit":"deny","webfetch":"deny","task":"deny","external_directory":"deny","bash":{"*":"deny","git diff*":"allow","git log*":"allow","git show*":"allow","git status*":"allow"}}'
 args=(run --pure --format json)
 [ -n "$model" ] && args+=(-m "$model")
 [ -n "$effort" ] && args+=(--variant "$effort")
+[ "${FOREMAN_REVIEW_MODE:-}" = spec ] && args+=(--agent plan)
 run_tool '(rate.?limit|429|quota|insufficient|unauthorized|401)' '"type":"error"|"type":"session\.status".*"retry"' /dev/null \
   opencode "${args[@]}" "$(cat "$prompt")"
 rc=$?; [ $rc = 0 ] || exit $rc

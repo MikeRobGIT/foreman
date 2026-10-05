@@ -62,12 +62,16 @@ parallel_skip: []               # rows a wave never batches (ids, tags like "[se
 parallel_shared_files: []       # files several batches may edit, each its own entries (e.g. locale JSON) [none]
 shared_resources: []            # rules every worker follows: shared database, test data, browser sign-in, VCS quirks [none]
 
+# --- spec phase (parallel mode: every batch's spec is reviewed before any code) -----------------------
+design_spec_dir: docs/superpowers/specs   # batch specs are committed here; before release a spec-phase worker may edit and commit only here (spec_gate); not e2e.spec_dir; no spaces (hooks auto-allow only unquoted arguments) [docs/superpowers/specs]
+spec_review_rounds: 3           # review rounds without a pass before a batch is parked [3]
+spec_phase_timeout: 60          # minutes of worker time in the spec phase before a batch is parked [60]
+
 # --- hooks (README: Hooks) ------------------------------------------------------------------------------
-forbid_trailers: []             # lines that must never start a commit, PR or comment message, e.g. [Co-Authored-By, Claude-Session]; an entry written /.../ is a regex searched within each line [none]
+forbid_trailers: [Co-Authored-By, Claude-Session, "/^\W*Generated with \[?Claude Code/"]   # lines that must never start a commit, PR or comment message; an entry written /.../ is a regex searched within each line (this one matches only the "Generated with Claude Code" footer); empty this list to allow attribution lines [none]
 gate_exempt: [docs/**, "**/*.md"]   # gitignore-style paths a push may change without a gate receipt; backlog_path and rules_glob always may [docs/**, **/*.md]
 worker_agent_types: [general-purpose, workflow-subagent]   # subagent types the briefing and report check apply to [these two]
-hooks_disabled: []              # hook ids off in this repo: gate_before_push, worker_guard, merge_discipline, trailer_guard, backlog_check, worker_briefing, report_check, script_allow, spec_gate, status_pane [none]
-design_spec_dir: docs/superpowers/specs   # where a spec-phase worker may edit before its spec is released [docs/superpowers/specs]
+hooks_disabled: []              # hook ids off in this repo: gate_before_push, worker_guard, merge_discipline, trailer_guard, backlog_check, worker_briefing, report_check, script_allow, spec_gate, batch_state, status_pane [none]
 status_pane: true               # the wave status band above the prompt during a run [true]
 ---
 

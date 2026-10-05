@@ -11,13 +11,16 @@ import hooks  # noqa: E402
 WANT = {
     ('UserPromptSubmit', None): 'run-start',
     ('UserPromptExpansion', None): 'run-start',
+    ('SessionStart', None): 'session-start',
     ('SessionEnd', None): 'session-end',
     ('PreToolUse', 'Bash'): 'pretool',
     ('PreToolUse', 'Edit|Write|MultiEdit|NotebookEdit'): 'pretool',
+    ('PreToolUse', 'AskUserQuestion|TaskStop'): 'pretool',
     ('PostToolUse', 'Edit|Write|MultiEdit'): 'posttool',
     ('PostToolUse', 'Bash'): 'posttool',
     ('SubagentStart', None): 'subagent-start',
     ('SubagentStop', None): 'subagent-stop',
+    ('Stop', None): 'stop',
     ('PermissionRequest', 'Bash'): 'permission',
 }
 
