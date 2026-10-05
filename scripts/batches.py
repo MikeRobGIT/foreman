@@ -255,7 +255,7 @@ def cmd_set(store, name, args):
     kv = pairs(args, FIELDS)
 
     def change(b):
-        before = b.get('status')
+        before, reviewed = b.get('status'), b.get('reviewed_sha')
         b.update({k: int(v) if k == 'pr' else v for k, v in kv.items()})
         st = b.get('status')
         if 'status' in kv:
@@ -265,8 +265,16 @@ def cmd_set(store, name, args):
                 raise Fail(f"status=released needs released_sha equal to reviewed_sha ({b.get('reviewed_sha') or 'unset'})")
             if st == 'parked' and not b.get('reason'):
                 raise Fail('status=parked needs reason=<reason>')
-            if st != before and st == 'passed':
+        if 'reviewed_sha' in kv:
+            if kv.get('status') != 'passed':
+                raise Fail('reviewed_sha=<sha> goes with status=passed in the same call')
+            last = (b.get('rounds') or [{}])[-1].get('sha')
+            if not same_sha(last, kv['reviewed_sha']):
+                raise Fail("status=passed needs reviewed_sha equal to the last round's sha; the last round is at "
+                           f"{last or '(none)'}")
+            if st != before or not same_sha(reviewed, kv['reviewed_sha']):
                 stamp(b, 'passed')
+        if 'status' in kv:
             if st != before and st in ('released', 'parked'):
                 stamp(b, 'ended')
         if b.get('reason') and st != 'parked':

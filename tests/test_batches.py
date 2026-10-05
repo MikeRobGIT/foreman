@@ -73,6 +73,9 @@ class Base(unittest.TestCase):
     def show(self, b):
         return json.loads(self.ok('show', b, '--json'))
 
+    def round_at(self, b, sha, r=1):
+        self.ok('add-round', b, f'r={r}', 'sha=' + sha, 'entry=1', 'explore=pass', 'crit=0', 'imp=0', 'minor=0')
+
     def file(self, b, d=0, sid='S1'):
         return os.path.join(self.dirs[d], 'batches', sid, 'state', b + '.json')
 
@@ -134,6 +137,7 @@ class CommandTest(Base):
         self.assertIn('status=parked needs reason', self.refused('set', self.b1, 'status=parked'))
         self.assertIn('status=passed needs reviewed_sha', self.refused('set', self.b1, 'status=passed'))
         self.assertIn('reason=<reason> goes with status=parked', self.refused('set', self.b1, 'reason=no-pass'))
+        self.round_at(self.b1, SHA1)
         self.ok('set', self.b1, 'status=passed', 'reviewed_sha=' + SHA1)
         self.assertIn('released_sha equal to reviewed_sha', self.refused('set', self.b1, 'status=released',
                                                                          'released_sha=' + SHA2))
@@ -149,11 +153,34 @@ class CommandTest(Base):
             self.assertEqual(self.run_cli(*args).returncode, 2, args)
 
     def test_a_release_set_needs_the_reviewed_sha(self):
+        self.round_at(self.b1, SHA1)
         self.ok('set', self.b1, 'status=passed', 'reviewed_sha=' + SHA1)
         self.ok('set', self.b1, 'status=released', 'released_sha=' + SHA1[:12])   # an abbreviation of the same SHA
         self.assertEqual([k for k, _ in self.show(self.b1)['stamps']], ['passed', 'ended'])
 
+    def test_a_reviewed_sha_needs_a_pass_at_the_last_rounds_sha(self):
+        self.assertIn('reviewed_sha=<sha> goes with status=passed', self.refused('set', self.b1, 'reviewed_sha=' + SHA1))
+        self.assertIn('the last round is at (none)', self.refused('set', self.b1, 'status=passed', 'reviewed_sha=' + SHA1))
+        self.round_at(self.b1, SHA1)
+        self.round_at(self.b1, SHA2, r=2)
+        self.assertIn(f'the last round is at {SHA2}',
+                      self.refused('set', self.b1, 'status=passed', 'reviewed_sha=' + SHA1))   # an earlier round's SHA
+        self.ok('set', self.b1, 'status=passed', 'reviewed_sha=' + SHA2[:12])
+        self.assertIn('reviewed_sha=<sha> goes with status=passed', self.refused('set', self.b1, 'reviewed_sha=' + SHA1))
+        self.assertEqual(self.show(self.b1)['reviewed_sha'], SHA2[:12])
+
+    def test_a_re_pass_at_a_new_sha_is_stamped_again(self):
+        self.round_at(self.b1, SHA1)
+        self.ok('set', self.b1, 'status=passed', 'reviewed_sha=' + SHA1)
+        self.ok('set', self.b1, 'status=passed', 'reviewed_sha=' + SHA1[:12])   # the same SHA: no new stamp
+        self.assertEqual([k for k, _ in self.show(self.b1)['stamps']], ['passed'])
+        self.round_at(self.b1, SHA2, r=2)
+        self.ok('set', self.b1, 'status=passed', 'reviewed_sha=' + SHA2)
+        b = self.show(self.b1)
+        self.assertEqual(([k for k, _ in b['stamps']], b['reviewed_sha']), (['passed', 'passed'], SHA2))
+
     def test_comment_sent_moves_a_passed_batch_back_to_review(self):
+        self.round_at(self.b1, SHA1)
         self.ok('set', self.b1, 'status=passed', 'reviewed_sha=' + SHA1)
         self.ok('stamp', self.b1, 'comment_sent')
         b = self.show(self.b1)

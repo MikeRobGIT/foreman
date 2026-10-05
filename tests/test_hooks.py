@@ -2839,7 +2839,16 @@ class BatchStateCase(Case):
         return p.stdout
 
     def passed(self, b, sha=None):
-        self.batches('set', b, 'status=passed', 'reviewed_sha=' + (sha or self.SHA))
+        """A pass at `sha`, after a round at it when the batch's last round is at another SHA (batches.py's rule)."""
+        sha = sha or self.SHA
+        rounds = json.loads(self.batches('show', b, '--json')).get('rounds') if self.has_batch(b) else []
+        if not rounds or rounds[-1]['sha'] != sha:
+            self.batches('add-round', b, f'r={len(rounds or []) + 1}', 'sha=' + sha, 'entry=0', 'explore=pass',
+                         'crit=0', 'imp=0', 'minor=0')
+        self.batches('set', b, 'status=passed', 'reviewed_sha=' + sha)
+
+    def has_batch(self, b):
+        return os.path.exists(os.path.join(self.fx.state, 'batches', 'S1', 'state', b + '.json'))
 
     def entry(self, kind, content):
         with open(self.main, 'a') as f:
@@ -3154,6 +3163,19 @@ class BatchStateReleaseTest(BatchStateCase):
         self.say(self.batches('table', 'checkpoint', self.wave))
         self.assertIsNone(self.ask())
         self.assertIsNone(self.release(self.b2, 'd' * 40))
+
+    def test_a_re_pass_at_a_new_sha_needs_a_fresh_checkpoint_before_a_manual_release(self):
+        self.passed(self.b1)
+        table = self.batches('table', 'checkpoint', self.wave)
+        self.say(table)
+        self.passed(self.b1, 'd' * 40)                                  # a new round passed, no comment round between
+        stamps = json.loads(self.batches('show', self.b1, '--json'))['stamps']
+        self.assertEqual([k for k, _ in stamps], ['passed', 'passed'])
+        self.assertIn('show the checkpoint table first', self.release(self.b1, 'd' * 40))
+        self.assertFalse(self.released(self.b1))
+        self.say(self.batches('table', 'checkpoint', self.wave))
+        self.assertIsNone(self.release(self.b1, 'd' * 40))
+        self.assertTrue(self.released(self.b1))
 
     def test_a_release_without_state_is_denied_only_for_a_spec_phase_worker(self):
         self.assertIsNone(self.release(self.b2))
