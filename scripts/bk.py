@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Fold /foreman worker reports into the backlog and the rules files.
 
-Usage: bk.py <repo-dir> [--dry-run] report.json [report.json ...]
+Usage: bk.py <repo-dir> [--dry-run] [--no-fetch] report.json [report.json ...]
 
 The backlog path (`backlog_path`) and the row id prefix (`id_prefix`, default IB) come from the
 project's foreman config (see cfg.py). The examples below use the default prefix.
@@ -21,7 +21,7 @@ adds `pr`):
   acceptance column. `append` adds a note to any row without touching its status.
 - `IB-NEW-x` placeholders are numbered from the real max id, per report, and rewritten everywhere
   in that report's text (workers' own numbering always collided). The max covers this file,
-  origin's default branch and every open backlog UI branch (`backlog/ui-*`, fetched first), so a
+  origin's default branch and every open backlog UI branch (`backlog/ui-*`, fetched first unless --no-fetch), so a
   new row never takes an id an unmerged UI PR already uses.
 - A new row must have exactly 5 ` | ` separators (a stray pipe shifts the table's columns)
   and no newline (rows stay single-line).
@@ -51,7 +51,7 @@ def walk(value, fn):
 
 
 def main():
-    args = [a for a in sys.argv[1:] if a != '--dry-run']
+    args = [a for a in sys.argv[1:] if a not in ('--dry-run', '--no-fetch')]
     dry = '--dry-run' in sys.argv
     if len(args) < 2:
         raise SystemExit(__doc__)
@@ -67,11 +67,12 @@ def main():
     path = os.path.join(repo, BACKLOG)
     lines = open(path).read().split('\n')
     ids = [int(m.group(1)) for l in lines for m in [ROW.match(l)] if m]
-    try:  # best effort: a prompt or a stalled remote must not hang the loop's bookkeeping
-        subprocess.run(['git', 'fetch', '-q', '--prune', 'origin', backlog.UI_REFSPEC], cwd=repo, capture_output=True,
-                       stdin=subprocess.DEVNULL, env={**os.environ, 'GIT_TERMINAL_PROMPT': '0'}, timeout=30)
-    except subprocess.TimeoutExpired:
-        pass
+    if '--no-fetch' not in sys.argv:
+        try:  # best effort: a prompt or a stalled remote must not hang the loop's bookkeeping
+            subprocess.run(['git', 'fetch', '-q', '--prune', 'origin', backlog.UI_REFSPEC], cwd=repo, capture_output=True,
+                           stdin=subprocess.DEVNULL, env={**os.environ, 'GIT_TERMINAL_PROMPT': '0'}, timeout=30)
+        except subprocess.TimeoutExpired:
+            pass
     next_id = first_id = max(max(ids), backlog.reserved_max_id(repo, BACKLOG, P)) + 1
     anchor = max(n for n, l in enumerate(lines) if (m := ROW.match(l)) and int(m.group(1)) == max(ids))
 

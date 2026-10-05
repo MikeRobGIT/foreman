@@ -1,6 +1,6 @@
 {
   "name": "foreman",
-  "version": "0.3.0",
+  "version": "0.5.1",
   "description": "Backlog-driven improvement loop: pick a row, plan, implement, open a PR, run a cross-model reviewer chain, wait for bots and CI, address comments, verify in the browser, merge. Serial or parallel waves in worktrees.",
   "author": {
     "name": "Michael Robateau"
