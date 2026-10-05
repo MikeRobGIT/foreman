@@ -690,6 +690,10 @@ check "parking runs in seven steps, in order" bash -c "awk -v a='1. Kill the rou
 check "W6 pastes the report before run-end" appears_before "$sk" 'run `python3 $FOREMAN/batches.py table report`' 'the hooks refuse it until the current report table'
 check "W3.6 pastes the checkpoint before asking" appears_before "$sk" 'Run `python3 $FOREMAN/batches.py table checkpoint <wave>`' 'A question that covers one batch is single-select'
 check "SKILL.md no longer reads a state table" bash -c "! grep -qF 'state table' '$sk'"
+check "W4.2b environment retry reads verdicts from show --json" grep -qF 'that has a `verdict` mark (`python3 $FOREMAN/batches.py show --json`)' "$sk"
+check "W4.2b owned files come from show --json" grep -qF '(`owned` in `batches.py show --json`)' "$sk"
+check "W4.4 marks the replaced worker done" grep -qF '`python3 $FOREMAN/batches.py task <batch> done <old id>`' "$sk"
+check "W4.6 ignores a TaskStop error for an ended worker" grep -qF 'is ignored, and the task is still marked done).' "$sk"
 check "P3 (next-message): the checkpoint paste is a message of its own" grep -qF 'in a message of its own, make one more call' "$sk"
 check "P3 (next-message): one more call before run-end" grep -qF 'then one more call (`python3 $FOREMAN/batches.py show`), then `run-end`' "$sk"
 

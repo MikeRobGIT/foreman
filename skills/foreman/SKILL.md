@@ -397,7 +397,7 @@ W1-W6 to keep them apart from steps 0-12; W6's stop conditions replace the auton
      unnamed, recorded with `task <batch> add reviewer <agent id>`, stopped by its id when its verdict lands)
      on the SHA W4.1 verified,
      with a 20-minute reviewer timer (W3.5's clock). Give it the spec, the PR diff, the deviations section, the
-     report's list of gate-changed files, and every other batch's owned files (`owned` in `batches.py show`).
+     report's list of gate-changed files, and every other batch's owned files (`owned` in `batches.py show --json`).
      It does four things:
      - checks the code against the spec;
      - reports deviations the spec doesn't list;
@@ -412,7 +412,7 @@ W1-W6 to keep them apart from steps 0-12; W6's stop conditions replace the auton
      - **If it fails or times out,** re-dispatch it once. If it fails again, don't auto-merge that PR: leave it
        open with a note, carry on with the wave, and list it in the run report for the human.
      - **An environment failure** (`fork failed`, `Device not configured`) gets one more try first, after
-       TaskStopping every live `reviewer` task of the run that has a `verdict` mark (`batches.py show`). This retry
+       TaskStopping every live `reviewer` task of the run that has a `verdict` mark (`python3 $FOREMAN/batches.py show --json`). This retry
        is not the one re-dispatch above, and it never stops a `worker` task.
      - **If the head moves,** run it again on the new SHA. W4.6 merges only a SHA whose W4.2b verdict is clean.
      - **A deviation that adds a file outside the outline, or changes a row's acceptance,** gets one spec round
@@ -434,7 +434,7 @@ W1-W6 to keep them apart from steps 0-12; W6's stop conditions replace the auton
   4. **Findings** (a real Critical/Important finding, a red or missing check, a failed audit or browser
      check) go back to the worker (`SendMessage`, and `bump <batch> pr_rounds` for each send; if it cannot be
      resumed, run `python3 $FOREMAN/hooks.py stopping <batch>` before any TaskStop of it by its recorded id,
-     remove its worktree, and launch a new worker on the branch, named `fw-<batch>-2` (then `-3`, …) and recorded
+     then `python3 $FOREMAN/batches.py task <batch> done <old id>`, remove its worktree, and launch a new worker on the branch, named `fw-<batch>-2` (then `-3`, …) and recorded
      with `task <batch> add worker <name>`, whose prompt again starts `foreman-worker: <batch>`), then W4.1 again.
      For a spec-phase batch that prompt
      begins `foreman-worker: <batch>`, without ` spec-phase` because the spec is already released, names the
@@ -449,7 +449,7 @@ W1-W6 to keep them apart from steps 0-12; W6's stop conditions replace the auton
      because the head moved, go back to W4.1 (manual mode: ask again). Then stop the batch's workers:
      `python3 $FOREMAN/hooks.py stopping <batch>`, TaskStop every live `worker` task of the batch (`fw-<batch>`,
      `fw-<batch>-<k>`) by its id, and `task <batch> done <id>` (a finished worker teammate holds a terminal like
-     a reviewer does). Then remove the worktree and the remote branch.
+     a reviewer does; a TaskStop error for a task that already ended is ignored, and the task is still marked done). Then remove the worktree and the remote branch.
   7. **After every merge** run `post_merge_check` (under `$FOREMAN/gate-lock.sh orchestrator -- '<cmd>'`, like every gate) on the updated main and confirm it ran tasks (a
      change-scoped command such as `--affected` runs nothing on the default branch). Red: stop merging and
      report; a fix or revert goes through a PR.
