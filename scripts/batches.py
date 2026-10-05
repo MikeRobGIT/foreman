@@ -15,8 +15,9 @@ Every command takes `--session <id>`. Exit 0 = done, 1 = refused (one line on st
 
 Files: <state dir>/batches/<session>/state/<batch>.json in every state.state_dirs(main) entry (hooks.py forget
 never reaches them); reads take the newest copy. Session: --session, else $FOREMAN_SESSION, else the most
-recently touched live run marker, else `nosession`. Run scope: with a live run marker, `show` and the tables see
-only batches named at or after the marker's `started` minute.
+recently touched live run marker, else `nosession`; an id hooks.py aliased to the run it continues (a session
+moved to the background, forked or resumed under a new id) resolves to that run's id. Run scope: with a live run
+marker, `show` and the tables see only batches named at or after the marker's `started` minute.
 """
 import contextlib
 import fcntl
@@ -190,6 +191,19 @@ class Store:
         return out
 
 
+def canonical(dirs, sid):
+    """The session whose run `sid` belongs to: the `alias` of hooks.py's `runs/<sid>.json` = {alias, touched} when
+    `sid` continues an earlier session, else `sid`. One step: an alias never names another alias. hooks.py uses it."""
+    if not NAME.fullmatch(sid or ''):
+        return sid
+    for d in dirs:
+        m = state.read_json(os.path.join(d, 'runs', sid + '.json'))
+        if isinstance(m, dict):
+            a = m.get('alias')
+            return a if isinstance(a, str) and NAME.fullmatch(a) else sid
+    return sid
+
+
 def session_id(dirs, given):
     sid = given or os.environ.get('FOREMAN_SESSION')
     if not sid:
@@ -197,7 +211,7 @@ def session_id(dirs, given):
         for d in dirs:
             for p in glob.glob(os.path.join(glob.escape(d), 'runs', '*.json')):
                 m = state.read_json(p)
-                if isinstance(m, dict) and time.time() - float(m.get('touched', 0)) < RUN_TTL:
+                if isinstance(m, dict) and 'alias' not in m and time.time() - float(m.get('touched', 0)) < RUN_TTL:
                     live.append((float(m.get('touched', 0)), os.path.basename(p)[:-len('.json')]))
         if not live:
             return 'nosession'
@@ -208,7 +222,7 @@ def session_id(dirs, given):
                   '(pass --session <id> to pick another)', file=sys.stderr)
     if not NAME.fullmatch(sid):
         raise Usage(f'bad session id: {sid}')
-    return sid
+    return canonical(dirs, sid)
 
 
 def open_store(given):

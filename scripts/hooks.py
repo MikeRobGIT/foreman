@@ -160,13 +160,25 @@ class Hook:
         self.denies = []
         self.touch = set()
         self._active = {}
+        self._sids = {}
 
     def deny(self, reason):
         self.denies.append(reason)
 
+    def run_sid(self, repo):
+        """The id this session's run state is kept under in `repo`: its own, or through an alias the run it continues.
+        A session with no runs file of its own tries adoption first (L5), once per process."""
+        if repo.top not in self._sids:
+            sid = batches.canonical(repo.dirs, self.sid)
+            if sid == self.sid and BATCH.match(sid) and not any(
+                    os.path.exists(os.path.join(d, 'runs', sid + '.json')) for d in repo.dirs):
+                sid = adopt(repo.dirs, sid, self.inp.get('transcript_path')) or sid
+            self._sids[repo.top] = sid
+        return self._sids[repo.top]
+
     def run_active(self, repo):
         if repo.top not in self._active:
-            self._active[repo.top] = marker(repo, self.sid) is not None
+            self._active[repo.top] = marker(repo, self.run_sid(repo)) is not None
         return self._active[repo.top]
 
     def active(self, repo, piece, run_only=True):
@@ -181,22 +193,65 @@ def cmd_repo(c, h):
 # ---- the run marker -------------------------------------------------------------------------------
 
 def marker(repo, sid):
-    """(path, data) of this session's live run marker, or None."""
+    """(path, data) of the live run marker of `sid`'s run (followed through an alias), or None."""
     if not sid or os.sep in sid:
         return None
+    sid = batches.canonical(repo.dirs, sid)
     for d in repo.dirs:
         p = os.path.join(d, 'runs', sid + '.json')
         m = state.read_json(p)
-        if isinstance(m, dict) and time.time() - float(m.get('touched', 0)) < RUN_TTL:
+        if isinstance(m, dict) and 'alias' not in m and time.time() - float(m.get('touched', 0)) < RUN_TTL:
             return p, m
     return None
 
 
 def touch_marker(repo, sid):
+    """Touch `sid`'s live run marker, and the alias that leads to it, which prune and the status band age alike."""
     m = marker(repo, sid)
     if m:
-        m[1]['touched'] = time.time()
-        state.write_json(m[0], m[1])
+        now = time.time()
+        state.write_json(m[0], dict(m[1], touched=now))
+        for d in repo.dirs:
+            p = os.path.join(d, 'runs', sid + '.json')
+            a = state.read_json(p)
+            if isinstance(a, dict) and 'alias' in a:
+                state.write_json(p, dict(a, touched=now))
+
+
+def continued_in(path, sid, tail=8192):
+    """True when the last `tail` bytes of the transcript `path` hold a `continued-in` record naming `sid`."""
+    try:
+        with open(path, 'rb') as f:
+            f.seek(max(0, f.seek(0, os.SEEK_END) - tail))
+            lines = f.read().split(b'\n')
+    except OSError:
+        return False
+    for raw in lines:
+        try:
+            e = json.loads(raw)
+        except ValueError:
+            continue
+        if isinstance(e, dict) and e.get('type') == 'continued-in' and e.get('continuedInSessionId') == sid:
+            return True
+    return False
+
+
+def adopt(dirs, sid, transcript_path):
+    """The run the new session `sid` continues, recorded as the alias `runs/<sid>.json` = {alias, touched} beside
+    its marker, or None. A session moved to the background, forked or resumed gets a new id, and the old transcript
+    (`<old id>.jsonl` beside the new one) ends with a `continued-in` record naming it; nothing in the hook input names
+    the old id. Only live markers' transcript tails are read, and an alias is never adopted (no chains)."""
+    if not transcript_path or not BATCH.match(sid):
+        return None
+    for d in dirs:
+        for p in ls(d, 'runs/*.json'):
+            m, old = state.read_json(p), os.path.basename(p)[:-len('.json')]
+            if (isinstance(m, dict) and 'alias' not in m and old != sid and BATCH.match(old)
+                    and time.time() - float(m.get('touched', 0)) < RUN_TTL
+                    and continued_in(os.path.join(os.path.dirname(transcript_path), old + '.jsonl'), sid)):
+                state.write_json(os.path.join(d, 'runs', sid + '.json'), {'alias': old, 'touched': time.time()})
+                return old
+    return None
 
 
 def prune(sd):
@@ -237,7 +292,7 @@ def run_start(h):
         return
     sd = repo.dirs[0]
     prune(sd)
-    p = os.path.join(sd, 'runs', h.sid + '.json')
+    p = os.path.join(sd, 'runs', h.run_sid(repo) + '.json')
     m = state.read_json(p)
     m = m if isinstance(m, dict) else {'started': time.time()}
     m.update(touched=time.time(), args=args)
@@ -245,11 +300,15 @@ def run_start(h):
 
 
 def end_run(sid):
-    """Delete this session's run markers. A glob, no git: every SessionEnd hook shares 1.5 seconds."""
+    """Delete this session's run markers, and for an alias the marker it names. A glob, no git: every SessionEnd hook
+    shares 1.5 seconds. An owed report (`.owed`) stays for the Stop hook."""
     if not sid or os.sep in sid:
         return
     for home in {state.home(), state.DEFAULT_HOME}:
         for p in ls(home, f'*/runs/{glob.escape(sid)}.json'):
+            a = state.read_json(p)
+            if isinstance(a, dict) and isinstance(a.get('alias'), str) and BATCH.match(a['alias']):
+                rm(os.path.join(os.path.dirname(p), a['alias'] + '.json'))
             rm(p)
 
 
@@ -259,14 +318,20 @@ def session_end(h):
 
 
 def session_start(h):
-    """Export this session's id to every later Bash call (probe P1): append `export FOREMAN_SESSION=<id>` to
-    $CLAUDE_ENV_FILE, which batches.py reads. Nothing is written when the harness sets no env file."""
+    """Export this session's run id to every later Bash call (probe P1): append `export FOREMAN_SESSION=<id>` to
+    $CLAUDE_ENV_FILE, which batches.py reads. Nothing is written when the harness sets no env file. A session that
+    continues another under a new id (`source` fork or resume) first adopts that session's run (L5), and exports
+    the run's id, so batches.py keeps writing the run's state."""
+    sid = h.sid
+    if h.inp.get('source') in ('fork', 'resume'):
+        repo = repo_at(h.cwd)
+        sid = h.run_sid(repo) if repo else sid
     path = os.environ.get('CLAUDE_ENV_FILE')
-    if path and BATCH.match(h.sid):
+    if path and BATCH.match(sid):
         with open(path, 'a+', encoding='utf-8') as f:
             f.seek(0)
             text = f.read()
-            f.write(('\n' if text and not text.endswith('\n') else '') + f'export FOREMAN_SESSION={h.sid}\n')
+            f.write(('\n' if text and not text.endswith('\n') else '') + f'export FOREMAN_SESSION={sid}\n')
 
 
 HANDLERS['run-start'] = run_start
@@ -377,13 +442,13 @@ def forget(repo, sid, batch):
 
 
 def pretool_control(h, repo, verb, rest):
-    d = repo.dirs[0]
+    d, sid = repo.dirs[0], h.run_sid(repo)
     if verb == 'release':
-        state.write_json(batch_file(d, h.sid, rest[0], 'released'), {'sha': rest[1], 'time': time.time()})
+        state.write_json(batch_file(d, sid, rest[0], 'released'), {'sha': rest[1], 'time': time.time()})
     elif verb == 'stopping':
-        state.write_json(batch_file(d, h.sid, rest[0], 'stopped'), {'time': time.time()})
+        state.write_json(batch_file(d, sid, rest[0], 'stopped'), {'time': time.time()})
     elif verb == 'forget':
-        forget(repo, h.sid, rest[0])
+        forget(repo, sid, rest[0])
     touch_marker(repo, h.sid)
 
 
@@ -480,7 +545,8 @@ def resolve_agent(repo, h):
     `time` repeats `start`: it is the key the report check reads (piece 7)."""
     if not h.agent or not h.sid or os.sep in h.agent + h.sid:
         return None
-    entry = agent_entry(repo, h.sid, h.agent)
+    sid = h.run_sid(repo)
+    entry = agent_entry(repo, sid, h.agent)
     if entry:
         return entry
     stem, ext = os.path.splitext(h.inp.get('transcript_path') or '')
@@ -495,7 +561,7 @@ def resolve_agent(repo, h):
         entry = {'batch': tag[0], 'spec': tag[1], 'briefed': False, 'start': start, 'time': start}
     else:
         entry = {'batch': None}
-    state.write_json(os.path.join(repo.dirs[0], 'batches', h.sid, 'agents', h.agent), entry)
+    state.write_json(os.path.join(repo.dirs[0], 'batches', sid, 'agents', h.agent), entry)
     return entry
 
 
@@ -1073,8 +1139,8 @@ def take_briefing(h, repo):
     entry = resolve_agent(repo, h)
     if not entry or not entry.get('batch') or entry.get('briefed') or repo.disabled('worker_briefing'):
         return None
-    text = briefing(repo, entry['batch'], bool(entry.get('spec')), h.sid)
-    path = os.path.join(repo.dirs[0], 'batches', h.sid, 'agents', h.agent)
+    text = briefing(repo, entry['batch'], bool(entry.get('spec')), h.run_sid(repo))
+    path = os.path.join(repo.dirs[0], 'batches', h.run_sid(repo), 'agents', h.agent)
     state.ensure(os.path.dirname(path))
     try:
         fd = os.open(path + '.briefed', os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
@@ -1158,11 +1224,10 @@ def report_problem(msg, cwd):
 
 def stopping_allowed(repo, h, batch):
     """True when `hooks.py stopping <batch>` ran after this worker started (piece 7, probe P7)."""
-    stop = next((s for s in (state.read_json(batch_file(d, h.sid, batch, 'stopped')) for d in repo.dirs)
-                 if isinstance(s, dict)), None)
+    stop = stopped_record(repo, h.run_sid(repo), batch)
     if stop is None:
         return False
-    entry = agent_entry(repo, h.sid, h.agent)
+    entry = agent_entry(repo, h.run_sid(repo), h.agent)
     born = (entry or {}).get('time') or transcript_head(h.inp.get('agent_transcript_path') or '')[1]
     return born is None or float(born) < float(stop.get('time', 0))
 
@@ -1180,7 +1245,7 @@ def subagent_stop(h):
     if stopping_allowed(repo, h, batch):
         return
     msg = h.inp.get('last_assistant_message') or ''
-    if spec and not released(repo, h.sid, batch):
+    if spec and not released(repo, h.run_sid(repo), batch):
         if any(line.startswith('SPEC READY ') for line in msg.splitlines()):
             return
         why = ("you're in the spec phase: finish the spec and end with `SPEC READY <worktree> <branch> <spec path> "
@@ -1313,7 +1378,7 @@ def gated_batch(h, repo):
     if not h.agent or not h.active(repo, 'spec_gate'):
         return None
     e = resolve_agent(repo, h)
-    if not e or not e.get('spec') or released(repo, h.sid, e.get('batch', '')):
+    if not e or not e.get('spec') or released(repo, h.run_sid(repo), e.get('batch', '')):
         return None
     return e['batch']
 
@@ -1483,7 +1548,7 @@ WAY_OUT = ' (to turn this check off: `hooks_disabled: [batch_state]` in the fore
 
 
 def batch_store(repo, h):
-    return batches.Store(repo.main, repo.dirs, h.sid)
+    return batches.Store(repo.main, repo.dirs, h.run_sid(repo))
 
 
 def squash(line):
@@ -1579,7 +1644,7 @@ def escaped(repo, store, name, tid):
 def effective(repo, h, b):
     """A batch's status at the checkpoint: a `passed` batch whose release hooks.py recorded counts as released."""
     st = b.get('status') or 'spec'
-    return 'released' if st == 'passed' and released(repo, h.sid, b['batch']) else st
+    return 'released' if st == 'passed' and released(repo, h.run_sid(repo), b['batch']) else st
 
 
 def checkpoint_gate(h):
@@ -1676,7 +1741,7 @@ def release_check(h, repo, batch, sha):
     store = batch_store(repo, h)
     b = store.read(batch + '.json')
     if b is None:
-        if spec_worker(repo, h.sid, batch):
+        if spec_worker(repo, h.run_sid(repo), batch):
             h.deny(f'record the batch with `python3 {HERE}/batches.py set {batch} …` first' + WAY_OUT)
         return
     if b.get('status') != 'passed' or not batches.same_sha(b.get('reviewed_sha'), sha):
@@ -1703,7 +1768,7 @@ def worker_of(repo, h, tid, names):
     for n in names:
         if tid == f'fw-{n}' or re.fullmatch(re.escape(f'fw-{n}-') + r'\d+', tid):
             return n
-    e = agent_entry(repo, h.sid, tid)
+    e = agent_entry(repo, h.run_sid(repo), tid)
     return e['batch'] if isinstance(e, dict) and e.get('batch') in names else None
 
 
@@ -1728,11 +1793,11 @@ def taskstop_guard(h, ti):
     live = [(n, t) for n, t in recorded if t.get('kind') == 'worker' and t.get('live')]
     if live:
         n, t = max(live, key=lambda x: float(x[1].get('added', 0)))
-        stop = stopped_record(repo, h.sid, n)
+        stop = stopped_record(repo, h.run_sid(repo), n)
         ok = stop is not None and float(stop.get('time', 0)) >= float(t.get('added', 0))
     else:
         n = worker_of(repo, h, tid, run)
-        ok = n is None or stopped_record(repo, h.sid, n) is not None
+        ok = n is None or stopped_record(repo, h.run_sid(repo), n) is not None
     if not ok:
         h.deny(f'run `python3 {HERE}/hooks.py stopping {n}` first, then TaskStop {tid}' + WAY_OUT)
 

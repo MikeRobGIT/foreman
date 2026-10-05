@@ -302,6 +302,18 @@ class SessionTest(Base):
         self.assertTrue(os.path.exists(self.file(self.b2, sid='nosession')))
         self.assertEqual(self.run_cli('show', '--session', '../S1').returncode, 2)
 
+    def test_an_alias_names_the_run_it_continues(self):
+        state.write_json(os.path.join(self.dirs[0], 'runs', 'S2.json'), {'alias': 'S1', 'touched': time.time() + 5})
+        p = self.run_cli('set', self.b1, 'status=spec', '--session', 'S2')
+        self.assertEqual(p.returncode, 0, p.stderr)
+        self.assertTrue(os.path.exists(self.file(self.b1)))
+        self.assertFalse(os.path.exists(self.file(self.b1, sid='S2')))
+        for env in (dict(self.env, FOREMAN_SESSION='S2'), self.env):   # the env, and the newest-marker fallback
+            p = self.run_cli('show', '--json', env=env)
+            self.assertEqual(([b['batch'] for b in json.loads(p.stdout)], p.stderr), ([self.b1], ''))
+        state.write_json(os.path.join(self.dirs[0], 'runs', 'S3.json'), {'alias': '../S1', 'touched': time.time()})
+        self.assertEqual(json.loads(self.run_cli('show', '--json', '--session', 'S3').stdout), [])
+
     def test_outside_a_foreman_repo(self):
         os.remove(os.path.join(self.work, '.claude/foreman.config.md'))
         p = self.run_cli('show', '--session', 'S1')

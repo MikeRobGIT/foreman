@@ -601,7 +601,7 @@ The plugin's settings hooks (`hooks/hooks.json`, served by `$FOREMAN/hooks.py`) 
 tool call. They fire in every session where the plugin is enabled, but only in a repo with a foreman config.
 Run-only pieces act only while this session's **run marker** exists: a prompt starting `/foreman` (not `ui` or
 `init`) writes it, `python3 $FOREMAN/hooks.py run-end` at every termination deletes it, and it expires after 48
-hours.
+hours. A session moved to the background, forked or resumed under a new id keeps its run through an alias.
 
 | id | when | what it does |
 |---|---|---|

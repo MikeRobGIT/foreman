@@ -2872,9 +2872,9 @@ class BatchStateCase(Case):
     def tool_result(self, text):
         self.entry('user', [{'type': 'tool_result', 'tool_use_id': 't1', 'content': text}])
 
-    def call(self, tool, tool_input, sid='S1', agent=None):
+    def call(self, tool, tool_input, sid='S1', agent=None, transcript=None):
         d = self.fx.payload(tool, tool_input, sid=sid, agent=agent)
-        d['transcript_path'] = self.main
+        d['transcript_path'] = transcript or self.main
         out, err = self.fx.hook('pretool', d)
         if out and 'updatedInput' in out['hookSpecificOutput']:   # no gate may rewrite the call: never a clean pass
             return 'updatedInput', err
@@ -3241,6 +3241,97 @@ class BatchStateReportTest(BatchStateCase):
         os.utime(self.owed_path('S0'), (time.time() - 49 * 3600,) * 2)
         self.fx.start_run(sid='S9')
         self.assertFalse(os.path.exists(self.owed_path('S0')))
+
+
+class ContinuationTest(BatchStateCase):
+    """L5: a session continued under a new id (moved to the background, forked, resumed) keeps its run through an
+    alias `runs/<new>.json` = {alias: <old>}, found from the `continued-in` record ending the old transcript."""
+
+    def setUp(self):
+        super().setUp()
+        self.proj = os.path.join(self.fx.tmp, 'proj')
+        self.new = os.path.join(self.proj, 'S2.jsonl')
+        write(os.path.join(self.proj, 'S1.jsonl'),
+              json.dumps({'type': 'user', 'timestamp': iso(self.t0), 'message': {'content': '/foreman'}}) + '\n')
+        write(self.new, '')
+
+    def continued(self, new='S2', old='S1'):
+        with open(os.path.join(self.proj, old + '.jsonl'), 'a') as f:
+            f.write(json.dumps({'type': 'continued-in', 'sessionId': old, 'continuedInSessionId': new}) + '\n')
+
+    def session_start(self, sid='S2', source='fork'):
+        env_file = os.path.join(self.fx.tmp, f'env-{sid}-{source}.sh')
+        p = subprocess.run([sys.executable, HOOKS, 'session-start'], input=json.dumps(
+            {'hook_event_name': 'SessionStart', 'session_id': sid, 'cwd': self.fx.work, 'source': source,
+             'transcript_path': os.path.join(self.proj, sid + '.jsonl')}),
+            capture_output=True, text=True, env=dict(self.fx.env, CLAUDE_ENV_FILE=env_file), cwd=self.fx.work)
+        self.assertEqual((p.returncode, p.stdout), (0, ''), p.stderr)
+        with open(env_file) as f:
+            return f.read()
+
+    def runs_file(self, sid):
+        return os.path.join(self.fx.state, 'runs', sid + '.json')
+
+    def worker_call(self, sid='S2'):
+        return self.bash(f'python3 {SCRIPTS}/batches.py show', sid=sid, agent='a1', transcript=self.new)
+
+    def test_a_fork_or_resume_adopts_the_run_and_exports_its_id(self):
+        self.continued()
+        for source in ('fork', 'resume'):
+            self.assertEqual(self.session_start(source=source), 'export FOREMAN_SESSION=S1\n', source)
+            alias = state.read_json(self.runs_file('S2'))
+            self.assertEqual(alias['alias'], 'S1')
+            self.assertLess(time.time() - alias['touched'], 60)
+            self.assertEqual(set(alias), {'alias', 'touched'})
+        self.assertEqual(self.fx.marker()['started'], self.t0)   # the run's own marker is untouched in shape
+
+    def test_the_continued_session_keeps_the_run_only_hooks(self):
+        self.continued()
+        self.session_start()
+        self.assertIn('only the orchestrator writes batch state', self.worker_call() or '')
+        self.passed(self.b1)
+        self.assertIn(f'table checkpoint {self.wave}', self.ask(sid='S2', transcript=self.new) or '')
+        before = self.fx.marker()['touched']
+        time.sleep(0.01)
+        self.assertIsNone(self.bash(f'python3 {SCRIPTS}/batches.py show', sid='S2', transcript=self.new))
+        self.assertGreater(self.fx.marker()['touched'], before)                     # the run's marker
+        self.assertGreater(state.read_json(self.runs_file('S2'))['touched'], before)   # and the alias
+
+    def test_batches_py_with_the_new_id_reads_the_runs_state(self):
+        self.continued()
+        self.session_start()
+        self.batches('set', self.b1, 'status=spec')
+        self.assertEqual([b['batch'] for b in json.loads(self.batches('show', '--json', sid='S2'))], [self.b1])
+        self.assertTrue(self.batches('table', 'report', sid='S2').startswith('foreman report S1 '))
+
+    def test_adoption_without_session_start(self):
+        self.continued()
+        self.assertIn('only the orchestrator writes batch state', self.worker_call() or '')
+        self.assertEqual(state.read_json(self.runs_file('S2'))['alias'], 'S1')
+
+    def test_an_unrelated_continuation_adopts_nothing(self):
+        self.continued(new='S3')
+        self.assertEqual(self.session_start(), 'export FOREMAN_SESSION=S2\n')
+        self.assertIsNone(self.worker_call())
+        self.assertFalse(os.path.exists(self.runs_file('S2')))
+
+    def test_no_live_marker_writes_nothing(self):
+        self.continued()
+        os.remove(self.runs_file('S1'))
+        self.assertEqual(self.session_start(), 'export FOREMAN_SESSION=S2\n')
+        self.assertIsNone(self.worker_call())
+        self.assertFalse(os.path.exists(self.runs_file('S2')))
+
+    def test_run_end_in_the_new_session_ends_the_run_and_owes_the_runs_report(self):
+        self.continued()
+        self.session_start()
+        self.batches('set', self.b1, 'status=spec')
+        run_end = f'python3 {HOOKS} run-end'
+        self.assertIsNone(self.bash(run_end, sid='S2', transcript=self.new))
+        owed = state.read_json(os.path.join(self.fx.state, 'runs', 'S2.owed'))
+        self.assertEqual(owed['text'], self.batches('table', 'report', sid='S2').rstrip('\n'))
+        self.fx.hook('posttool', self.fx.payload('Bash', {'command': run_end}, sid='S2', event='PostToolUse'))
+        self.assertEqual((os.path.exists(self.runs_file('S2')), os.path.exists(self.runs_file('S1'))), (False, False))
 
 
 class BatchStateReleaseTest(BatchStateCase):

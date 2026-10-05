@@ -708,6 +708,7 @@ check "L2: an answered question leaves Open questions for Review responses (labe
 check "L2: ...and the section reads None — <reason> (step 7)" grep -qF 'are left, the section reads `None — <reason>`.' "$sk"
 check "L2: the spec template says an answered question moves to Review responses" grep -qF 'a question that is answered moves to Review responses' "$root/templates/spec.md"
 check "L4: the report is checked at the end of the turn" grep -qF 'back once at the end of the turn and ask for it to be pasted.' "$sk"
+check "L5: SKILL.md says a continued session keeps its run" grep -qF 'forked or resumed under a new id keeps its run through an alias' "$sk"
 check "L4: run-end is never denied for the report" bash -c "! grep -qF 'report.denies' '$root/scripts/hooks.py'"
 check "L4: hooks.json runs the stop hook" grep -qF 'hooks.py", "stop"]' "$root/hooks/hooks.json"
 
@@ -723,6 +724,7 @@ EOF
 check "P2 (wrapper): README has the RTK recipe" grep -qF 'exec rtk hook claude <<<"$input"' "$rd"
 check "P2: README says the worker can't push" grep -qF "so the worker can't push. Run RTK" "$rd"
 check "L4: README says the end of the turn hands the report back" grep -qF 'and the end of the turn (a `Stop` hook) hands it back once' "$rd"
+check "L5: README says a continued session keeps its run" grep -qF 'through an alias file `runs/<new id>.json`' "$rd"
 check "README: TaskStop refusals as the guard has them" grep -qF 'TaskStop is refused with no id or with a batch name, and for a worker before `hooks.py stopping`' "$rd"
 echo "## backlog.py + ui.py"
 check "test_backlog.py" python3 "$root/tests/test_backlog.py"
