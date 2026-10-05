@@ -1,11 +1,13 @@
 // foreman wave status: while this session has a /foreman run marker, a band above the prompt shows one line per
-// worker worktree (<main>/.claude/worktrees/*): PR, state, head SHA, CI, bots, unresolved threads, merge state.
+// batch from scripts/batches.py (status, and for a batch with a PR its CI, bots, unresolved threads and merge state),
+// or, with no batch files, one line per worker worktree (<main>/.claude/worktrees/*). The harness prefixes the
+// plugin's status line, so neither the summary nor the error note carries a `foreman:` prefix.
 // Like every mod it runs in-process and unsandboxed; it only reads (git, gh, foreman's state dir) and draws.
 
 const EVERY_MS = 60_000
 const RUN_TTL_S = 48 * 3600
-let rows = null // the last good table; null draws nothing
-let note = '' // "foreman status unavailable: <reason>" after a failed refresh
+let view = null // the last good {kind, rows}; null draws nothing
+let note = '' // "status unavailable: <reason>" after a failed refresh
 
 const PASS = new Set(['SUCCESS', 'NEUTRAL', 'SKIPPED'])
 const FAIL = new Set(['FAILURE', 'CANCELLED', 'TIMED_OUT', 'ACTION_REQUIRED', 'STARTUP_FAILURE', 'ERROR'])
@@ -59,7 +61,44 @@ export function formatRows(list) {
 export function summary(list) {
   const prs = list.filter((r) => r.pr !== '—').length
   const green = list.filter((r) => r.ci === '✓' && r.merge === 'clean').length
-  return `foreman: ${list.length} worker${list.length === 1 ? '' : 's'} · ${prs} PR${prs === 1 ? '' : 's'} · ${green} green`
+  return `${list.length} worker${list.length === 1 ? '' : 's'} · ${prs} PR${prs === 1 ? '' : 's'} · ${green} green`
+}
+
+export function unavailable(err) {
+  return `status unavailable: ${err?.message || err}`
+}
+
+export function batchStatus(b) {
+  const done = (b.rounds || []).length
+  if (b.status === 'review') return `review r${done + 1}`
+  if (b.status === 'passed') return `passed r${done}`
+  if (b.status === 'pr') return `PR #${b.pr}`
+  return b.status || 'spec'
+}
+
+export function batchRow(b, pr, extra, required, bots) {
+  return { ...toRow({ name: b.batch, pr }, extra, required, bots), status: batchStatus(b), kind: b.status || 'spec' }
+}
+
+export function formatBatchRows(list) {
+  const wName = Math.max(0, ...list.map((r) => r.name.length))
+  const wStatus = Math.max(0, ...list.map((r) => r.status.length))
+  return list.map((r) => {
+    const cells = [r.name.padEnd(wName), r.status.padEnd(wStatus)]
+    if (r.kind === 'pr') cells.push(r.sha, `ci ${r.ci}`, `bots ${r.bots}`, `threads ${r.threads}`, r.merge)
+    return cells.join('  ').trimEnd()
+  })
+}
+
+export function batchSummary(list) {
+  const n = (kind) => list.filter((r) => r.kind === kind).length
+  const green = list.filter((r) => r.kind === 'pr' && r.ci === '✓' && r.merge === 'clean').length
+  const parts = [`${list.length} batch${list.length === 1 ? '' : 'es'}`]
+  for (const [count, label] of [[n('spec'), 'spec'], [n('review'), 'in review'], [n('passed'), 'passed'],
+    [n('released'), 'released'], [n('pr'), n('pr') === 1 ? 'PR' : 'PRs'], [n('parked'), 'parked'], [green, 'green']]) {
+    if (count) parts.push(`${count} ${label}`)
+  }
+  return parts.join(' · ')
 }
 
 // ---- data (mods API) ------------------------------------------------------------------------------------
@@ -105,6 +144,21 @@ export async function collect($) {
   if ((await cfgList($, main, 'hooks_disabled')).includes('status_pane')) return null
   const required = await cfgList($, main, 'required_ci')
   const bots = await cfgList($, main, 'review_bots')
+  let list = null
+  try {
+    list = JSON.parse(await sh($, ['python3', `${$.plugin.root}/scripts/batches.py`, 'show', '--json', '--session', sid], main))
+  } catch {
+    list = null // no batch state (or batches.py failed): the worktree scan below
+  }
+  if (Array.isArray(list) && list.length) {
+    const prs = {}
+    for (const b of list.filter((x) => x.pr)) {
+      prs[b.pr] = JSON.parse(await sh($, ['gh', 'pr', 'view', String(b.pr), '--json', 'number,state,headRefOid,mergeStateStatus,statusCheckRollup'], main))
+    }
+    const numbers = Object.keys(prs).map(Number)
+    const extra = numbers.length ? await threads($, main, numbers) : {}
+    return { kind: 'batches', rows: list.map((b) => batchRow(b, b.pr ? prs[b.pr] : null, b.pr ? extra[b.pr] : null, required, bots)) }
+  }
   const workers = []
   for (const w of wts.filter((x) => x.path.startsWith(`${main}/.claude/worktrees/`))) {
     const prs = w.branch
@@ -114,17 +168,25 @@ export async function collect($) {
   }
   const numbers = workers.filter((w) => w.pr).map((w) => w.pr.number)
   const extra = numbers.length ? await threads($, main, numbers) : {}
-  return workers.map((w) => toRow(w, w.pr ? extra[w.pr.number] : null, required, bots))
+  return { kind: 'workers', rows: workers.map((w) => toRow(w, w.pr ? extra[w.pr.number] : null, required, bots)) }
+}
+
+export function lines(v) {
+  return v.kind === 'batches' ? formatBatchRows(v.rows) : formatRows(v.rows)
+}
+
+export function statusText(v) {
+  return v.kind === 'batches' ? batchSummary(v.rows) : summary(v.rows)
 }
 
 async function refresh($) {
   try {
-    rows = await collect($)
+    view = await collect($)
     note = ''
   } catch (err) {
-    note = `foreman status unavailable: ${err?.message || err}`
+    note = unavailable(err)
   }
-  $.ui.status(note || (rows ? summary(rows) : undefined))
+  $.ui.status(note || (view ? statusText(view) : undefined))
   $.ui.invalidate('ui.render')
 }
 
@@ -138,12 +200,12 @@ export function register(on) {
   })
 
   on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
-    if (!rows || !rows.length) return next(e)
+    if (!view || !view.rows.length) return next(e)
     const { Box, Text } = $.ui.resolve(e)
-    const lines = formatRows(rows).concat(note ? [note] : [])
+    const shown = lines(view).concat(note ? [note] : [])
     return Box({
       flexDirection: 'column',
-      children: [...lines.map((line) => Text({ children: [line], wrap: 'truncate-end' })), await next(e)],
+      children: [...shown.map((line) => Text({ children: [line], wrap: 'truncate-end' })), await next(e)],
     })
   })
 }
