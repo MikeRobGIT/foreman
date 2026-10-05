@@ -1,0 +1,271 @@
+# tests/test_batches.py: scripts/batches.py in a temp repo with a temp FOREMAN_HOME and HOME (never ~/.claude/foreman)
+import json
+import os
+import shutil
+import subprocess
+import sys
+import tempfile
+import time
+import unittest
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+SCRIPTS = os.path.realpath(os.path.join(HERE, '..', 'scripts'))
+BATCHES = os.path.join(SCRIPTS, 'batches.py')
+HOOKS = os.path.join(SCRIPTS, 'hooks.py')
+sys.path.insert(0, SCRIPTS)
+import batches  # noqa: E402
+import state  # noqa: E402
+
+CONFIG = '---\ngate: echo gated\nreviewers:\n  - { use: codex, model: gpt-6.1-sol, effort: medium }\n  - { use: codex, model: gpt-5, effort: low }\n---\n'
+SHA1, SHA2 = 'a' * 40, 'b' * 40
+
+
+def write(path, text):
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, 'w', encoding='utf-8') as f:
+        f.write(text)
+
+
+def name_at(t, suffix):
+    return time.strftime('%Y%m%d-%H%M', time.localtime(t)) + '-' + suffix
+
+
+class Base(unittest.TestCase):
+    config = CONFIG
+
+    def setUp(self):
+        self.tmp = os.path.realpath(tempfile.mkdtemp(prefix='foreman-batches-'))
+        self.addCleanup(shutil.rmtree, self.tmp, True)
+        self.work = os.path.join(self.tmp, 'work')
+        os.makedirs(self.work)
+        subprocess.run(['git', 'init', '-q', '-b', 'main', self.work], check=True)
+        write(os.path.join(self.work, '.claude/foreman.config.md'), self.config)
+        self.home = os.path.join(self.tmp, 'home')
+        self.user = os.path.join(self.tmp, 'user')
+        os.makedirs(self.user)
+        self.env = dict(os.environ, HOME=self.user, FOREMAN_HOME=self.home)
+        for k in ('FOREMAN_SESSION', 'FOREMAN_CONFIG', 'CLAUDE_ENV_FILE'):
+            self.env.pop(k, None)
+        self.key = state.repo_key(self.work)
+        self.dirs = [os.path.join(self.home, self.key), os.path.join(self.user, '.claude', 'foreman', self.key)]
+        self.t0 = time.time() - 3600   # the run started an hour ago; batch names are dated after it
+        self.b1, self.b2 = name_at(self.t0 + 120, 'w1a'), name_at(self.t0 + 120, 'w1b')
+        self.marker('S1', started=self.t0)
+
+    def marker(self, sid, started, touched=None, d=0):
+        state.write_json(os.path.join(self.dirs[d], 'runs', sid + '.json'),
+                         {'started': started, 'touched': touched or time.time(), 'args': ''})
+
+    def run_cli(self, *args, env=None):
+        return subprocess.run([sys.executable, BATCHES, *args], capture_output=True, text=True, cwd=self.work,
+                              env=env or self.env)
+
+    def ok(self, *args, **kw):
+        p = self.run_cli(*args, '--session', 'S1', **kw)
+        self.assertEqual(p.returncode, 0, p.stderr)
+        return p.stdout
+
+    def refused(self, *args):
+        p = self.run_cli(*args, '--session', 'S1')
+        self.assertEqual(p.returncode, 1, (args, p.stdout))
+        return p.stderr
+
+    def show(self, b):
+        return json.loads(self.ok('show', b, '--json'))
+
+    def file(self, b, d=0, sid='S1'):
+        return os.path.join(self.dirs[d], 'batches', sid, 'state', b + '.json')
+
+    def store(self, sid='S1'):
+        return batches.Store(self.work, self.dirs, sid)
+
+    def put(self, name, sid='S1', **fields):
+        """Write a batch file straight into the first state dir (a fixture, not a CLI call)."""
+        b = dict(batches.new_batch(name), **fields)
+        state.write_json(os.path.join(self.dirs[0], 'batches', sid, 'state', name + '.json'), b)
+        return b
+
+
+class CommandTest(Base):
+    def test_set_note_bump_stamp_task_add_round_and_show(self):
+        self.ok('set', self.b1, 'status=spec', 'rows=IB-1,IB-2', 'owned=app.py,lib/x.py')
+        notes = os.path.join(self.tmp, 'minors.txt')
+        write(notes, 'first finding\n\n  \nsecond finding\n')
+        self.ok('note', self.b1, 'minors', notes)
+        self.ok('bump', self.b1, 'bounces')
+        self.ok('bump', self.b1, 'bounces')
+        self.ok('stamp', self.b1, 'sent')
+        self.ok('task', self.b1, 'add', 'worker', 'fw-' + self.b1)
+        self.ok('task', self.b1, 'add', 'reviewer', 'agent-7f3')
+        self.ok('task', self.b1, 'verdict', 'agent-7f3')
+        self.ok('task', self.b1, 'done', 'agent-7f3')
+        self.ok('add-round', self.b1, 'r=1', 'sha=' + SHA1, 'entry=2', 'fallthrough=codex:quota', 'explore=revise',
+                'crit=0', 'imp=2', 'minor=1')
+        b = self.show(self.b1)
+        self.assertEqual((b['status'], b['rows'], b['owned']), ('spec', 'IB-1,IB-2', 'app.py,lib/x.py'))
+        self.assertEqual((b['minors'], b['bounces'], b['pr_rounds']), (['first finding', 'second finding'], 2, 0))
+        self.assertEqual([k for k, _ in b['stamps']], ['sent'])
+        self.assertEqual([(t['kind'], t['id'], t['verdict'], t['live']) for t in b['tasks']],
+                         [('worker', 'fw-' + self.b1, False, True), ('reviewer', 'agent-7f3', True, False)])
+        self.assertEqual(b['rounds'], [{'r': 1, 'sha': SHA1, 'entry': 2, 'fallthrough': ['codex:quota'],
+                                        'explore': 'revise', 'crit': 0, 'imp': 2, 'minor': 1}])
+        self.assertGreaterEqual(b['remaining'], 60 * 60 - 5)
+        listing = self.ok('show')
+        self.assertIn(self.b1, listing)
+        self.assertIn('worker:fw-' + self.b1, listing)
+
+    def test_refusals(self):
+        self.assertIn('unknown key: colour', self.refused('set', self.b1, 'colour=red'))
+        self.assertIn('bad value for status: done', self.refused('set', self.b1, 'status=done'))
+        self.assertIn('bad value for sha: xyz', self.refused('set', self.b1, 'sha=xyz'))
+        self.assertIn('bad value for reason: tired', self.refused('set', self.b1, 'status=parked', 'reason=tired'))
+        self.assertIn('status=parked needs reason', self.refused('set', self.b1, 'status=parked'))
+        self.assertIn('status=passed needs reviewed_sha', self.refused('set', self.b1, 'status=passed'))
+        self.assertIn('reason=<reason> goes with status=parked', self.refused('set', self.b1, 'reason=no-pass'))
+        self.ok('set', self.b1, 'status=passed', 'reviewed_sha=' + SHA1)
+        self.assertIn('released_sha equal to reviewed_sha', self.refused('set', self.b1, 'status=released',
+                                                                         'released_sha=' + SHA2))
+        self.assertIn('bad value for fallthrough', self.refused('add-round', self.b1, 'r=1', 'sha=' + SHA1, 'entry=1',
+                                                                'fallthrough=codex:tired', 'explore=pass', 'crit=0',
+                                                                'imp=0', 'minor=0'))
+        self.assertIn('add-round needs explore=', self.refused('add-round', self.b1, 'r=1', 'sha=' + SHA1, 'entry=1',
+                                                               'crit=0', 'imp=0', 'minor=0'))
+        self.assertIn('no task nope', self.refused('task', self.b1, 'done', 'nope'))
+        self.assertEqual(self.show(self.b1)['status'], 'passed')   # every refusal left the file as it was
+        for args in (('bump', self.b1, 'rounds'), ('stamp', self.b1, 'later'), ('task', self.b1, 'add', 'ghost', 'x'),
+                     ('nope',), ('set',), ('set', 'bad name'), ('show', '--session')):
+            self.assertEqual(self.run_cli(*args).returncode, 2, args)
+
+    def test_a_release_set_needs_the_reviewed_sha(self):
+        self.ok('set', self.b1, 'status=passed', 'reviewed_sha=' + SHA1)
+        self.ok('set', self.b1, 'status=released', 'released_sha=' + SHA1[:12])   # an abbreviation of the same SHA
+        self.assertEqual([k for k, _ in self.show(self.b1)['stamps']], ['passed', 'ended'])
+
+    def test_comment_sent_moves_a_passed_batch_back_to_review(self):
+        self.ok('set', self.b1, 'status=passed', 'reviewed_sha=' + SHA1)
+        self.ok('stamp', self.b1, 'comment_sent')
+        b = self.show(self.b1)
+        self.assertEqual((b['status'], 'reviewed_sha' in b), ('review', False))
+        self.assertIn('released_sha equal to reviewed_sha (unset)',
+                      self.refused('set', self.b1, 'status=released', 'released_sha=' + SHA1))
+
+    def test_a_corrupt_file_is_refused_and_left_untouched(self):
+        write(self.file(self.b1), '{not json')
+        self.assertIn('corrupt batch state: ' + self.file(self.b1), self.refused('set', self.b1, 'status=spec'))
+        with open(self.file(self.b1)) as f:
+            self.assertEqual(f.read(), '{not json')
+
+    def test_no_temp_file_is_left_behind(self):
+        self.ok('set', self.b1, 'status=spec')
+        self.refused('set', self.b1, 'status=passed')
+        for d in (0, 1):
+            left = os.listdir(os.path.dirname(self.file(self.b1, d)))
+            self.assertEqual(sorted(left), sorted([self.b1 + '.json'] + (['.lock'] if d == 0 else [])))
+
+    def test_concurrent_calls_all_land(self):
+        procs = [subprocess.Popen([sys.executable, BATCHES, 'bump', self.b1, 'pr_rounds', '--session', 'S1'],
+                                  cwd=self.work, env=self.env) for _ in range(12)]
+        procs += [subprocess.Popen([sys.executable, BATCHES, 'set', self.b1, kv, '--session', 'S1'], cwd=self.work,
+                                   env=self.env) for kv in ('rows=IB-1', 'owned=app.py')]
+        self.assertEqual([p.wait() for p in procs], [0] * 14)
+        b = self.show(self.b1)
+        self.assertEqual((b['pr_rounds'], b['rows'], b['owned']), (12, 'IB-1', 'app.py'))
+
+    def test_a_worktree_cwd_writes_the_main_checkouts_state(self):
+        subprocess.run(['git', '-c', 'user.name=t', '-c', 'user.email=t@e', 'commit', '-q', '--allow-empty', '-m', 'i'],
+                       cwd=self.work, check=True)
+        wt = os.path.join(self.tmp, 'wt')
+        subprocess.run(['git', 'worktree', 'add', '-q', wt, '-b', 'w1'], cwd=self.work, check=True)
+        p = subprocess.run([sys.executable, BATCHES, 'set', self.b1, 'status=spec', '--session', 'S1'],
+                           capture_output=True, text=True, cwd=wt, env=self.env)
+        self.assertEqual(p.returncode, 0, p.stderr)
+        self.assertEqual(state.read_json(self.file(self.b1))['status'], 'spec')
+
+    def test_writes_reach_every_state_dir(self):
+        self.ok('set', self.b1, 'status=spec')
+        for d in (0, 1):
+            self.assertEqual(state.read_json(self.file(self.b1, d))['status'], 'spec')
+
+    def test_readers_take_the_newest_copy(self):
+        self.ok('set', self.b1, 'status=spec')
+        newer = dict(state.read_json(self.file(self.b1, 1)), status='review')
+        state.write_json(self.file(self.b1, 1), newer)
+        os.utime(self.file(self.b1, 0), (time.time() - 60, time.time() - 60))
+        self.assertEqual(self.show(self.b1)['status'], 'review')
+        self.ok('bump', self.b1, 'bounces')   # a write starts from the newest copy and brings both dirs level
+        self.assertEqual(state.read_json(self.file(self.b1, 0))['status'], 'review')
+
+    def test_a_partial_write_exits_0_with_a_note_and_a_retry_is_not_needed(self):
+        self.ok('set', self.b1, 'status=spec')
+        os.remove(self.file(self.b1, 1))
+        os.makedirs(self.file(self.b1, 1))   # the second dir's target can't be replaced
+        p = self.run_cli('stamp', self.b1, 'sent', '--session', 'S1')
+        self.assertEqual(p.returncode, 0, p.stderr)
+        self.assertIn(f'{self.b1}.json not written in {os.path.dirname(self.file(self.b1, 1))}', p.stderr)
+        self.assertEqual([k for k, _ in self.show(self.b1)['stamps']], ['sent'])
+        self.assertEqual([f for f in os.listdir(os.path.dirname(self.file(self.b1, 1))) if f.endswith('.tmp')], [])
+
+    def test_hooks_forget_leaves_the_state_file(self):
+        self.ok('set', self.b1, 'status=parked', 'reason=no-pass')
+        self.marker('S1', started=self.t0, d=1)   # hooks.py sees the default home only when FOREMAN_HOME is unset
+        env = dict(self.env)
+        env.pop('FOREMAN_HOME')
+        payload = {'hook_event_name': 'PreToolUse', 'session_id': 'S1', 'cwd': self.work, 'tool_name': 'Bash',
+                   'tool_input': {'command': f'python3 {HOOKS} forget {self.b1}'}}
+        p = subprocess.run([sys.executable, HOOKS, 'pretool'], input=json.dumps(payload), capture_output=True,
+                           text=True, env=env, cwd=self.work)
+        self.assertEqual((p.returncode, p.stdout), (0, ''), p.stderr)
+        self.assertTrue(os.path.exists(self.file(self.b1, 1)))
+        self.assertIn(self.b1, self.ok('show'))
+
+
+class SessionTest(Base):
+    def test_session_flag_env_newest_marker_and_nosession(self):
+        self.ok('set', self.b1, 'status=spec')
+        self.assertEqual(json.loads(self.run_cli('show', '--json', env=self.env).stdout)[0]['batch'], self.b1)
+        env = dict(self.env, FOREMAN_SESSION='S9')
+        self.assertEqual(self.run_cli('set', self.b2, 'status=spec', env=env).returncode, 0)
+        self.assertTrue(os.path.exists(self.file(self.b2, sid='S9')))
+        self.marker('S2', started=self.t0, touched=time.time() + 5)
+        p = self.run_cli('set', self.b2, 'status=review')
+        self.assertEqual(p.returncode, 0, p.stderr)
+        self.assertIn('2 live runs; using session S2', p.stderr)
+        self.assertTrue(os.path.exists(self.file(self.b2, sid='S2')))
+        for sid in ('S1', 'S2'):
+            os.remove(os.path.join(self.dirs[0], 'runs', sid + '.json'))
+        p = self.run_cli('set', self.b2, 'status=spec')
+        self.assertEqual((p.returncode, p.stderr), (0, ''))
+        self.assertTrue(os.path.exists(self.file(self.b2, sid='nosession')))
+        self.assertEqual(self.run_cli('show', '--session', '../S1').returncode, 2)
+
+    def test_outside_a_foreman_repo(self):
+        os.remove(os.path.join(self.work, '.claude/foreman.config.md'))
+        p = self.run_cli('show', '--session', 'S1')
+        self.assertEqual(p.returncode, 1)
+        self.assertIn('no state dir', p.stderr)
+
+
+class WorkerTimeTest(unittest.TestCase):
+    def test_comment_rounds_and_stops_are_left_out(self):
+        b = {'stamps': [['sent', 100], ['spec_ready', 400], ['sent', 1000], ['stopped', 1100], ['sent', 2000],
+                        ['spec_ready', 2050], ['passed', 2050], ['comment_sent', 3000], ['spec_ready', 9000],
+                        ['sent', 10000]]}
+        self.assertEqual(batches.worker_time(b, now=10030), 300 + 100 + 50 + 30)
+        b['stamps'].append(['ended', 10060])   # parking ends the open interval
+        self.assertEqual(batches.worker_time(b, now=99999), 300 + 100 + 50 + 60)
+
+
+class ScopeTest(Base):
+    def test_run_scope(self):
+        old = name_at(self.t0 - 7200, 'w1a')    # a batch of an earlier run in this session (/loop)
+        self.put(old, status='released')
+        self.put(self.b1, status='spec')
+        self.assertEqual([b['batch'] for b in self.store().batches()], [self.b1])
+        self.assertNotIn(old, self.ok('show'))
+        self.assertIn(self.b1, self.ok('show'))
+        os.remove(os.path.join(self.dirs[0], 'runs', 'S1.json'))   # no live marker: the whole session
+        self.assertEqual([b['batch'] for b in self.store().batches()], [old, self.b1])
+
+
+if __name__ == '__main__':
+    unittest.main()
