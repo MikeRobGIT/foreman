@@ -29,6 +29,9 @@
     "SubagentStop": [
       { "hooks": [{ "type": "command", "command": "python3", "args": ["${CLAUDE_PLUGIN_ROOT}/scripts/hooks.py", "subagent-stop"], "timeout": 30 }] }
     ],
+    "Stop": [
+      { "hooks": [{ "type": "command", "command": "python3", "args": ["${CLAUDE_PLUGIN_ROOT}/scripts/hooks.py", "stop"], "timeout": 10 }] }
+    ],
     "PermissionRequest": [
       { "matcher": "Bash", "hooks": [{ "type": "command", "command": "python3", "args": ["${CLAUDE_PLUGIN_ROOT}/scripts/hooks.py", "permission"], "timeout": 10 }] }
     ]

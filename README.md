@@ -51,7 +51,8 @@ In `parallel N`, every batch starts with a spec, not code:
   stopped. Its spec is committed with a `Status: parked` line, and its rows get a note.
 - **The tables.** Batch state lives on disk (`scripts/batches.py`), not in the orchestrator's context. The
   checkpoint table and the run report's spec-phase table are printed from it, and with the hooks enabled the
-  checkpoint question and `run-end` wait until the table is in the orchestrator's text.
+  checkpoint question waits until the table is in the orchestrator's text, and a run report missing from the final
+  message is handed back once at the end of the turn.
 
 With the hooks enabled (0.4.0), a worker can't edit or commit code before its spec is released. The spec stays
 frozen after release; any change goes in a `## Deviations after release` section, which a reviewer rules on
@@ -97,7 +98,7 @@ and it expires after 48 hours.
 | `report_check` | tagged workers | a tagged worker's final report must end with a valid `json` block that `bk.py --dry-run` accepts; it is sent back once |
 | `script_allow` | run | `gate-lock.sh`, `wt-setup.sh`, `review.sh`, `bk.py`, `hooks.py` and `batches.py` (main session only) run without a permission prompt, in strict shapes only |
 | `spec_gate` | run, `spec-phase` workers | edits and commits stay in `design_spec_dir`, and nothing is pushed, until the orchestrator runs `hooks.py release <batch> <sha>` |
-| `batch_state` | run, orchestrator | a worker's `batches.py` call is denied; at the spec checkpoint every question is denied until the current `batches.py table checkpoint` is in the orchestrator's text, pasted in a message of its own (a table not yet in the transcript is denied too; the hook never edits the question), and `run-end` for `batches.py table report` (the third try against one unchanged table goes through); TaskStop is refused with no id or with a batch name, and for a worker before `hooks.py stopping` (an id it doesn't know passes); `hooks.py release` needs a passed batch at its reviewed SHA and, in a manual run, the checkpoint table pasted after the pass |
+| `batch_state` | run, orchestrator | a worker's `batches.py` call is denied; at the spec checkpoint every question is denied until the current `batches.py table checkpoint` is in the orchestrator's text, pasted in a message of its own (a table not yet in the transcript is denied too; the hook never edits the question; the third try against one unchanged table goes through); a `run-end` before `batches.py table report` is in the orchestrator's text leaves the report owed, and the end of the turn (a `Stop` hook) hands it back once, then lets the session stop; TaskStop is refused with no id or with a batch name, and for a worker before `hooks.py stopping` (an id it doesn't know passes); `hooks.py release` needs a passed batch at its reviewed SHA and, in a manual run, the checkpoint table pasted after the pass |
 | `status_pane` | run | a band above the prompt: one line per batch (its status with the round or PR, and for a PR its CI, bots, unresolved threads and merge state); without batch files, one line per worker worktree |
 
 Turn pieces off per repo with `hooks_disabled: [<id>, …]` in the config. Your own `! <command>` is never checked:

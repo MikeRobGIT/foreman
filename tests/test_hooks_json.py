@@ -20,6 +20,7 @@ WANT = {
     ('PostToolUse', 'Bash'): 'posttool',
     ('SubagentStart', None): 'subagent-start',
     ('SubagentStop', None): 'subagent-stop',
+    ('Stop', None): 'stop',
     ('PermissionRequest', 'Bash'): 'permission',
 }
 

@@ -3139,44 +3139,108 @@ class TranscriptTailTest(InProcess):
 
 
 class BatchStateReportTest(BatchStateCase):
-    """Duty 3: the report gate on run-end."""
+    """Duty 3: run-end with an unpasted report owes it; the Stop hook asks for it once at the end of the turn."""
+    FORMS = (f'python3 {HOOKS} run-end', f'python3 {HOOKS} run-end 2>&1', f'cd {SCRIPTS} && python3 ./hooks.py run-end')
 
-    def test_run_end_needs_the_report_in_the_assistants_text(self):
+    def owed_path(self, sid='S1'):
+        return os.path.join(self.fx.state, 'runs', sid + '.owed')
+
+    def owed(self, sid='S1'):
+        return state.read_json(self.owed_path(sid))
+
+    def turn_end(self, message=None, sid='S1'):
+        d = {'hook_event_name': 'Stop', 'session_id': sid, 'cwd': self.fx.work, 'transcript_path': self.main,
+             'stop_hook_active': False}
+        if message is not None:
+            d['last_assistant_message'] = message
+        return self.fx.hook('stop', d)
+
+    def test_run_end_owes_an_unpasted_report_and_is_allowed(self):
         self.batches('set', self.b1, 'status=parked', 'reason=timed-out')
-        forms = (f'python3 {HOOKS} run-end', f'python3 {HOOKS} run-end 2>&1', f'cd {SCRIPTS} && python3 ./hooks.py run-end')
-        denies = os.path.join(self.fx.state, 'batches', 'S1', 'state', 'report.denies')
-        for command in forms:
-            why = self.bash(command)
-            self.assertIn(f'run `python3 {SCRIPTS}/batches.py table report`', why or '', command)
-            self.assertIn('hooks_disabled: [batch_state]', why)
-            os.remove(denies)   # each form gets its own two denies before the escape
-        self.assertIsNotNone(self.fx.marker())
-        report = self.batches('table', 'report')
-        self.assertIn('parked: spec phase timed out', report)
-        self.say(report)
-        self.say('Run complete.')                                       # an earlier message's paste counts too
-        for command in forms:
+        for command in self.FORMS:
             self.assertIsNone(self.bash(command), command)
+            owed = self.owed()
+            self.assertEqual(set(owed), {'id', 'text', 'blocked'}, command)
+            self.assertEqual(owed['blocked'], 0)
+            os.remove(self.owed_path())
+        report = self.batches('table', 'report').rstrip('\n')
+        self.tool_result(report)                     # a tool result isn't the assistant's text
+        self.assertIsNone(self.bash(self.FORMS[0]))
+        self.assertEqual(self.owed()['text'], report)
+        self.assertIn('parked: spec phase timed out', report)
+        self.assertEqual(self.owed()['id'], report.split('\n', 1)[0].split()[-1])
+        self.assertFalse(os.path.exists(os.path.join(self.fx.state, 'batches', 'S1', 'state', 'report.denies')))
 
-    def test_a_report_shown_but_not_yet_in_the_text_says_to_paste_it_in_a_message_of_its_own(self):
+    def test_posttool_still_ends_the_run(self):
         self.batches('set', self.b1, 'status=spec')
-        self.tool_result(self.batches('table', 'report'))
-        why = self.bash(f'python3 {HOOKS} run-end') or ''
-        self.assertIn(f'paste the output of `python3 {SCRIPTS}/batches.py table report` as text in a message of its '
-                      'own, make one more call, then run `run-end` again; the hooks see your text only once the next '
-                      'call starts', why)
+        self.assertIsNone(self.bash(self.FORMS[0]))
+        self.fx.hook('posttool', self.fx.payload('Bash', {'command': self.FORMS[0]}, event='PostToolUse'))
+        self.assertIsNone(self.fx.marker())
+        self.assertIsNotNone(self.owed())
 
-    def test_run_end_with_no_batch_files_passes(self):
+    def test_the_turn_end_accepts_the_report_in_the_last_message(self):
+        self.batches('set', self.b1, 'status=spec')
+        self.assertIsNone(self.bash(self.FORMS[0]))
+        report = self.owed()['text']
+        padded = '\n'.join(re.sub(r'\|', ' |  ', line) for line in report.splitlines())
+        out, err = self.turn_end('Run complete.\n\n' + padded + '\n')
+        self.assertEqual((out, err), (None, ''))
+        self.assertFalse(os.path.exists(self.owed_path()))
+
+    def test_the_turn_end_hands_the_report_back_once(self):
+        self.batches('set', self.b1, 'status=spec')
+        self.assertIsNone(self.bash(self.FORMS[0]))
+        report = self.owed()['text']
+        out, _ = self.turn_end('Run complete.')
+        self.assertEqual(out['decision'], 'block')
+        self.assertTrue(out['reason'].startswith('foreman: end the run report with the spec-phase table, pasted '
+                                                 'verbatim as text as the last thing in your reply:\n\n'))
+        self.assertIn(report, out['reason'])
+        self.assertEqual(self.owed()['blocked'], 1)
+        out, err = self.turn_end(None)            # a turn with no text
+        self.assertIsNone(out)
+        self.assertIn('foreman: the run report was not pasted; ending anyway', err)
+        self.assertFalse(os.path.exists(self.owed_path()))
+
+    def test_a_turn_end_with_nothing_owed_says_nothing(self):
+        self.assertEqual(self.turn_end('hello'), (None, ''))
+        self.assertEqual(self.turn_end(None, sid='S9'), (None, ''))
+
+    def test_a_report_pasted_earlier_owes_nothing(self):
+        self.batches('set', self.b1, 'status=parked', 'reason=timed-out')
+        self.say(self.batches('table', 'report'))
+        self.say('Run complete.')
+        for command in self.FORMS:
+            self.assertIsNone(self.bash(command), command)
+        self.assertFalse(os.path.exists(self.owed_path()))
+
+    def test_run_end_with_no_batch_files_owes_nothing(self):
         self.run_marker(sid='S2')
-        self.assertIsNone(self.bash(f'python3 {HOOKS} run-end', sid='S2'))
+        self.assertIsNone(self.bash(self.FORMS[0], sid='S2'))
+        self.assertFalse(os.path.exists(self.owed_path('S2')))
 
-    def test_the_third_run_end_against_one_report_passes(self):
+    def test_disabled_owes_nothing_and_drops_a_debt(self):
         self.batches('set', self.b1, 'status=spec')
-        self.assertIsNotNone(self.bash(f'python3 {HOOKS} run-end'))
-        self.assertIsNotNone(self.bash(f'python3 {HOOKS} run-end'))
-        why, err = self.call('Bash', {'command': f'python3 {HOOKS} run-end'})
-        self.assertIsNone(why)
-        self.assertIn('after 2 denies', err)
+        self.assertIsNone(self.bash(self.FORMS[0]))
+        write(os.path.join(self.fx.work, '.claude/foreman.config.md'),
+              CONFIG.replace('---\n', '---\nhooks_disabled: [batch_state]\n', 1))
+        self.assertEqual(self.turn_end('Run complete.'), (None, ''))
+        self.assertFalse(os.path.exists(self.owed_path()))
+        self.assertIsNone(self.bash(self.FORMS[0]))
+        self.assertFalse(os.path.exists(self.owed_path()))
+
+    def test_a_corrupt_debt_fails_open(self):
+        write(self.owed_path(), '{not json')
+        out, err = self.turn_end('Run complete.')
+        self.assertIsNone(out)
+        self.assertIn('foreman', err)
+        self.assertFalse(os.path.exists(self.owed_path()))
+
+    def test_prune_ages_out_an_old_debt(self):
+        write(self.owed_path('S0'), '{"id": "x", "text": "x", "blocked": 0}')
+        os.utime(self.owed_path('S0'), (time.time() - 49 * 3600,) * 2)
+        self.fx.start_run(sid='S9')
+        self.assertFalse(os.path.exists(self.owed_path('S0')))
 
 
 class BatchStateReleaseTest(BatchStateCase):

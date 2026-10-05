@@ -694,7 +694,7 @@ run `python3 $FOREMAN/batches.py table report` and paste its whole output
 | `batch_state` | run, orchestrator |
 EOF
 check "parking runs in seven steps, in order" bash -c "awk -v a='1. Kill the round' -v b='2. \`python3 \$FOREMAN/hooks.py stopping' -v c='3. TaskStop every live task' -v d='4. Copy the specs to' -v e='5. Name the branch' -v f='6. \`git worktree remove --force' -v g='7. Write the park note' 'index(\$0,a)&&!A{A=NR} index(\$0,b)&&!B{B=NR} index(\$0,c)&&!C{C=NR} index(\$0,d)&&!D{D=NR} index(\$0,e)&&!E{E=NR} index(\$0,f)&&!F{F=NR} index(\$0,g)&&!G{G=NR} END{exit !(A&&A<B&&B<C&&C<D&&D<E&&E<F&&F<G)}' '$sk'"
-check "W6 pastes the report before run-end" appears_before "$sk" 'run `python3 $FOREMAN/batches.py table report`' 'the hooks refuse it until the current report table'
+check "W6 pastes the report before run-end" appears_before "$sk" 'run `python3 $FOREMAN/batches.py table report`' 'per PR after review. Then `run-end`.'
 check "W3.6 pastes the checkpoint before asking" appears_before "$sk" 'Run `python3 $FOREMAN/batches.py table checkpoint <wave>`' 'A question that covers one batch is single-select'
 check "SKILL.md no longer reads a state table" bash -c "! grep -qF 'state table' '$sk'"
 check "W4.2b environment retry reads verdicts from show --json" grep -qF 'that has a `verdict` mark (`python3 $FOREMAN/batches.py show --json`)' "$sk"
@@ -707,7 +707,9 @@ check "L1: the hook never rewrites an AskUserQuestion call" bash -c "! grep -q '
 check "L2: an answered question leaves Open questions for Review responses (label line)" grep -qF 'leaves `## Open questions` and is recorded under **Review responses**; if' "$sk"
 check "L2: ...and the section reads None — <reason> (step 7)" grep -qF 'are left, the section reads `None — <reason>`.' "$sk"
 check "L2: the spec template says an answered question moves to Review responses" grep -qF 'a question that is answered moves to Review responses' "$root/templates/spec.md"
-check "P3 (next-message): one more call before run-end" grep -qF 'then one more call (`python3 $FOREMAN/batches.py show`), then `run-end`' "$sk"
+check "L4: the report is checked at the end of the turn" grep -qF 'back once at the end of the turn and ask for it to be pasted.' "$sk"
+check "L4: run-end is never denied for the report" bash -c "! grep -qF 'report.denies' '$root/scripts/hooks.py'"
+check "L4: hooks.json runs the stop hook" grep -qF 'hooks.py", "stop"]' "$root/hooks/hooks.json"
 
 echo "## README 0.5.1"
 rd=$root/README.md
@@ -720,6 +722,7 @@ while IFS= read -r s; do check "README has: $s" grep -qF -- "$s" "$rd"; done <<'
 EOF
 check "P2 (wrapper): README has the RTK recipe" grep -qF 'exec rtk hook claude <<<"$input"' "$rd"
 check "P2: README says the worker can't push" grep -qF "so the worker can't push. Run RTK" "$rd"
+check "L4: README says the end of the turn hands the report back" grep -qF 'and the end of the turn (a `Stop` hook) hands it back once' "$rd"
 check "README: TaskStop refusals as the guard has them" grep -qF 'TaskStop is refused with no id or with a batch name, and for a worker before `hooks.py stopping`' "$rd"
 echo "## backlog.py + ui.py"
 check "test_backlog.py" python3 "$root/tests/test_backlog.py"

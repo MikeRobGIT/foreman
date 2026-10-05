@@ -496,12 +496,12 @@ W1-W6 to keep them apart from steps 0-12; W6's stop conditions replace the auton
   waves' pools (W2's parked-row rule covers later invocations). When the run stops, run
   `python3 $FOREMAN/hooks.py run-end` last, and only after every worker has reported or been stopped (`stopping`,
   then TaskStop): ending the run while a background worker still runs turns off the run-only hooks that guard it.
-  - **Run report.** At the stop, run `python3 $FOREMAN/batches.py table report` and paste its whole output in
-    the report as the spec-phase table: one row per batch with the spec wall-clock, the rounds, the reviewer that
+  - **Run report.** At the stop, run `python3 $FOREMAN/batches.py table report` and paste its whole output as text
+    in the final report as the spec-phase table: one row per batch with the spec wall-clock, the rounds, the reviewer that
     landed (or the fall-through, or "no cross-model review"), the degraded flag, the reviewer model, the status
     and park reason, and the review rounds after the PR opened. The last column is the measure: follow-up rounds
-    per PR after review. Paste it in a message of its own, then one more call (`python3 $FOREMAN/batches.py show`), then `run-end`:
-    the hooks refuse it until the current report table is in your text.
+    per PR after review. Then `run-end`. If the report table is missing from your final message, the hooks hand it
+    back once at the end of the turn and ask for it to be pasted.
 
 ### Worker contract
 
@@ -613,7 +613,7 @@ hours.
 | `worker_briefing`, `report_check` | tagged workers | a subagent whose prompt starts `foreman-worker: <batch>` is briefed with the Worker contract, and its final report's `json` block is checked once |
 | `script_allow` | run | foreman's own scripts run without a permission prompt, in strict shapes only |
 | `spec_gate` | run, `spec-phase` workers | edits and commits stay in `design_spec_dir` until `hooks.py release <batch> <sha>` |
-| `batch_state` | run, orchestrator | a worker's `batches.py` call is denied; at the checkpoint every question is denied until the current `batches.py table checkpoint` is in your text, in a message of its own; `run-end` needs `batches.py table report` in your text; TaskStop needs a recorded id, never a batch name, and a worker only after `stopping`; `hooks.py release` needs a passed batch at its reviewed SHA and, in a manual run, the checkpoint table pasted after the pass |
+| `batch_state` | run, orchestrator | a worker's `batches.py` call is denied; at the checkpoint every question is denied until the current `batches.py table checkpoint` is in your text, in a message of its own; a `run-end` before `batches.py table report` is in your text leaves the report owed, and the end of the turn hands it back once; TaskStop needs a recorded id, never a batch name, and a worker only after `stopping`; `hooks.py release` needs a passed batch at its reviewed SHA and, in a manual run, the checkpoint table pasted after the pass |
 | `status_pane` | run | the wave status band above the prompt: one line per batch from the batch files |
 
 Orchestrator-only CLIs (a worker's call is denied): `python3 $FOREMAN/hooks.py release <batch> <sha>` (exit 3 means

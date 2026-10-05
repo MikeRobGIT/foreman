@@ -2,7 +2,7 @@
 """foreman's settings hooks: one dispatcher, run by hooks/hooks.json as `python3 hooks.py <event>`.
 
 Hook mode, JSON on stdin: run-start, session-start, session-end, pretool, posttool, subagent-start, subagent-stop,
-permission.
+permission, stop.
 (SessionEnd runs `session-end`, not `run-end`: the CLI verb never reads stdin, which a Bash call may hold open.)
 
 CLI mode, run from the orchestrator's Bash tool. `pretool` records the effect from its own hook input, so the
@@ -200,11 +200,14 @@ def touch_marker(repo, sid):
 
 
 def prune(sd):
-    """Drop markers untouched for 48 hours and batch files older than 14 days."""
+    """Drop markers untouched for 48 hours, owed reports older than that, and batch files older than 14 days."""
     now = time.time()
     for p in ls(sd, 'runs/*.json'):
         m = state.read_json(p)
         if not isinstance(m, dict) or now - float(m.get('touched', 0)) >= RUN_TTL:
+            rm(p)
+    for p in ls(sd, 'runs/*.owed'):
+        if now - os.path.getmtime(p) >= RUN_TTL:
             rm(p)
     for p in ls(sd, 'batches/*/*') + ls(sd, 'batches/*/agents/*') + ls(sd, 'batches/*/state/*'):
         if os.path.isfile(p) and now - os.path.getmtime(p) >= BATCH_TTL:
@@ -1528,11 +1531,15 @@ def assistant_lines(path, since):
     return out
 
 
+def holds(have, text):
+    """True when every non-blank line of `text`, whitespace removed, is in the set `have`."""
+    return all(squash(line) in have for line in text.splitlines() if squash(line))
+
+
 def pasted(text, path, at):
     """True when every line of `text` is a line of the assistant's own text written since `at`, whitespace ignored.
     A tool result doesn't count: the human sees only the assistant's text."""
-    have = assistant_lines(path, at)
-    return all(squash(line) in have for line in text.splitlines() if squash(line))
+    return holds(assistant_lines(path, at), text)
 
 
 def table_problem(h, store, name, text, cmd, where, again=None):
@@ -1608,8 +1615,15 @@ def batch_call(h, sc, command):
             h.touch.add(repo)   # the newest live marker is batches.py's session fallback
 
 
+def owed_path(d, sid):
+    return os.path.join(d, 'runs', sid + '.owed')
+
+
 def report_gate(h, sc):
-    """Duty 3: `run-end` needs the run's spec-phase report pasted in the assistant's text, when the run has batches."""
+    """Duty 3: a `run-end` whose run has batches, before the current report is in the assistant's text, records the
+    report as owed and goes on. The paste usually rides in the same message as `run-end`, which PreToolUse can't see
+    (P3), so the Stop hook checks the turn's last text instead. Keyed on this session's own id: `run-end` deletes the
+    marker, and the Stop hook has only its own id."""
     if not ends_run(sc):
         return
     repo = repo_at(h.cwd)
@@ -1621,10 +1635,8 @@ def report_gate(h, sc):
         return
     h.touch.add(repo)
     text, tid = batches.render_report(store, bs)
-    why = table_problem(h, store, 'report.shown', text, f'python3 {HERE}/batches.py table report',
-                        'in the run report first', again='run `run-end` again')
-    if why and not escaped(repo, store, 'report.denies', tid):
-        h.deny(why + WAY_OUT)
+    if table_problem(h, store, 'report.shown', text, 'table report', 'in the run report'):
+        state.write_json(owed_path(repo.dirs[0], h.sid), {'id': tid, 'text': text, 'blocked': 0})
 
 
 def manual_run(repo, h):
@@ -1781,8 +1793,6 @@ def pretool_bash(h, command):
         return
     if not h.agent:
         run_piece(report_gate, h, sc)
-        if h.denies:
-            return
     call = control_call(command)
     if call and not h.agent:   # a subagent's call is never recorded, whatever the deny above saw
         repo = repo_at(h.cwd)
@@ -1809,6 +1819,40 @@ def posttool(h):
 
 HANDLERS['pretool'] = pretool
 HANDLERS['posttool'] = posttool
+
+
+# ---- the end of a turn: the owed run report (piece 11, duty 3) ------------------------------------
+
+STOP_ASK = 'foreman: end the run report with the spec-phase table, pasted verbatim as text as the last thing in your reply:'
+
+
+def turn_end(h):
+    """The Stop hook (main session only). A report `run-end` left owed must be in the turn's last text: handed back
+    once with a block, and dropped at the next turn end either way, so a session can never be held."""
+    if not h.sid or os.sep in h.sid:
+        return
+    for home in {state.home(), state.DEFAULT_HOME}:
+        for p in ls(home, f'*/runs/{glob.escape(h.sid)}.owed'):
+            owed = state.read_json(p)
+            repo = repo_at(h.cwd)
+            if repo and repo.disabled('batch_state'):
+                rm(p)
+            elif not isinstance(owed, dict) or not isinstance(owed.get('text'), str):
+                rm(p)
+                print(f'foreman: dropped an unreadable owed run report ({p})', file=sys.stderr)
+            elif holds({squash(line) for line in (h.inp.get('last_assistant_message') or '').splitlines()},
+                       owed['text']):
+                rm(p)
+            elif int(owed.get('blocked') or 0) >= 1:
+                rm(p)
+                print('foreman: the run report was not pasted; ending anyway', file=sys.stderr)
+            else:
+                state.write_json(p, dict(owed, blocked=1))
+                print(json.dumps({'decision': 'block', 'reason': STOP_ASK + '\n\n' + owed['text']}))
+                return
+
+
+HANDLERS['stop'] = turn_end
 
 
 # ---- dispatcher -----------------------------------------------------------------------------------
