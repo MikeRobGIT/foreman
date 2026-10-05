@@ -177,8 +177,18 @@ W1-W6 to keep them apart from steps 0-12; W6's stop conditions replace the auton
   last word; the spec path starts with `{{design_spec_dir}}/`; the branch is the word before it; the worktree is
   everything before the branch. At the batch's first `SPEC READY`, record its **fork base**:
   `git -C <worktree> merge-base <sha> origin/<default>` (`<default>` is `origin/HEAD`'s branch, else `main`).
+  At every `SPEC READY`: TaskStop the batch's worker timer by its id and `task <batch> done <id>`,
+  `stamp <batch> spec_ready`, and `set <batch> sha=<sha>`; the first one also sets
+  `worktree=<worktree> branch=<branch> spec=<spec path> fork_base=<fork base>`.
   1. **Pre-checks.** They spend no round, but bounces are capped at 2: a third parks the batch ("spec incomplete
-     after 2 bounces"). A bounce sends the problems in one `SendMessage` and returns the worker to work.
+     after 2 bounces"). A bounce sends the problems in one `SendMessage` and returns the worker to work, with
+     `bump <batch> bounces`, `stamp <batch> sent` and a new timer (`task <batch> add timer <id>`).
+     - **Open questions are labelled.** Every bullet under `## Open questions` starts `- **Blocking:**` or
+       `- **Non-blocking:**`, or the section reads `None — …`; anything else is a bounce. Run this in the
+       worktree; any output is a bounce:
+       `awk '/^## Open questions$/{f=1;next} /^## /{f=0} f && NF && !/^- \*\*(Blocking|Non-blocking):\*\* / && !/^None — / && !/^  /' <spec path>`
+     - **A Blocking question parks the batch now** (`reason=open-question`), before any round, at any
+       `SPEC READY`.
      - The worktree and the commit exist (`git -C <worktree> cat-file -e <sha>^{commit}`), the worktree's HEAD
        is that commit (`git -C <worktree> rev-parse HEAD`), and `git -C <worktree> status --porcelain --
        {{design_spec_dir}}` prints nothing: the reviewers read the working tree, so it must be the pinned SHA.
@@ -191,7 +201,14 @@ W1-W6 to keep them apart from steps 0-12; W6's stop conditions replace the auton
        extend the batch's owned files and say so in your next message ("owned files now also include <file>").
        Otherwise re-batch, or park ("scope conflict").
   2. **A round is pinned to one SHA.** Don't resume the worker while its round runs, and discard any result for
-     an older SHA. Round r:
+     an older SHA. Before each round, `set <batch> status=review`.
+     **Every reviewer is recorded and stopped by id.** Record the chain with `task <batch> add chain <task id>`
+     (its Bash task id), and each Agent reviewer, the opus and sonnet ones too, with
+     `task <batch> add reviewer <agent id>` (the agent id in its Agent result).
+     Agent reviewers are dispatched **unnamed** (no `name`): a named agent is a teammate that keeps a terminal.
+     When a reviewer's verdict lands: `task <batch> verdict <id>`, TaskStop it by that id, then
+     `task <batch> done <id>`; a TaskStop of a task that already finished may error, which is ignored. When the
+     chain exits, `task <batch> done <id>`. Round r:
      a. **The cross-model chain**, in the background (Bash `run_in_background`). Write `$FOREMAN`, `<scratch>`
         and every other path out literally and absolute, with nothing else in the command (hooks piece 8
         auto-allows exactly this shape; anything more prompts, and a background run stalls on the prompt):
@@ -215,23 +232,35 @@ W1-W6 to keep them apart from steps 0-12; W6's stop conditions replace the auton
         with `model: sonnet`. Combine their verdicts into one findings list, duplicates removed by section and
         evidence; that list goes to the worker and is what round r+1 rules on. Mark the batch "no cross-model
         review" in the run report: the Agent tool offers only Claude models.
-  3. **Verdict.**
+  3. **Verdict.** Record every round: `add-round <batch> r=<r> sha=<sha> entry=<n> [fallthrough=<adapter:why,…>]
+     explore=<pass|revise|none> crit=<n> imp=<n> minor=<n>`. `entry` is the number in the chain log's `.entry`
+     (0 when the chain was exhausted or killed); each `why` is `error`, `quota`, `reads-repo`, `timeout` or
+     `missing`, read from `<log>.attempts`; `explore=none` when no read-only verdict came back.
      - **Pass:** no Critical or Important finding in the merged verdict (case c: in either verdict). Before
        passing, grep-verify the evidence for every chain P1 or P2 the reviewer rejected; a rejection you can't
-       confirm turns the pass into a revise. Status `passed`, then W3.6.
+       confirm turns the pass into a revise. Then `set <batch> status=passed reviewed_sha=<sha>`, write the
+       Minor findings and the open questions to scratch files (one per line), `note <batch> minors <file>` and
+       `note <batch> questions <file>`, then W3.6.
      - **Revise:** spot-check the findings (the reviewer already verified them), then send them in ONE
-       `SendMessage`, with the Minor ones marked optional. The next `SPEC READY` starts round r+1.
-     - **Park** (W3.6): a bound below is exceeded, or an open question the batch depends on needs a human
-       decision (reason `open question`). Open questions outside the batch's scope don't block a pass: they
-       become row notes in the final report (do the decidable part).
+       `SendMessage`, with the Minor ones marked optional, then `stamp <batch> sent` and a new timer. The next
+       `SPEC READY` starts round r+1.
+     - **Park** (W3.6): a bound below is exceeded. A verdict that rules an open question blocking parks the
+       batch right after that round (`reason=open-question`). Open questions outside the batch's scope don't
+       block a pass: they become row notes in the final report (do the decidable part).
+     - **Never edit a worker's spec**, not even a typo: the hooks refuse a release at any SHA but the reviewed
+       one. Minor findings go in the release message.
   4. **Reviewer failures.** A read-only reviewer that fails, or isn't back in 20 minutes, is re-dispatched once;
-     stop the superseded one (TaskStop) and ignore any late verdict from it. A round that still produces no
+     TaskStop the superseded one by its recorded id, `task <batch> done <id>`, record the re-dispatch with
+     `task <batch> add reviewer <agent id>`, and ignore any late verdict from it. A round that still produces no
      verdict doesn't count, and a second such round parks the batch ("review could not run"). At the subagent
      concurrency limit ("Concurrent subagent limit reached"), queue the dispatch for the next wake: that is not
      a failure.
-  5. **A stop without `SPEC READY`** (a question, a context limit, an error): resume the worker once with "finish
-     the spec; questions go under Open questions; end with `SPEC READY` as the first line". It counts as a
-     bounce. A second such stop parks the batch ("spec incomplete").
+  5. **A stop without `SPEC READY`** (a question, a context limit, an error): `stamp <batch> stopped`, then resume
+     the worker once with "finish the spec; questions go under Open questions; end with `SPEC READY` as the first
+     line". It counts as a bounce. A second such stop parks the batch ("spec incomplete").
+     - **Stopped by the human:** when the stop notification, or a refused resume, says the user stopped the
+       agent, don't resume or relaunch it: `stamp <batch> stopped`, then park (`reason=stopped-by-human`).
+       Only those two signals count; any other stop takes the rule above.
   6. **Bounds.** A batch in the spec phase ends `released` or `parked`, never anything else.
 
      | bound | default | when exceeded |
@@ -240,24 +269,28 @@ W1-W6 to keep them apart from steps 0-12; W6's stop conditions replace the auton
      | `spec_phase_timeout` | 60 minutes of worker time (the clock) | park ("spec phase timed out") |
      | one round | the chain: its adapters' own timeouts (exit 2 counts as exhausted); the read-only reviewer: 20 min | re-dispatch once, then the round doesn't count |
      | pre-check bounces | 2 | park ("spec incomplete after 2 bounces") |
+     | a `- **Blocking:**` open question | at any `SPEC READY`, or a verdict that rules one blocking | park ("open question") |
+     | a stop by the human | the stop notification, or a refused resume, names the user | park ("stopped by the human") |
      | rounds that don't count | 1 | park ("review could not run") |
      | W6 silence | `parallel_worker_timeout` | park ("worker stuck"); restarts at every findings or release message |
      | manual checkpoint | not selected | park ("not released by the human") |
      | comment round (W3.6) | one per batch, always allowed, exempt from `spec_review_rounds` and `spec_phase_timeout` | failing it parks the batch |
 
   7. **The clock.** Only notifications wake you, so the bounds run on timers.
-     - **Timestamps**, epoch seconds from `date +%s`, in the state table. Every message that returns the worker
-       to work stamps `sent_i`: launch (`sent_0`), findings, a bounce, a resume after a stop without
-       `SPEC READY`, a comment round. Every `SPEC READY` stamps `spec_ready_i`; a stop without one stamps
-       `stopped_i`.
-     - **Worker time** is the sum of every `spec_ready_i − sent_i` (or `stopped_i − sent_i`), plus
-       `now − last sent_i` while the worker is working. Time between a stop and your resume never counts, and
+     - **Stamps**, written by `batches.py stamp`. Every message that returns the worker to work is
+       `stamp <batch> sent` (launch, findings, a bounce, a resume after a stop without `SPEC READY`), except a
+       comment round, which is `stamp <batch> comment_sent`. Every `SPEC READY` is `stamp <batch> spec_ready`;
+       a stop without one is `stamp <batch> stopped`.
+     - **Worker time** is the sum of every `spec_ready` (or `stopped`) minus the `sent` before it, plus
+       `now − last sent` while the worker is working. Time between a stop and your resume never counts, and
        comment-round intervals are left out (their own timer is `parallel_worker_timeout`).
-     - **Timers.** For every return to work, start `sleep <remaining worker time in seconds>` with Bash
-       `run_in_background`; one `sleep 1200` per running reviewer; one `sleep <parallel_worker_timeout × 60>` per
-       comment round. Record each timer's task id. Stop the superseded timer (TaskStop) at `SPEC READY` and on
-       every re-arm.
-     - **On every wake**, recompute every bound for every batch from the timestamps and act on the exceeded
+       `batches.py show <batch>` computes it, and the `remaining` seconds.
+     - **Timers.** Every timer is a Bash `run_in_background` `sleep`; a foreground `sleep` is refused.
+       For every return to work, `sleep <remaining>`; one `sleep 1200` per running reviewer; one
+       `sleep <parallel_worker_timeout × 60>` per comment round. Record each with `task <batch> add timer <id>`.
+       Stop a superseded timer at `SPEC READY` and on every re-arm: TaskStop it by its id, then
+       `task <batch> done <id>`.
+     - **On every wake**, recompute every bound for every batch from `batches.py show` and act on the exceeded
        ones. Then re-arm a timer for each working batch, running reviewer and comment round whose timer has
        ended. A stray wake is harmless.
      - **Session caps.** Where background commands are capped (`-p`, SDK and cloud sessions: 30 minutes by
@@ -265,7 +298,8 @@ W1-W6 to keep them apart from steps 0-12; W6's stop conditions replace the auton
        Never use `timeout` (macOS lacks it). A chain killed at the cap counts as exhausted.
   8. **Reviewer model.** Before the first dispatch, check whether the project or the user defines its own
      `Explore` agent (`grep -l '^name: Explore' .claude/agents/*.md ~/.claude/agents/*.md`). One that does keeps
-     its own `model:`; record that model, not `opus`, as the reviewer in the run report.
+     its own `model:`; record that model, not `opus`, as the reviewer in the run report, with
+     `set <batch> reviewer_model=<model>`.
 - **W3.6 Release.**
   - **Releasing** a batch takes two steps:
     1. `python3 $FOREMAN/hooks.py release <batch> <sha>`. The hooks record it, bound to this session.

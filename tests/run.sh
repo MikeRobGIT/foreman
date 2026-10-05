@@ -632,6 +632,34 @@ EOF
 check "W2 no longer filters rows that need a human decision" bash -c "! grep -qF 'need a human decision, or are named' '$sk'"
 check "W3 keeps no state table in context" bash -c "! grep -qF 'Keep a short state table' '$sk'"
 check "P2 (wrapper): W3 points at README's RTK recipe" grep -qF "point the user at README's **RTK** recipe" "$sk"
+echo "## SKILL.md 0.5.1: W3.5"
+while IFS= read -r s; do check "SKILL.md has: $s" grep -qF -- "$s" "$sk"; done <<'EOF'
+**Open questions are labelled.**
+**A Blocking question parks the batch now** (`reason=open-question`), before any round, at any
+A verdict that rules an open question blocking parks the
+`bump <batch> bounces`, `stamp <batch> sent` and a new timer
+**Every reviewer is recorded and stopped by id.**
+Agent reviewers are dispatched **unnamed** (no `name`)
+`set <batch> status=passed reviewed_sha=<sha>`
+**Never edit a worker's spec**
+**Stopped by the human:**
+then park (`reason=stopped-by-human`)
+| a stop by the human |
+Every timer is a Bash `run_in_background` `sleep`; a foreground `sleep` is refused.
+which is `stamp <batch> comment_sent`
+`set <batch> reviewer_model=<model>`
+TaskStop the superseded one by its recorded id, `task <batch> done <id>`, record the re-dispatch with
+EOF
+oq() { awk '/^## Open questions$/{f=1;next} /^## /{f=0} f && NF && !/^- \*\*(Blocking|Non-blocking):\*\* / && !/^None — / && !/^  /' "$1"; }
+check "SKILL.md's label pre-check is oq()'s awk" grep -qF "awk '/^## Open questions\$/{f=1;next} /^## /{f=0} f && NF && !/^- \*\*(Blocking|Non-blocking):\*\* / && !/^None — / && !/^  /' <spec path>" "$sk"
+printf '## Open questions\n\n- **Blocking:** who owns the setting?\n  (it decides the column)\n- **Non-blocking:** the colour\n\n## Review responses\n\n- free text\n' >"$T/oq1.md"
+check "label pre-check: labelled questions pass" test -z "$(oq "$T/oq1.md")"
+printf '## Open questions\n\nNone — the rows are fully specified\n' >"$T/oq2.md"
+check "label pre-check: None — passes" test -z "$(oq "$T/oq2.md")"
+printf '## Open questions\n\n- who owns the setting?\n- **Blocking:** x\n' >"$T/oq3.md"
+check "label pre-check: an unlabelled question is a bounce" test "$(oq "$T/oq3.md")" = '- who owns the setting?'
+check "the old timestamps text is gone" bash -c "! grep -qF 'in the state table. Every message that returns' '$sk'"
+
 echo "## backlog.py + ui.py"
 check "test_backlog.py" python3 "$root/tests/test_backlog.py"
 check "test_ui_api.py" python3 "$root/tests/test_ui_api.py"
