@@ -3337,7 +3337,11 @@ class ContinuationTest(BatchStateCase):
 
     def session_end(self, sid):
         self.fx.hook('session-end', {'hook_event_name': 'SessionEnd', 'session_id': sid, 'cwd': self.fx.work,
-                                     'reason': 'clear'})
+                                     'reason': 'clear', 'transcript_path': os.path.join(self.proj, sid + '.jsonl')})
+
+    def fork_alias(self, sid='S2', run='S1', touched=None):
+        """An alias written straight to disk: a true fork, whose original transcript records no continuation."""
+        state.write_json(self.runs_file(sid), {'alias': run, 'touched': time.time() if touched is None else touched})
 
     def runs_file(self, sid):
         return os.path.join(self.fx.state, 'runs', sid + '.json')
@@ -3417,11 +3421,55 @@ class ContinuationTest(BatchStateCase):
         self.continued()
         self.assertEqual(self.session_start(source='resume'), 'export FOREMAN_SESSION=S1\n')
 
-    def test_clear_in_the_continued_session_leaves_the_run_to_the_other(self):
-        self.continued()
-        self.session_start()
+    def test_clear_in_a_true_fork_leaves_the_live_original_its_run(self):
+        self.fork_alias()
         self.session_end('S2')
         self.assertEqual((os.path.exists(self.runs_file('S2')), os.path.exists(self.runs_file('S1'))), (False, True))
+        self.assertNotIn('ended', self.fx.marker())
+
+    def test_clear_in_both_sessions_leaves_no_marker(self):
+        self.fork_alias()
+        self.session_end('S1')
+        self.assertTrue(self.fx.marker()['ended'])
+        self.assertLess(time.time() - self.fx.marker()['touched'], 60)   # the TTL still applies
+        self.session_end('S2')
+        self.assertEqual((os.path.exists(self.runs_file('S2')), os.path.exists(self.runs_file('S1'))), (False, False))
+
+    def test_clear_after_a_move_to_the_background_leaves_no_marker(self):
+        self.continued()
+        self.session_start()
+        self.session_end('S2')   # the original never saw a SessionEnd; its transcript records the move
+        self.assertEqual((os.path.exists(self.runs_file('S2')), os.path.exists(self.runs_file('S1'))), (False, False))
+
+    def test_a_new_run_in_the_original_forgets_that_it_ended(self):
+        self.fork_alias()
+        self.session_end('S1')
+        self.fx.start_run('S1')
+        self.assertNotIn('ended', self.fx.marker())
+
+    def test_run_end_removes_every_alias_of_the_run(self):
+        self.fork_alias('S2')
+        self.fork_alias('S3')
+        self.fx.hook('posttool', self.fx.payload('Bash', {'command': f'python3 {HOOKS} run-end'}, sid='S2',
+                                                 event='PostToolUse'))
+        self.assertEqual([f for f in os.listdir(os.path.join(self.fx.state, 'runs')) if f.endswith('.json')], [])
+        self.fx.start_run('S1')
+        self.session_end('S1')   # no stale sibling alias keeps the new run's marker
+        self.assertFalse(os.path.exists(self.runs_file('S1')))
+
+    def test_an_expired_alias_carries_nothing(self):
+        self.fork_alias(touched=time.time() - 49 * 3600)
+        self.session_end('S1')
+        self.assertFalse(os.path.exists(self.runs_file('S1')))
+
+    def test_an_alias_is_never_a_run_to_adopt(self):
+        state.write_json(self.runs_file('S0'), {'started': self.t0, 'touched': time.time(), 'args': ''})
+        self.fork_alias('S1', run='S0')   # the run's file is itself an alias (corrupt or racing)
+        self.fork_alias('S2', run='S1')
+        self.continued(new='S3', old='S2')
+        write(os.path.join(self.proj, 'S3.jsonl'), '')
+        self.assertEqual(self.session_start(sid='S3'), 'export FOREMAN_SESSION=S3\n')
+        self.assertFalse(os.path.exists(self.runs_file('S3')))
 
     def test_clear_in_the_original_session_leaves_the_run_to_its_continuation(self):
         self.continued()

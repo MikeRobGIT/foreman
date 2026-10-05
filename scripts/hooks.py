@@ -308,50 +308,73 @@ def run_start(h):
     m = state.read_json(p)
     m = m if isinstance(m, dict) else {'started': time.time()}
     m.update(touched=time.time(), args=args)
+    m.pop('ended', None)   # a new run here: this session owns the marker again
     state.write_json(p, m)
 
 
+def alias_target(a):
+    """The run an alias file's data names, or None when it isn't a (valid) alias."""
+    t = a.get('alias') if isinstance(a, dict) else None
+    return t if isinstance(t, str) and BATCH.match(t) else None
+
+
+def aliases(d, run):
+    """The paths of every alias file in the state dir d that names `run`, with their data."""
+    return [(p, a) for p, a in ((p, state.read_json(p)) for p in ls(d, 'runs/*.json')) if alias_target(a) == run]
+
+
 def end_run(sid):
-    """Delete this session's run markers, and for an alias the marker it names. A glob, no git: every SessionEnd hook
-    shares 1.5 seconds. An owed report (`.owed`) stays for the Stop hook."""
+    """Delete this session's run: its marker, or for an alias the marker it names, and every alias of that run (a
+    sibling left behind would keep a later run's marker on /clear). A glob, no git: every SessionEnd hook shares 1.5
+    seconds. An owed report (`.owed`) stays for the Stop hook."""
     if not sid or os.sep in sid:
         return
     for home in {state.home(), state.DEFAULT_HOME}:
         for p in ls(home, f'*/runs/{glob.escape(sid)}.json'):
-            a = state.read_json(p)
-            if isinstance(a, dict) and isinstance(a.get('alias'), str) and BATCH.match(a['alias']):
-                rm(os.path.join(os.path.dirname(p), a['alias'] + '.json'))
+            d, run = os.path.dirname(os.path.dirname(p)), alias_target(state.read_json(p)) or sid
+            for q, _ in aliases(d, run):
+                rm(q)
+            rm(os.path.join(d, 'runs', run + '.json'))
             rm(p)
 
 
 def carried(d, sid):
     """True when a live alias in the state dir d names `sid`'s run: another session carries it on."""
-    for p in ls(d, 'runs/*.json'):
+    for _, a in aliases(d, sid):
         try:
-            a = state.read_json(p)
-            if (isinstance(a, dict) and a.get('alias') == sid
-                    and time.time() - float(a.get('touched', 0)) < RUN_TTL):
+            if time.time() - float(a.get('touched', 0)) < RUN_TTL:
                 return True
         except (TypeError, ValueError):
             continue
     return False
 
 
-def leave_run(sid):
-    """/clear or logout: this session leaves its run, which another live session may still own. Its alias is removed
-    alone, and its own marker stays while a live alias still names it. `run-end` (end_run) removes both."""
+def leave_run(sid, transcript_path):
+    """/clear or logout: this session leaves its run, which another live session may still own. A marker another live
+    alias still names stays, marked `ended` (its TTL still runs). An alias is removed, and with it the marker it names
+    when no other alias names that marker and its session is gone too: it ended (`ended`), or its transcript records
+    the move to this session (a move to the background never ends the old id). `run-end` (end_run) removes all."""
     if not sid or os.sep in sid:
         return
     for home in {state.home(), state.DEFAULT_HOME}:
         for p in ls(home, f'*/runs/{glob.escape(sid)}.json'):
-            a = state.read_json(p)
-            if not (isinstance(a, dict) and 'alias' not in a and carried(os.path.dirname(os.path.dirname(p)), sid)):
-                rm(p)
+            d, a = os.path.dirname(os.path.dirname(p)), state.read_json(p)
+            if isinstance(a, dict) and 'alias' not in a and carried(d, sid):
+                state.write_json(p, dict(a, ended=True))
+                continue
+            rm(p)
+            run = alias_target(a)
+            target = os.path.join(d, 'runs', f'{run}.json')
+            m = state.read_json(target) if run else None
+            if (isinstance(m, dict) and 'alias' not in m and not carried(d, run)
+                    and (m.get('ended') or (transcript_path and continued_in(
+                        os.path.join(os.path.dirname(transcript_path), run + '.jsonl'), sid)))):
+                rm(target)
 
 
 def session_end(h):
     if h.inp.get('reason') in ('clear', 'logout'):
-        leave_run(h.sid)
+        leave_run(h.sid, h.inp.get('transcript_path'))
 
 
 def session_start(h):
