@@ -660,6 +660,39 @@ printf '## Open questions\n\n- who owns the setting?\n- **Blocking:** x\n' >"$T/
 check "label pre-check: an unlabelled question is a bounce" test "$(oq "$T/oq3.md")" = '- who owns the setting?'
 check "the old timestamps text is gone" bash -c "! grep -qF 'in the state table. Every message that returns' '$sk'"
 
+echo "## SKILL.md 0.5.1: W3.6 to W6, Hooks"
+while IFS= read -r s; do check "SKILL.md has: $s" grep -qF -- "$s" "$sk"; done <<'EOF'
+Releasing** a batch takes two steps, at its `reviewed_sha` only.
+`set <batch> status=released released_sha=<sha>`
+Run `python3 $FOREMAN/batches.py table checkpoint <wave>`
+A question that covers one batch is single-select: Release, Comment, Park
+Two to four batches: one multi-select question.
+More than four: split them into questions of two to four batches each (5 → 3+2, 9 → 3+3+3)
+More than sixteen: let the human answer in text.
+"cross-model review fell through to <reviewer>"
+which offers only release or park, after a fresh `table checkpoint` is pasted
+parked (`reason=comment-failed`)
+`Monitor` until-loop (`until [ ! -e <log>.pid ]; do sleep 2; done`, 30 s timeout)
+same loop as a `run_in_background` Bash call
+`set <batch> status=parked reason=<reason>`
+`set <batch> status=pr pr=<n>` at the batch's first report
+`bump <batch> pr_rounds` for each send
+named `fw-<batch>-2` (then `-3`, …)
+unnamed, recorded with `task <batch> add reviewer <agent id>`
+**An environment failure** (`fork failed`, `Device not configured`) gets one more try first
+is not the one re-dispatch above, and it never stops a `worker` task.
+read-only reviewer (unnamed, recorded and stopped
+Then stop the batch's workers:
+run `python3 $FOREMAN/batches.py table report` and paste its whole output
+| `batch_state` | run, orchestrator |
+EOF
+check "parking runs in seven steps, in order" bash -c "awk -v a='1. Kill the round' -v b='2. \`python3 \$FOREMAN/hooks.py stopping' -v c='3. TaskStop every live task' -v d='4. Copy the specs to' -v e='5. Name the branch' -v f='6. \`git worktree remove --force' -v g='7. Write the park note' 'index(\$0,a)&&!A{A=NR} index(\$0,b)&&!B{B=NR} index(\$0,c)&&!C{C=NR} index(\$0,d)&&!D{D=NR} index(\$0,e)&&!E{E=NR} index(\$0,f)&&!F{F=NR} index(\$0,g)&&!G{G=NR} END{exit !(A&&A<B&&B<C&&C<D&&D<E&&E<F&&F<G)}' '$sk'"
+check "W6 pastes the report before run-end" appears_before "$sk" 'run `python3 $FOREMAN/batches.py table report`' 'the hooks refuse it until the current report table'
+check "W3.6 pastes the checkpoint before asking" appears_before "$sk" 'Run `python3 $FOREMAN/batches.py table checkpoint <wave>`' 'A question that covers one batch is single-select'
+check "SKILL.md no longer reads a state table" bash -c "! grep -qF 'state table' '$sk'"
+check "P3 (next-message): the checkpoint paste is a message of its own" grep -qF 'in a message of its own, make one more call' "$sk"
+check "P3 (next-message): one more call before run-end" grep -qF 'then one more call (`python3 $FOREMAN/batches.py show`), then `run-end`' "$sk"
+
 echo "## backlog.py + ui.py"
 check "test_backlog.py" python3 "$root/tests/test_backlog.py"
 check "test_ui_api.py" python3 "$root/tests/test_ui_api.py"
