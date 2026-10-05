@@ -109,6 +109,7 @@ class CommandTest(Base):
                          [('worker', 'fw-' + self.b1, False, True), ('reviewer', 'agent-7f3', True, False)])
         self.assertEqual(b['rounds'], [{'r': 1, 'sha': SHA1, 'entry': 2, 'fallthrough': ['codex:quota'],
                                         'explore': 'revise', 'crit': 0, 'imp': 2, 'minor': 1}])
+        self.assertEqual(b['degraded'], 'yes')   # entry 2 isn't the first eligible entry
         self.assertGreaterEqual(b['remaining'], 60 * 60 - 5)
         listing = self.ok('show')
         self.assertIn(self.b1, listing)
@@ -216,7 +217,7 @@ class CommandTest(Base):
                            text=True, env=env, cwd=self.work)
         self.assertEqual((p.returncode, p.stdout), (0, ''), p.stderr)
         self.assertTrue(os.path.exists(self.file(self.b1, 1)))
-        self.assertIn(self.b1, self.ok('show'))
+        self.assertIn(f'| {self.b1} |', self.ok('table', 'report'))
 
 
 class SessionTest(Base):
@@ -261,10 +262,119 @@ class ScopeTest(Base):
         self.put(old, status='released')
         self.put(self.b1, status='spec')
         self.assertEqual([b['batch'] for b in self.store().batches()], [self.b1])
+        self.assertNotIn(old, self.ok('table', 'report'))
         self.assertNotIn(old, self.ok('show'))
         self.assertIn(self.b1, self.ok('show'))
         os.remove(os.path.join(self.dirs[0], 'runs', 'S1.json'))   # no live marker: the whole session
         self.assertEqual([b['batch'] for b in self.store().batches()], [old, self.b1])
+
+
+class TableTest(Base):
+    def fixture(self):
+        self.put(self.b1, status='passed', rows='IB-1,IB-2', spec='docs/superpowers/specs/x-design.md',
+                 reviewed_sha=SHA1, minors=['a | b', 'two', 'three', 'four'], questions=['- **Non-blocking:** colour?'],
+                 rounds=[{'r': 1, 'sha': SHA1, 'entry': 1, 'fallthrough': [], 'explore': 'revise', 'crit': 0,
+                          'imp': 1, 'minor': 0},
+                         {'r': 2, 'sha': SHA2, 'entry': 2, 'fallthrough': ['codex:quota'], 'explore': 'pass',
+                          'crit': 0, 'imp': 0, 'minor': 4}],
+                 stamps=[['sent', 1000], ['spec_ready', 1500], ['passed', 1600]], reviewer_model='opus')
+        self.put(self.b2, status='parked', reason='no-pass', rows='IB-3', spec='docs/superpowers/specs/y-design.md',
+                 rounds=[{'r': k, 'sha': SHA1, 'entry': 0, 'fallthrough': ['codex:quota', 'codex:error'],
+                          'explore': 'revise', 'crit': 1, 'imp': 0, 'minor': 0} for k in (1, 2, 3)],
+                 stamps=[['sent', 1000], ['ended', 1000 + 3 * 3600 + 5 * 60]])
+
+    CHECKPOINT = '''| batch | rows | spec | rounds | chain reviewer | read-only verdict | Minor findings | open questions | status |
+|---|---|---|---|---|---|---|---|---|
+| {b1} | IB-1, IB-2 | docs/superpowers/specs/x-design.md | 2 | codex gpt-5 ⚠ degraded | pass | a \\| b; two; three; +1 more (batches.py show {b1}) | - **Non-blocking:** colour? | passed |
+| {b2} | IB-3 | docs/superpowers/specs/y-design.md | 3 | none ⚠ degraded | revise | — | — | parked: no pass in 3 rounds |'''
+
+    REPORT = '''| batch | spec wall-clock | rounds | reviewer | degraded | reviewer model | status | rounds after the PR |
+|---|---|---|---|---|---|---|---|
+| {b1} | — | 2 | codex gpt-5 (after codex:quota) | yes | opus | passed | — |
+| {b2} | 3h05m | 3 | no cross-model review | yes | — | parked: no pass in 3 rounds | — |'''
+
+    def test_both_tables_against_fixed_fixtures(self):
+        self.fixture()
+        body = self.CHECKPOINT.format(b1=self.b1, b2=self.b2)
+        out = self.ok('table', 'checkpoint', batches.wave_of(self.b1))
+        self.assertEqual(out, f'foreman checkpoint {batches.wave_of(self.b1)} {batches.table_id(body)}\n{body}\n')
+        stamp = state.read_json(os.path.join(self.dirs[0], 'batches', 'S1', 'state', batches.wave_of(self.b1) + '.shown'))
+        self.assertEqual((stamp['text'] + '\n', stamp['id']), (out, batches.table_id(body)))
+        body = self.REPORT.format(b1=self.b1, b2=self.b2)
+        out = self.ok('table', 'report')
+        self.assertEqual(out, f'foreman report S1 {batches.table_id(body)}\n{body}\n')
+        self.assertTrue(os.path.exists(os.path.join(self.dirs[1], 'batches', 'S1', 'state', 'report.shown')))
+
+    def test_no_rendered_cell_depends_on_the_clock(self):
+        self.fixture()
+        self.put(self.b2, status='review', stamps=[['sent', 1000]], tasks=[{'kind': 'timer', 'id': 'bg1',
+                 'added': 1000, 'verdict': False, 'live': True}])
+        store, bs = self.store(), self.store().batches()
+        wave = batches.wave_of(self.b1)
+        first = (batches.render_checkpoint(store, wave, bs), batches.render_report(store, bs))
+        real = time.time
+        try:
+            time.time = lambda: real() + 7 * 86400
+            again = (batches.render_checkpoint(store, wave, bs), batches.render_report(store, bs))
+        finally:
+            time.time = real
+        self.assertEqual(first, again)
+
+    def checkpoint_id(self):
+        store = self.store()
+        wave = batches.wave_of(self.b1)
+        return batches.render_checkpoint(store, wave, [b for b in store.batches() if batches.wave_of(b['batch']) == wave])[1]
+
+    def test_the_checkpoint_id_follows_the_wave_and_nothing_else(self):
+        self.fixture()
+        other = name_at(self.t0 + 120, 'w2a')
+        self.put(other, status='spec')
+        ids = [self.checkpoint_id()]
+        self.ok('set', other, 'status=review')                    # another wave: same id
+        ids.append(self.checkpoint_id())
+        self.ok('stamp', self.b1, 'comment_sent')                 # a status change
+        ids.append(self.checkpoint_id())
+        self.ok('add-round', self.b1, 'r=3', 'sha=' + SHA2, 'entry=1', 'explore=pass', 'crit=0', 'imp=0', 'minor=1')
+        ids.append(self.checkpoint_id())                          # a new round
+        self.ok('set', self.b1, 'status=passed', 'reviewed_sha=' + SHA2)
+        ids.append(self.checkpoint_id())                          # passed again after the comment round (scenario A')
+        notes = os.path.join(self.tmp, 'm.txt')
+        write(notes, 'a new minor finding\n')
+        self.ok('note', self.b1, 'minors', notes)
+        ids.append(self.checkpoint_id())                          # new Minor findings
+        self.assertEqual(ids[0], ids[1])
+        self.assertEqual(len(set(ids[1:])), 5, ids)
+
+    def test_text_cells(self):
+        b = {'batch': 'x', 'minors': ['a|b', 'c', 'd', 'e', 'f']}
+        self.assertEqual(batches.text_cell(b, 'minors'), 'a\\|b; c; d; +2 more (batches.py show x)')
+        self.assertEqual(batches.text_cell(dict(b, minors=['one', 'two']), 'minors'), 'one; two')
+        self.assertEqual(batches.text_cell(b, 'questions'), '—')
+
+    def test_an_empty_wave_is_refused(self):
+        self.assertIn('no batches in wave', self.refused('table', 'checkpoint', batches.wave_of(self.b1)))
+
+
+class DegradedTest(Base):
+    def first(self, config):
+        write(os.path.join(self.work, '.claude/foreman.config.md'), config)
+        return batches.settings(self.store())[1]
+
+    def test_the_first_entry_eligible_in_spec_mode(self):
+        rounds = lambda e: {'rounds': [{'entry': e}]}   # noqa: E731
+        first = self.first(CONFIG)
+        self.assertEqual((first, batches.degraded(rounds(1), first), batches.degraded(rounds(2), first),
+                          batches.degraded(rounds(0), first), batches.degraded({}, first)), (1, 'no', 'yes', 'yes', ''))
+        # the first entry can't run in spec mode (no reads-repo marker), so the second is the one to land
+        first = self.first('---\nreviewers:\n  - { use: prime-agent, model: m }\n  - { use: codex, model: m }\n---\n')
+        self.assertEqual((first, batches.degraded(rounds(2), first)), (2, 'no'))
+        # a legacy extra_reviewers command without both placeholders is never eligible
+        first = self.first('---\nextra_reviewers:\n  - codex review --base main\n---\n')
+        self.assertEqual((first, batches.degraded(rounds(1), first)), (None, 'yes'))
+        first = self.first('---\nextra_reviewers:\n  - cat {prompt_file}; echo {base}\n---\n')
+        self.assertEqual(first, 1)
+        first = self.first('---\ngate: x\n---\n')   # an empty chain is always degraded
+        self.assertEqual((first, batches.degraded({}, first)), (None, 'yes'))
 
 
 if __name__ == '__main__':

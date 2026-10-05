@@ -9,6 +9,8 @@
   batches.py add-round <batch> r=<n> sha=<sha> entry=<n> [fallthrough=<adapter:why,...>] explore=<pass|revise|none>
                        crit=<n> imp=<n> minor=<n>
   batches.py show [<batch>] [--json]
+  batches.py table checkpoint <wave>                   print the W3.6 table and stamp it
+  batches.py table report                              print the W6 spec-phase table and stamp it
 Every command takes `--session <id>`. Exit 0 = done, 1 = refused (one line on stderr), 2 = usage.
 
 Files: <state dir>/batches/<session>/state/<batch>.json in every state.state_dirs(main) entry (hooks.py forget
@@ -19,6 +21,7 @@ only batches named at or after the marker's `started` minute.
 import contextlib
 import fcntl
 import glob
+import hashlib
 import json
 import os
 import re
@@ -78,6 +81,10 @@ def batch_time(batch):
         return time.mktime(time.strptime(m.group(1), '%Y%m%d-%H%M')) if m else 0
     except ValueError:
         return 0
+
+
+def wave_of(batch):
+    return batch[:-1]
 
 
 def same_sha(a, b):
@@ -354,14 +361,41 @@ def worker_time(b, now):
 
 
 def settings(store):
-    """spec_phase_timeout, in minutes, from the repo's own config (never FOREMAN_CONFIG, like the hooks)."""
+    """(the reviewer chain, the 1-based position of its first entry eligible in spec mode or None, spec_phase_timeout)."""
     conf = cfg.load(store.main, use_env=False)
-    return int(conf.get('spec_phase_timeout') or cfg.DEFAULTS['spec_phase_timeout'])
+    chain = cfg.chain(store.main, use_env=False)
+    first = next((i for i, e in enumerate(chain, 1) if spec_eligible(*e)), None)
+    timeout = conf.get('spec_phase_timeout') or cfg.DEFAULTS['spec_phase_timeout']
+    return chain, first, int(timeout)
 
 
-def computed(b, timeout, now):
+def spec_eligible(use, model, _effort):
+    """True when review.sh --spec would run this entry: its adapter carries `# foreman: reads-repo` and, for
+    `custom`, its command uses both {prompt_file} and {base} (custom.sh falls through otherwise)."""
+    path = os.path.join(HERE, '..', 'reviewers', f'{use}.sh')
+    if not NAME.match(use or '') or not os.path.isfile(path):
+        return False
+    with open(path, encoding='utf-8') as f:
+        if not re.search(r'^# foreman: reads-repo', f.read(), re.M):
+            return False
+    return use != 'custom' or ('{prompt_file}' in model and '{base}' in model)
+
+
+def degraded(b, first):
+    """'yes' when the last round's review wasn't the chain's first spec-eligible entry (or none landed, or no
+    entry is eligible), 'no' when it was, '' before any round."""
+    if first is None:
+        return 'yes'
+    rounds = b.get('rounds') or []
+    if not rounds:
+        return ''
+    return 'no' if rounds[-1].get('entry') == first else 'yes'
+
+
+def computed(b, conf, now):
+    _, first, timeout = conf
     wt = worker_time(b, now)
-    return dict(b, worker_time=wt, remaining=max(0, timeout * 60 - wt))
+    return dict(b, degraded=degraded(b, first), worker_time=wt, remaining=max(0, timeout * 60 - wt))
 
 
 def cmd_show(store, args):
@@ -387,8 +421,118 @@ def cmd_show(store, args):
     else:
         for b in out:
             live = ' '.join(f"{t['kind']}:{t['id']}" for t in b.get('tasks', []) if t.get('live'))
-            print(f"{b['batch']}  {b.get('status') or 'spec'}  rounds {len(b.get('rounds') or [])}  "
+            print(f"{b['batch']}  {status_cell(b)}  rounds {len(b.get('rounds') or [])}  "
                   f"remaining {b['remaining'] // 60}m  live tasks: {live or 'none'}")
+
+
+# ---- tables ------------------------------------------------------------------------------------------------------
+
+def status_cell(b):
+    st = b.get('status') or 'spec'
+    if st == 'parked':
+        return 'parked: ' + REASONS.get(b.get('reason'), b.get('reason') or '?').format(n=len(b.get('rounds') or []))
+    if st == 'pr':
+        return f"PR #{b.get('pr')}"
+    return st
+
+
+def text_cell(b, field):
+    items = [l.replace('|', '\\|') for l in b.get(field) or []]
+    if not items:
+        return '—'
+    out = '; '.join(items[:3])
+    return out + (f"; +{len(items) - 3} more (batches.py show {b['batch']})" if len(items) > 3 else '')
+
+
+def reviewer_label(chain, entry):
+    if not entry:
+        return 'none'
+    if entry > len(chain):
+        return f'#{entry}'
+    use, model, _ = chain[entry - 1]
+    return f'{use} {model}'.strip() if use != 'custom' else 'custom'
+
+
+def minutes(seconds):
+    m = int(seconds // 60)
+    return f'{m // 60}h{m % 60:02d}m' if m >= 60 else f'{m}m'
+
+
+def wall_clock(b):
+    sent = [t for k, t in b.get('stamps', []) if k == 'sent']
+    ended = [t for k, t in b.get('stamps', []) if k == 'ended']
+    return minutes(ended[-1] - sent[0]) if sent and ended else '—'
+
+
+def table(head, rows):
+    lines = ['| ' + ' | '.join(head) + ' |', '|' + '---|' * len(head)]
+    lines += ['| ' + ' | '.join(r) + ' |' for r in rows]
+    return '\n'.join(lines)
+
+
+def table_id(text):
+    return hashlib.sha1(text.encode()).hexdigest()[:8]
+
+
+def render_checkpoint(store, wave, batches):
+    """(text, id) of the W3.6 table for the wave's batches. No cell depends on the clock."""
+    chain, first, _ = settings(store)
+    rows = []
+    for b in batches:
+        rounds = b.get('rounds') or []
+        last = rounds[-1] if rounds else None
+        rev = '—'
+        if last:
+            rev = reviewer_label(chain, last.get('entry')) + (' ⚠ degraded' if degraded(b, first) == 'yes' else '')
+        rows.append([b['batch'], (b.get('rows') or '—').replace(',', ', '), b.get('spec') or '—', str(len(rounds)),
+                     rev, last.get('explore') if last else '—', text_cell(b, 'minors'), text_cell(b, 'questions'),
+                     status_cell(b)])
+    body = table(['batch', 'rows', 'spec', 'rounds', 'chain reviewer', 'read-only verdict', 'Minor findings',
+                  'open questions', 'status'], rows)
+    tid = table_id(body)
+    return f'foreman checkpoint {wave} {tid}\n{body}', tid
+
+
+def render_report(store, batches):
+    """(text, id) of the W6 spec-phase table for the given batches."""
+    chain, first, _ = settings(store)
+    rows = []
+    for b in batches:
+        rounds = b.get('rounds') or []
+        landed = '—'
+        if rounds:
+            last = rounds[-1]
+            if not last.get('entry'):
+                landed = 'no cross-model review'
+            else:
+                landed = reviewer_label(chain, last['entry'])
+                if last.get('fallthrough'):
+                    landed += ' (after ' + ', '.join(last['fallthrough']) + ')'
+        rows.append([b['batch'], wall_clock(b), str(len(rounds)), landed, degraded(b, first) or '—',
+                     b.get('reviewer_model') or '—', status_cell(b),
+                     str(b.get('pr_rounds', 0)) if b.get('pr') else '—'])
+    body = table(['batch', 'spec wall-clock', 'rounds', 'reviewer', 'degraded', 'reviewer model', 'status',
+                  'rounds after the PR'], rows)
+    tid = table_id(body)
+    return f'foreman report {store.sid} {tid}\n{body}', tid
+
+
+def cmd_table(store, args):
+    if args[:1] == ['checkpoint'] and len(args) == 2 and NAME.match(args[1]):
+        wave = args[1]
+        with store.lock():
+            bs = [b for b in store.batches() if wave_of(b['batch']) == wave]
+            if not bs:
+                raise Fail(f'no batches in wave {wave} (session {store.sid})')
+            text, tid = render_checkpoint(store, wave, bs)
+            store.write(f'{wave}.shown', {'at': time.time(), 'id': tid, 'text': text})
+    elif args == ['report']:
+        with store.lock():
+            text, tid = render_report(store, store.batches())
+            store.write('report.shown', {'at': time.time(), 'id': tid, 'text': text})
+    else:
+        raise Usage('table takes `checkpoint <wave>` or `report`')
+    print(text)
 
 
 # ---- CLI ---------------------------------------------------------------------------------------------------------
@@ -405,13 +549,15 @@ def run(argv):
     if not args:
         raise Usage('no command')
     cmd, rest = args[0], args[1:]
-    if cmd not in ('set', 'note', 'bump', 'stamp', 'task', 'add-round', 'show'):
+    if cmd not in ('set', 'note', 'bump', 'stamp', 'task', 'add-round', 'show', 'table'):
         raise Usage(f'unknown command: {cmd}')
-    if cmd != 'show' and not rest:
+    if cmd not in ('show', 'table') and not rest:
         raise Usage(f'{cmd} needs a batch')
     store = open_store(given)
     if cmd == 'show':
         return cmd_show(store, rest)
+    if cmd == 'table':
+        return cmd_table(store, rest)
     name, more = rest[0], rest[1:]
     if not NAME.match(name):
         raise Usage(f'bad batch name: {name}')
