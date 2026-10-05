@@ -114,7 +114,8 @@ W1-W6 to keep them apart from steps 0-12; W6's stop conditions replace the auton
 - **W2 Pick and batch.**
   - Pool: `status: ready` rows (list them with grep and read only the rows you pick; backlogs get large),
     filtered by `tag:<x>` if given, minus rows that are `risk: high`, match `parallel_skip`, name a step-3
-    `Procedure`, need a human decision, or are named by an open PR (match the id as a whole word).
+    `Procedure`, or are named by an open PR (match the id as a whole word). Admit rows that seem to need a human
+    decision: the spec phase parks them `open question` if they do.
   - Take ~3N. Group them by the files and symbols they touch (`git grep` the symbols and their importers)
     so no two batches share a file (except `parallel_shared_files`) or use a symbol another batch moves,
     renames or re-types. Rows that overlap share one batch (one PR, ~4 rows at most).
@@ -126,32 +127,50 @@ W1-W6 to keep them apart from steps 0-12; W6's stop conditions replace the auton
     wave number and a letter (e.g. `20261002-1530-w1a`). They are unique across invocations and `/loop` ticks; the
     hooks key their state files on them and read the time to judge a fresh run marker.
   - **Parked rows** (W3.6). A row stays out of the pool, until the human edits the note away, when its note
-    contains `spec parked (open question)` or `spec parked (not released by the human)`, or when it has two
+    contains `spec parked (open question)`, `spec parked (not released by the human)`,
+    `spec parked (stopped by the human)` or `spec parked (comment round failed)`, or when it has two
     `spec parked (` notes. Any other `spec parked (` row is eligible again, and its worker starts from the
     committed parked spec (Worker spec phase step 4).
-- **W3 Launch.** One `Agent` call per batch in one message (general-purpose, `isolation: "worktree"`,
-  named, background). The prompt's FIRST line is exactly `foreman-worker: <batch> spec-phase` (the hooks brief and
+- **W3 Launch.** One `Agent` call per batch in one message (general-purpose, `isolation: "worktree"`, background,
+  named `fw-<batch>`, never the bare batch name: TaskStop takes that name as the worker's id).
+  The prompt's FIRST line is exactly `foreman-worker: <batch> spec-phase` (the hooks brief and
   check tagged workers; see **Hooks**). A batch name must match `[A-Za-z0-9_-]+`: the tag grammar and the
   `hooks.py` CLIs reject anything else, and a name with a space silently disables the briefing and the report
   check. Then the **Worker contract** and **Worker spec phase** from this file copied in (a worker cannot read this command; keep the
   copy even though the hooks also brief it), plus the batch's rows, owned files, a unique test-data id prefix
-  and the resolved absolute `$FOREMAN` path. Keep a short state table (columns in the sub-bullet below)
-  instead of re-reading reports. Before launching, check that each `reviewers` entry's CLI is on PATH
+  and the resolved absolute `$FOREMAN` path. Keep batch state on disk with `batches.py`, not in your context
+  (**Batch state** below). Before launching, check that each `reviewers` entry's CLI is on PATH
   (`command -v`) and that the `permissions.allow` entries listed in the Hooks section of
   `${CLAUDE_PLUGIN_ROOT}/README.md` are in `~/.claude/settings.json`, `.claude/settings.json` or
   `.claude/settings.local.json`. A missing CLI is the only reviewer problem to tell workers about, because the
   chain already falls through on quota, credits, auth and unknown models. Missing permission entries are for the
   user, not the workers: warn the user, because a background worker that hits a permission prompt it can't show
-  is denied and stalls.
+  is denied and stalls. Also warn when one of those three settings files has a `PreToolUse` Bash hook that runs
+  `rtk hook` directly (`grep -n 'rtk hook' ~/.claude/settings.json .claude/settings.json .claude/settings.local.json`
+  prints it): RTK rewrites a worker's `git` to `rtk git`, which the worktree guard refuses, so the worker can't
+  commit. Then point the user at README's **RTK** recipe: a wrapper that leaves `git` alone in a worktree is fine.
   - **Spec phase.** Every batch starts with the spec phase (Worker contract step 2). The tag's ` spec-phase` suffix
     (W3 above) opts the batch into the hooks' spec gate (no code before release) and their spec-phase report check.
     The prompt also carries the absolute path `${CLAUDE_PLUGIN_ROOT}/templates/spec.md`, the resolved
     `{{design_spec_dir}}`, and the line "Your batch starts with the spec phase: write and commit the spec, report
     `SPEC READY`, and wait for the release." Workers launch together; each batch then moves through spec, review
     and build on its own.
-  - **State table** columns: batch, rows, owned files, worktree, branch, spec path, fork base, round, pinned SHA,
-    released SHA, PR, verified SHA, the clock's timestamps and timer task ids (W3.5), and status (`spec`,
-    `review <r>`, `passed`, `parked: <reason>`, `released`, `PR #<n>`).
+  - **Batch state** is one file per batch, written only with `python3 $FOREMAN/batches.py` (the hooks deny a
+    worker's call). The status band, the checkpoint and report tables and the hooks' gates read these files, so
+    record each step as it happens. Every argument is one plain word; free text (Minor findings, open questions,
+    a park note) goes in a scratch file passed to `note`. A refused call (exit 1) names the problem: fix the
+    command and run it again, and never drop a state change. `batches.py show <batch>` prints the record with
+    its live task ids and its remaining spec-phase time.
+    - At launch, for each batch: `set <batch> status=spec rows=<id,…> owned=<file,…>`, then
+      `task <batch> add worker fw-<batch>` and `stamp <batch> sent`, then start its timer (W3.5's clock) and
+      `task <batch> add timer <id>`.
+    - `worktree`, `branch`, `spec`, `sha` and `fork_base` are set at the batch's first `SPEC READY`, which
+      carries them, never at launch. A park before it finds the worktree with `git worktree list` (the one on
+      the branch the worker created), or copies nothing.
+    - TaskStop takes only an id `batches.py` recorded: a worker's `fw-<batch>`, an unnamed reviewer's agent id
+      from its Agent result, a background Bash task's id; never a batch name. The hooks deny a TaskStop without
+      an id, with a batch name, or for a worker before `hooks.py stopping <batch>`.
+    - Before the first timer, load the deferred tools with ToolSearch `select:TaskStop,Monitor`.
 - **W3.5 Spec review**, for each batch on its own as its `SPEC READY` arrives (other batches keep moving).
   `SPEC READY` is the first line of the worker's last message that starts with `SPEC READY ` (a preface line
   before it is fine): `SPEC READY <worktree> <branch> <spec path> <sha>`. Read it from the right: the SHA is the
@@ -473,7 +492,9 @@ You are in it when your prompt's first line ends in ` spec-phase`.
 4. Write the spec from the template (its absolute path is in your prompt) to
    `{{design_spec_dir}}/<YYYY-MM-DD>-<row ids joined by ->-design.md`. Replace every `⟦FILL: …⟧` marker; a
    section with nothing in it reads "None — <reason>". A file outside your owned files goes in the outline as a
-   `- **Scope request:**` line. If `{{design_spec_dir}}` already holds a parked spec for these rows
+   `- **Scope request:**` line. Label every open question `- **Blocking:**` (the batch can't be built as
+   specified without the answer) or `- **Non-blocking:**`; on a Blocking one, finish the spec and report
+   `SPEC READY` at once (step 5). If `{{design_spec_dir}}` already holds a parked spec for these rows
    (`Status: parked`), start from it: delete its `Status: parked` line and its old Review responses, then revise
    it. Commit it with `git add -- <spec path> && git commit -m "<message>"` in a call of its own, never `git add -A`,
    as your branch's first commit. Don't push. The build phase continues on this same branch.

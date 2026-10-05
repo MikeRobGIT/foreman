@@ -613,6 +613,25 @@ check "spec template: Open questions names the Blocking label" grep -qF -- '`- *
 check "spec template: ...the Non-blocking label" grep -qF -- '`- **Non-blocking:**`' "$root/templates/spec.md"
 check "spec template: ...and None — <reason>" grep -qF -- '"None — <reason>"' "$root/templates/spec.md"
 
+echo "## SKILL.md 0.5.1: W2, W3, Worker spec phase"
+sk=$root/skills/foreman/SKILL.md
+while IFS= read -r s; do check "SKILL.md has: $s" grep -qF -- "$s" "$sk"; done <<'EOF'
+Admit rows that seem to need a human
+decision: the spec phase parks them `open question` if they do.
+`spec parked (open question)`
+`spec parked (not released by the human)`
+`spec parked (stopped by the human)`
+`spec parked (comment round failed)`
+named `fw-<batch>`, never the bare batch name
+`set <batch> status=spec rows=<id,…> owned=<file,…>`
+`task <batch> add worker fw-<batch>`
+ToolSearch `select:TaskStop,Monitor`
+TaskStop takes only an id `batches.py` recorded
+Label every open question `- **Blocking:**` (the batch can't be built as
+EOF
+check "W2 no longer filters rows that need a human decision" bash -c "! grep -qF 'need a human decision, or are named' '$sk'"
+check "W3 keeps no state table in context" bash -c "! grep -qF 'Keep a short state table' '$sk'"
+check "P2 (wrapper): W3 points at README's RTK recipe" grep -qF "point the user at README's **RTK** recipe" "$sk"
 echo "## backlog.py + ui.py"
 check "test_backlog.py" python3 "$root/tests/test_backlog.py"
 check "test_ui_api.py" python3 "$root/tests/test_ui_api.py"
