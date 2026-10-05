@@ -702,6 +702,11 @@ check "W4.2b owned files come from show --json" grep -qF '(`owned` in `batches.p
 check "W4.4 marks the replaced worker done" grep -qF '`python3 $FOREMAN/batches.py task <batch> done <old id>`' "$sk"
 check "W4.6 ignores a TaskStop error for an ended worker" grep -qF 'is ignored, and the task is still marked done).' "$sk"
 check "P3 (next-message): the checkpoint paste is a message of its own" grep -qF 'in a message of its own, make one more call' "$sk"
+check "L1: a table not yet in the transcript is denied, never added to the question" grep -qF 'denied too, never added to the question for you' "$sk"
+check "L1: the hook never rewrites an AskUserQuestion call" bash -c "! grep -q 'updatedInput' '$root/scripts/hooks.py'"
+check "L2: an answered question leaves Open questions for Review responses (label line)" grep -qF 'leaves `## Open questions` and is recorded under **Review responses**; if' "$sk"
+check "L2: ...and the section reads None — <reason> (step 7)" grep -qF 'are left, the section reads `None — <reason>`.' "$sk"
+check "L2: the spec template says an answered question moves to Review responses" grep -qF 'a question that is answered moves to Review responses' "$root/templates/spec.md"
 check "P3 (next-message): one more call before run-end" grep -qF 'then one more call (`python3 $FOREMAN/batches.py show`), then `run-end`' "$sk"
 
 echo "## README 0.5.1"

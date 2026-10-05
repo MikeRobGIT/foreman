@@ -186,8 +186,9 @@ W1-W6 to keep them apart from steps 0-12; W6's stop conditions replace the auton
      after 2 bounces"). A bounce sends the problems in one `SendMessage` and returns the worker to work, with
      `bump <batch> bounces`, `stamp <batch> sent` and a new timer (`task <batch> add timer <id>`).
      - **Open questions are labelled.** Every bullet under `## Open questions` starts `- **Blocking:**` or
-       `- **Non-blocking:**`, or the section reads `None — …`; anything else is a bounce. Run this in the
-       worktree; any output is a bounce:
+       `- **Non-blocking:**`, or the section reads `None — …`; anything else is a bounce. A question that is answered
+       (by a review or a comment round) leaves `## Open questions` and is recorded under **Review responses**; if
+       none are left, the section reads `None — <reason>`. Run this in the worktree; any output is a bounce:
        `awk '/^## Open questions$/{f=1;next} /^## /{f=0} f && NF && !/^- \*\*(Blocking|Non-blocking):\*\* / && !/^None — / && !/^  /' <spec path>`
      - **A Blocking question parks the batch now** (`reason=open-question`), before any round, at any
        `SPEC READY`.
@@ -329,8 +330,9 @@ W1-W6 to keep them apart from steps 0-12; W6's stop conditions replace the auton
     Run `python3 $FOREMAN/batches.py table checkpoint <wave>` (`<wave>` is a batch name minus its final letter),
     paste its whole output as text in a message of its own, make one more call (`python3 $FOREMAN/batches.py
     show`), then ask: the hooks read your text from the transcript, which holds a message only once the next
-    call starts. The hooks refuse every question at the checkpoint
-    until the current table is in your text; a tool result doesn't count, because the human doesn't see it.
+    call starts. The hooks deny every question at the checkpoint until the current table is in your text; a
+    tool result doesn't count, because the human doesn't see it, and a table that is not yet in the transcript is
+    denied too, never added to the question for you.
     Choose the form per question:
     - A question that covers one batch is single-select: Release, Comment, Park (Release and Park at the
       follow-up checkpoint). A multi-select question with one option is invalid.
@@ -584,7 +586,9 @@ You are in it when your prompt's first line ends in ` spec-phase`.
 6. If you stop without `SPEC READY` (a question, a context limit, an error), the orchestrator resumes you once:
    finish the spec, put questions under Open questions, and end with `SPEC READY` as the first line.
 7. On findings: revise the spec as a new commit (never an amend), answer every finding under **Review
-   responses** (fixed, or declined with the reason), and report `SPEC READY` again.
+   responses** (fixed, or declined with the reason), and report `SPEC READY` again. A question that is answered
+   (by a review or a comment round) leaves `## Open questions` and is recorded under **Review responses**; if none
+   are left, the section reads `None — <reason>`.
 8. On release ("Spec approved at `<sha>` …"): build it, the Worker contract's steps 3-8, on this same branch.
    The spec body is frozen at release: a change after it goes only in an appended `## Deviations after release`
    section, one entry per deviation with its reason, and in the PR body. The PR's first commit is the spec. Answer
@@ -609,7 +613,7 @@ hours.
 | `worker_briefing`, `report_check` | tagged workers | a subagent whose prompt starts `foreman-worker: <batch>` is briefed with the Worker contract, and its final report's `json` block is checked once |
 | `script_allow` | run | foreman's own scripts run without a permission prompt, in strict shapes only |
 | `spec_gate` | run, `spec-phase` workers | edits and commits stay in `design_spec_dir` until `hooks.py release <batch> <sha>` |
-| `batch_state` | run, orchestrator | a worker's `batches.py` call is denied; at the checkpoint every question needs the current `batches.py table checkpoint` in your text; `run-end` needs `batches.py table report` in your text; TaskStop needs a recorded id, never a batch name, and a worker only after `stopping`; `hooks.py release` needs a passed batch at its reviewed SHA and, in a manual run, the checkpoint table pasted after the pass |
+| `batch_state` | run, orchestrator | a worker's `batches.py` call is denied; at the checkpoint every question is denied until the current `batches.py table checkpoint` is in your text, in a message of its own; `run-end` needs `batches.py table report` in your text; TaskStop needs a recorded id, never a batch name, and a worker only after `stopping`; `hooks.py release` needs a passed batch at its reviewed SHA and, in a manual run, the checkpoint table pasted after the pass |
 | `status_pane` | run | the wave status band above the prompt: one line per batch from the batch files |
 
 Orchestrator-only CLIs (a worker's call is denied): `python3 $FOREMAN/hooks.py release <batch> <sha>` (exit 3 means
