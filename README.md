@@ -47,8 +47,11 @@ In `parallel N`, every batch starts with a spec, not code:
 - **The release.** `--auto-merge` releases a passed spec at once. A manual run holds passed specs for one
   checkpoint per wave and notifies you when it is ready.
 - **Parking.** A batch that can't pass within `spec_review_rounds` rounds, or within `spec_phase_timeout`
-  minutes of worker time, is parked. Its spec is committed with a `Status: parked` line, and its rows get a
-  note.
+  minutes of worker time, is parked, and so is one whose spec has a `Blocking` open question or whose worker you
+  stopped. Its spec is committed with a `Status: parked` line, and its rows get a note.
+- **The tables.** Batch state lives on disk (`scripts/batches.py`), not in the orchestrator's context. The
+  checkpoint table and the run report's spec-phase table are printed from it, and with the hooks enabled the
+  checkpoint question and `run-end` wait until the table is in the orchestrator's text.
 
 With the hooks enabled (0.4.0), a worker can't edit or commit code before its spec is released. The spec stays
 frozen after release; any change goes in a `## Deviations after release` section, which a reviewer rules on
@@ -92,9 +95,10 @@ and it expires after 48 hours.
 | `backlog_check` | foreman repo | after an Edit/Write of the backlog, problem rows (wrong `\|` count, duplicate ids) are reported back |
 | `worker_briefing` | tagged workers | a subagent whose prompt starts `foreman-worker: <batch>` gets the Worker contract, rendered |
 | `report_check` | tagged workers | a tagged worker's final report must end with a valid `json` block that `bk.py --dry-run` accepts; it is sent back once |
-| `script_allow` | run | `gate-lock.sh`, `wt-setup.sh`, `review.sh`, `bk.py` and `hooks.py` run without a permission prompt, in strict shapes only |
+| `script_allow` | run | `gate-lock.sh`, `wt-setup.sh`, `review.sh`, `bk.py`, `hooks.py` and `batches.py` (main session only) run without a permission prompt, in strict shapes only |
 | `spec_gate` | run, `spec-phase` workers | edits and commits stay in `design_spec_dir`, and nothing is pushed, until the orchestrator runs `hooks.py release <batch> <sha>` |
-| `status_pane` | run | a band above the prompt: one line per worker worktree with its PR, state, head SHA, CI, bots, unresolved threads and merge state |
+| `batch_state` | run, orchestrator | a worker's `batches.py` call is denied; at the spec checkpoint every question waits for the current `batches.py table checkpoint` in the orchestrator's text, and `run-end` for `batches.py table report` (the third try against one unchanged table goes through); TaskStop needs a recorded task id, never a batch name, and stops a worker only after `hooks.py stopping`; `hooks.py release` needs a passed batch at its reviewed SHA and, in a manual run, the checkpoint table pasted after the pass |
+| `status_pane` | run | a band above the prompt: one line per batch (its status with the round or PR, and for a PR its CI, bots, unresolved threads and merge state); without batch files, one line per worker worktree |
 
 Turn pieces off per repo with `hooks_disabled: [<id>, …]` in the config. Your own `! <command>` is never checked:
 it's the override. The status band is a mod: like every mod it runs in-process and unsandboxed. It only reads (git,
@@ -111,10 +115,32 @@ and stalls. `script_allow` covers foreman's own scripts; add the rest of the wor
       "Bash(sleep:*)", "Bash(date +%s)", "Bash(kill -TERM:*)",
       "Bash(git add:*)", "Bash(git commit:*)", "Bash(git fetch:*)", "Bash(git merge:*)", "Bash(git push:*)", "Bash(git switch:*)", "Bash(git worktree:*)",
       "Bash(gh pr create:*)", "Bash(gh pr view:*)", "Bash(gh pr checks:*)", "Bash(gh pr comment:*)", "Bash(gh pr edit:*)", "Bash(gh api:*)",
-      "Bash(node --check:*)"
+      "Bash(node --check:*)",
+      "Bash(python3 /path/to/foreman/scripts/batches.py:*)"
     ]
   }
 }
+```
+
+Replace `/path/to/foreman` with the plugin's install path (the absolute path `/foreman` writes for `$FOREMAN`, minus
+`/scripts`). `script_allow` already lets the orchestrator's `batches.py` calls through while a run is live; the entry
+covers a call made with the hooks off.
+
+**RTK.** An RTK Bash hook (`rtk hook claude` in a `PreToolUse` entry) rewrites `git …` to `rtk git …`, and Claude
+Code's worktree guard refuses that in a worktree-isolated worker, so the worker can't commit. Run RTK through a
+wrapper that leaves `git` alone inside a worktree, and point the settings hook's `command` at it in place of
+`rtk hook claude`; `/foreman parallel` then stops warning about it:
+
+```bash
+#!/usr/bin/env bash
+# ~/.claude/hooks/rtk-unless-worktree-git: rtk's Bash hook, except git inside a Claude worktree
+input=$(cat)
+cwd=$(jq -r '.cwd // empty' <<<"$input")
+cmd=$(jq -r '.tool_input.command // empty' <<<"$input")
+case "$cwd" in
+  */.claude/worktrees/*) grep -qE '(^|[;&|( ])git( |$)' <<<"$cmd" && exit 0 ;;
+esac
+exec rtk hook claude <<<"$input"
 ```
 
 **Limits.**
@@ -215,6 +241,7 @@ spec mode (`FOREMAN_REVIEW_MODE=spec`; `_lib.sh` makes the others fall through).
 | `scripts/cfg.py <repo> <key> [default]` | read a config key (no PyYAML needed) |
 | `scripts/hooks.py <event>` | the hooks' dispatcher; orchestrator CLIs `run-end` (always exits 0), `release <batch> <sha>`, `stopping <batch>`, `forget <batch>` (these three exit 3 when the hooks are inactive) |
 | `scripts/state.py <path>` | print the repo's state dir (`~/.claude/foreman/<repo-key>`, or under `$FOREMAN_HOME`) |
+| `scripts/batches.py <command> …` | the parallel spec phase's batch state (`set`, `note`, `bump`, `stamp`, `task`, `add-round`, `show`) and its two tables (`table checkpoint <wave>`, `table report`); orchestrator only |
 
 ## Tests
 

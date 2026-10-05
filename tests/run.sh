@@ -595,7 +595,8 @@ check "the Worker contract points at the spec phase" appears_before "$sk" '### W
 check "...before the Worker spec phase section" appears_before "$sk" '**Step 2 is the spec phase**' '### Worker spec phase'
 check "...which ends before the Hooks section" appears_before "$sk" '### Worker spec phase' '## Hooks'
 check "...and the Hooks section comes before the Backlog UI section" appears_before "$sk" '## Hooks' '## Backlog UI'
-check "plugin version 0.5.0" grep -qF '"version": "0.5.0"' "$root/.claude-plugin/plugin.json"
+check "plugin version 0.5.1" grep -qF '"version": "0.5.1"' "$root/.claude-plugin/plugin.json"
+check "marketplace version 0.5.1" test "$(python3 -c "import json,sys; print(json.load(open(sys.argv[1]))['plugins'][0]['version'])" "$root/.claude-plugin/marketplace.json")" = 0.5.1
 
 echo "## review.sh .entry and cfg.chain(use_env=False)"
 cd "$R"
@@ -697,6 +698,16 @@ check "W4.6 ignores a TaskStop error for an ended worker" grep -qF 'is ignored, 
 check "P3 (next-message): the checkpoint paste is a message of its own" grep -qF 'in a message of its own, make one more call' "$sk"
 check "P3 (next-message): one more call before run-end" grep -qF 'then one more call (`python3 $FOREMAN/batches.py show`), then `run-end`' "$sk"
 
+echo "## README 0.5.1"
+rd=$root/README.md
+while IFS= read -r s; do check "README has: $s" grep -qF -- "$s" "$rd"; done <<'EOF'
+| `batch_state` | run, orchestrator |
+"Bash(python3 /path/to/foreman/scripts/batches.py:*)"
+| `scripts/batches.py <command> …` |
+**The tables.** Batch state lives on disk
+`bk.py`, `hooks.py` and `batches.py` (main session only) run without a permission prompt
+EOF
+check "P2 (wrapper): README has the RTK recipe" grep -qF 'exec rtk hook claude <<<"$input"' "$rd"
 echo "## backlog.py + ui.py"
 check "test_backlog.py" python3 "$root/tests/test_backlog.py"
 check "test_ui_api.py" python3 "$root/tests/test_ui_api.py"
