@@ -1599,6 +1599,72 @@ def checkpoint_gate(h, ti):
         h.updated = dict(ti, questions=[first] + questions[1:])
 
 
+def report_gate(h, sc):
+    """Duty 3: `run-end` needs the run's spec-phase report pasted in the assistant's text, when the run has batches."""
+    repo = repo_at(h.cwd)
+    if not h.active(repo, 'batch_state'):
+        return
+    store = batch_store(repo, h)
+    bs = store.batches()
+    if not bs:
+        return
+    h.touch.add(repo)
+    text, tid = batches.render_report(store, bs)
+    why = table_problem(h, store, 'report.shown', text, f'python3 {HERE}/batches.py table report',
+                        'in the run report first')
+    if why and not escaped(repo, store, 'report.denies', tid):
+        h.deny(why + WAY_OUT)
+
+
+def manual_run(repo, h):
+    m = marker(repo, h.sid)
+    words = str((m[1] if m else {}).get('args') or '').split()
+    return not {'--auto-merge', 'loop'} & set(words)
+
+
+def checkpoint_shown(h, store, b):
+    """True when a checkpoint stamp written after the batch's latest pass lists it as passed, and was pasted."""
+    shown = store.read(batches.wave_of(b['batch']) + '.shown')
+    passes = [t for k, t in b.get('stamps') or [] if k == 'passed']
+    if not isinstance(shown, dict) or not passes or float(shown.get('at', 0)) <= passes[-1]:
+        return False
+    row = re.compile(r'\|\s*' + re.escape(b['batch']) + r'\s*\|.*\|\s*passed\s*\|')
+    if not any(row.fullmatch(line.strip()) for line in str(shown.get('text', '')).splitlines()):
+        return False
+    try:
+        return pasted(shown['text'], h.inp.get('transcript_path'), float(shown['at']))
+    except OSError as e:
+        print(f'foreman: batch_state could not read the transcript ({e}), so the table check is skipped', file=sys.stderr)
+        return True
+
+
+def spec_worker(repo, sid, batch):
+    """True when the agent map holds a spec-phase worker of `batch` in this session."""
+    return any(isinstance(e, dict) and e.get('batch') == batch and e.get('spec')
+               for d in repo.dirs for e in map(state.read_json, ls(os.path.join(d, 'batches', sid, 'agents'), '*')))
+
+
+def release_check(h, repo, batch, sha):
+    """Duty 5: `hooks.py release` records nothing unless the batch passed at this SHA and, in a manual run, its
+    checkpoint table was pasted after the pass."""
+    if not h.active(repo, 'batch_state'):
+        return
+    h.touch.add(repo)
+    store = batch_store(repo, h)
+    b = store.read(batch + '.json')
+    if b is None:
+        if spec_worker(repo, h.sid, batch):
+            h.deny(f'record the batch with `python3 {HERE}/batches.py set {batch} …` first' + WAY_OUT)
+        return
+    if b.get('status') != 'passed' or not batches.same_sha(b.get('reviewed_sha'), sha):
+        h.deny(f"release only a passed batch at its reviewed SHA {b.get('reviewed_sha') or '(none)'}; a spec that "
+               'changed after review needs a new round' + WAY_OUT)
+    elif manual_run(repo, h) and not checkpoint_shown(h, store, b):
+        h.deny('show the checkpoint table first: run '
+               f'`python3 {HERE}/batches.py table checkpoint {batches.wave_of(batch)}` and paste its output as text'
+               + WAY_OUT)
+
+
 # ---- pretool / posttool ---------------------------------------------------------------------------
 
 def run_piece(piece, *args):
@@ -1658,10 +1724,18 @@ def pretool_bash(h, command):
                 h.deny('only the orchestrator writes batch state — a worker never runs batches.py')
                 return
             h.touch.add(repo)   # the newest live marker is batches.py's session fallback
+    if not h.agent and ends_run(sc):
+        run_piece(report_gate, h, sc)
+        if h.denies:
+            return
     call = control_call(command)
     if call and not h.agent:   # a subagent's call is never recorded, whatever the deny above saw
         repo = repo_at(h.cwd)
         if repo:
+            if call[0] == 'release':
+                run_piece(release_check, h, repo, *call[1])
+                if h.denies:   # nothing is recorded
+                    return
             pretool_control(h, repo, *call)
         return
     for k in sorted(BASH_PIECES):

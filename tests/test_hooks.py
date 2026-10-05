@@ -2411,6 +2411,9 @@ class ScriptAllowGateTextTest(ScriptAllowBase):
 
 
 class SpecGateTest(Case):
+    # piece 11 would refuse these bare `hooks.py release` calls (no batch state); this class tests piece 10 alone
+    config = CONFIG.replace('---\n', '---\nhooks_disabled: [batch_state]\n', 1)
+
     def setUp(self):
         super().setUp()
         self.fx.start_run()
@@ -3069,6 +3072,88 @@ class TranscriptTailTest(InProcess):
         start = time.time()
         self.assertEqual(hooks.assistant_lines(path, time.time() - 60), {'|t|'})
         self.assertLess(time.time() - start, 0.5)
+
+
+class BatchStateReportTest(BatchStateCase):
+    """Duty 3: the report gate on run-end."""
+
+    def test_run_end_needs_the_report_in_the_assistants_text(self):
+        self.batches('set', self.b1, 'status=parked', 'reason=timed-out')
+        forms = (f'python3 {HOOKS} run-end', f'python3 {HOOKS} run-end 2>&1', f'cd {SCRIPTS} && python3 ./hooks.py run-end')
+        denies = os.path.join(self.fx.state, 'batches', 'S1', 'state', 'report.denies')
+        for command in forms:
+            why = self.bash(command)
+            self.assertIn(f'run `python3 {SCRIPTS}/batches.py table report`', why or '', command)
+            self.assertIn('hooks_disabled: [batch_state]', why)
+            os.remove(denies)   # each form gets its own two denies before the escape
+        self.assertIsNotNone(self.fx.marker())
+        report = self.batches('table', 'report')
+        self.assertIn('parked: spec phase timed out', report)
+        self.say(report)
+        self.say('Run complete.')                                       # an earlier message's paste counts too
+        for command in forms:
+            self.assertIsNone(self.bash(command), command)
+
+    def test_run_end_with_no_batch_files_passes(self):
+        self.run_marker(sid='S2')
+        self.assertIsNone(self.bash(f'python3 {HOOKS} run-end', sid='S2'))
+
+    def test_the_third_run_end_against_one_report_passes(self):
+        self.batches('set', self.b1, 'status=spec')
+        self.assertIsNotNone(self.bash(f'python3 {HOOKS} run-end'))
+        self.assertIsNotNone(self.bash(f'python3 {HOOKS} run-end'))
+        why, err = self.call('Bash', {'command': f'python3 {HOOKS} run-end'})
+        self.assertIsNone(why)
+        self.assertIn('after 2 denies', err)
+
+
+class BatchStateReleaseTest(BatchStateCase):
+    """Duty 5: the release check on hooks.py release."""
+
+    def test_auto_merge_releases_only_a_passed_batch_at_its_reviewed_sha(self):
+        self.run_marker('parallel 2 --auto-merge')
+        self.batches('set', self.b1, 'status=review')
+        self.assertIn('release only a passed batch', self.release(self.b1))
+        self.passed(self.b1)
+        self.assertIn(f'at its reviewed SHA {self.SHA}', self.release(self.b1, 'd' * 40))
+        self.batches('stamp', self.b1, 'comment_sent')
+        self.assertIn('reviewed SHA (none)', self.release(self.b1))
+        self.assertFalse(self.released(self.b1))
+        self.passed(self.b1)
+        self.assertIsNone(self.release(self.b1, self.SHA[:12]))       # an abbreviation of the reviewed SHA
+        self.assertTrue(self.released(self.b1))
+
+    def test_a_manual_release_needs_the_checkpoint_pasted_after_the_pass(self):
+        self.passed(self.b1)
+        self.assertIn('show the checkpoint table first', self.release(self.b1))
+        table = self.batches('table', 'checkpoint', self.wave)
+        self.assertIn('show the checkpoint table first', self.release(self.b1))   # shown, not pasted
+        self.say(table)
+        self.assertIsNone(self.release(self.b1))
+        self.assertTrue(self.released(self.b1))
+
+    def test_a_mixed_wave_is_gated_again_after_a_comment_round(self):
+        self.passed(self.b1)
+        self.passed(self.b2)
+        self.say(self.batches('table', 'checkpoint', self.wave))
+        self.assertIsNone(self.release(self.b1))   # recorded by hooks.py; `set status=released` skipped on purpose
+        self.batches('stamp', self.b2, 'comment_sent')
+        self.batches('add-round', self.b2, 'r=2', 'sha=' + 'd' * 40, 'entry=0', 'explore=pass', 'crit=0', 'imp=0',
+                     'minor=0')
+        self.passed(self.b2, 'd' * 40)
+        self.assertIn('the table changed', self.ask())
+        self.assertIn('show the checkpoint table first', self.release(self.b2, 'd' * 40))
+        self.say(self.batches('table', 'checkpoint', self.wave))
+        self.assertIsNone(self.ask())
+        self.assertIsNone(self.release(self.b2, 'd' * 40))
+
+    def test_a_release_without_state_is_denied_only_for_a_spec_phase_worker(self):
+        self.assertIsNone(self.release(self.b2))
+        self.assertTrue(self.released(self.b2))
+        state.write_json(os.path.join(self.fx.state, 'batches', 'S1', 'agents', 'a1'),
+                         {'batch': self.b1, 'spec': True, 'briefed': True, 'time': time.time()})
+        self.assertIn(f'record the batch with `python3 {SCRIPTS}/batches.py set {self.b1}', self.release(self.b1))
+        self.assertFalse(self.released(self.b1))
 
 
 if __name__ == '__main__':
