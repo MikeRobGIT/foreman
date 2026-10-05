@@ -3352,12 +3352,25 @@ class ContinuationTest(BatchStateCase):
     def test_a_fork_or_resume_adopts_the_run_and_exports_its_id(self):
         self.continued()
         for source in ('fork', 'resume'):
-            self.assertEqual(self.session_start(source=source), 'export FOREMAN_SESSION=S1\n', source)
+            self.assertEqual(self.session_start(source=source), 'export FOREMAN_SESSION=S2\n', source)
             alias = state.read_json(self.runs_file('S2'))
             self.assertEqual(alias['alias'], 'S1')
             self.assertLess(time.time() - alias['touched'], 60)
             self.assertEqual(set(alias), {'alias', 'touched'})
         self.assertEqual(self.fx.marker()['started'], self.t0)   # the run's own marker is untouched in shape
+
+    def test_a_second_run_in_the_continued_session_keeps_batches_py_and_the_hooks_together(self):
+        self.continued()
+        exported = self.session_start().split('=')[1].strip()
+        self.fx.hook('posttool', self.fx.payload('Bash', {'command': f'python3 {HOOKS} run-end'}, sid='S2',
+                                                 event='PostToolUse'))
+        self.fx.start_run('S2')   # a second /foreman in the same session: the alias is gone, the run is S2's own
+        b = name_at(time.time(), 'w1a')
+        p = subprocess.run([sys.executable, os.path.join(SCRIPTS, 'batches.py'), 'set', b, 'status=spec'],
+                           capture_output=True, text=True, env=dict(self.fx.env, FOREMAN_SESSION=exported),
+                           cwd=self.fx.work)
+        self.assertEqual(p.returncode, 0, p.stderr)
+        self.assertEqual([x['batch'] for x in json.loads(self.batches('show', '--json', sid='S2'))], [b])
 
     def test_the_continued_session_keeps_the_run_only_hooks(self):
         self.continued()
@@ -3401,7 +3414,7 @@ class ContinuationTest(BatchStateCase):
         self.session_start()
         self.continued(new='S3', old='S2')
         write(os.path.join(self.proj, 'S3.jsonl'), '')
-        self.assertEqual(self.session_start(sid='S3'), 'export FOREMAN_SESSION=S1\n')
+        self.assertEqual(self.session_start(sid='S3'), 'export FOREMAN_SESSION=S3\n')
         self.assertEqual(state.read_json(self.runs_file('S3'))['alias'], 'S1')   # the run, never the alias S2
         self.assertIn('only the orchestrator writes batch state', self.worker_call(sid='S3') or '')
 
@@ -3418,8 +3431,10 @@ class ContinuationTest(BatchStateCase):
         state.write_json(self.runs_file('S8'), ['not', 'a', 'marker'])
         self.continued(new='S3')
         self.assertEqual(self.session_start(), 'export FOREMAN_SESSION=S2\n')   # every runs file is read
+        self.assertFalse(os.path.exists(self.runs_file('S2')))
         self.continued()
-        self.assertEqual(self.session_start(source='resume'), 'export FOREMAN_SESSION=S1\n')
+        self.assertEqual(self.session_start(source='resume'), 'export FOREMAN_SESSION=S2\n')
+        self.assertEqual(state.read_json(self.runs_file('S2'))['alias'], 'S1')
 
     def test_clear_in_a_true_fork_leaves_the_live_original_its_run(self):
         self.continued()            # adopt's own path: the record it needs, then SessionStart fork; S1 still runs

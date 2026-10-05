@@ -379,12 +379,14 @@ def session_end(h):
 def session_start(h):
     """Export this session's run id to every later Bash call (probe P1): append `export FOREMAN_SESSION=<id>` to
     $CLAUDE_ENV_FILE, which batches.py reads. Nothing is written when the harness sets no env file. A session that
-    continues another under a new id (`source` fork or resume) first adopts that session's run (L5), and exports
-    the run's id, so batches.py keeps writing the run's state."""
+    continues another under a new id (`source` fork or resume) first adopts that session's run (L5). It still exports
+    its own id: batches.py resolves it through the alias while the run lasts, and a later run started in this session
+    lives under this id once the alias is gone."""
     sid = h.sid
     if h.inp.get('source') in ('fork', 'resume'):
         repo = repo_at(h.cwd)
-        sid = h.run_sid(repo) if repo else sid
+        if repo:
+            h.run_sid(repo)
     path = os.environ.get('CLAUDE_ENV_FILE')
     if path and BATCH.match(sid):
         with open(path, 'a+', encoding='utf-8') as f:
