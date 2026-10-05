@@ -81,7 +81,8 @@ class Fx:
                         PATH=bin_dir + os.pathsep + os.environ['PATH'],
                         FAKE_GH_LOG=os.path.join(self.tmp, 'gh.log'), FAKE_GH_PR=os.path.join(self.tmp, 'pr.json'),
                         GIT_AUTHOR_NAME='t', GIT_AUTHOR_EMAIL='t@e', GIT_COMMITTER_NAME='t', GIT_COMMITTER_EMAIL='t@e')
-        self.env.pop('FOREMAN_CONFIG', None)
+        for k in ('FOREMAN_CONFIG', 'FOREMAN_SESSION', 'CLAUDE_ENV_FILE'):   # never the running session's
+            self.env.pop(k, None)
         os.makedirs(self.env['HOME'])
 
     def close(self):
@@ -2800,6 +2801,138 @@ class HookLogTest(Case):
         self.assertEqual(len(lines), 1)
         self.assertEqual((lines[0]['event'], lines[0]['agent_id']), ('pretool', 'a1'))
         self.assertIn('no rebase', lines[0]['out']['hookSpecificOutput']['permissionDecisionReason'])
+
+
+def iso(t):
+    return time.strftime('%Y-%m-%dT%H:%M:%S', time.gmtime(t)) + '.000Z'
+
+
+def name_at(t, suffix):
+    return time.strftime('%Y%m%d-%H%M', time.localtime(t)) + '-' + suffix
+
+
+class BatchStateCase(Case):
+    """Piece 11 through main(): batch files written by scripts/batches.py, hook JSON in, decisions out. The run
+    started an hour ago, so the batch names, dated after it, are in its scope."""
+    SHA = 'c' * 40
+
+    def setUp(self):
+        super().setUp()
+        self.t0 = time.time() - 3600
+        self.b1, self.b2 = name_at(self.t0 + 120, 'w1a'), name_at(self.t0 + 120, 'w1b')
+        self.wave = self.b1[:-1]
+        self.run_marker()
+        self.main = os.path.join(self.fx.tmp, 'main.jsonl')
+        write(self.main, json.dumps({'type': 'user', 'timestamp': iso(self.t0), 'message': {'content': '/foreman'}}) + '\n')
+
+    def run_marker(self, args='', sid='S1'):
+        state.write_json(os.path.join(self.fx.state, 'runs', sid + '.json'),
+                         {'started': self.t0, 'touched': time.time(), 'args': args})
+
+    def batches(self, *args, sid='S1'):
+        p = subprocess.run([sys.executable, os.path.join(SCRIPTS, 'batches.py'), *args, '--session', sid],
+                           capture_output=True, text=True, env=self.fx.env, cwd=self.fx.work)
+        self.assertEqual(p.returncode, 0, p.stderr)
+        return p.stdout
+
+    def passed(self, b, sha=None):
+        self.batches('set', b, 'status=passed', 'reviewed_sha=' + (sha or self.SHA))
+
+    def entry(self, kind, content):
+        with open(self.main, 'a') as f:
+            f.write(json.dumps({'type': kind, 'timestamp': iso(time.time()), 'message': {'content': content}}) + '\n')
+
+    def say(self, text):
+        self.entry('assistant', [{'type': 'text', 'text': text}])
+
+    def tool_result(self, text):
+        self.entry('user', [{'type': 'tool_result', 'tool_use_id': 't1', 'content': text}])
+
+    def call(self, tool, tool_input, sid='S1', agent=None):
+        d = self.fx.payload(tool, tool_input, sid=sid, agent=agent)
+        d['transcript_path'] = self.main
+        out, err = self.fx.hook('pretool', d)
+        why = out['hookSpecificOutput'].get('permissionDecisionReason') if out else None
+        return why, err
+
+    def ask(self, question='Release which batches?', **kw):
+        return self.call('AskUserQuestion', {'questions': [{'question': question, 'header': 'Release',
+                                                             'multiSelect': True, 'options': []}]}, **kw)[0]
+
+    def bash(self, command, **kw):
+        return self.call('Bash', {'command': command}, **kw)[0]
+
+    def stop(self, **tool_input):
+        return self.call('TaskStop', tool_input)[0]
+
+    def released(self, b):
+        return os.path.exists(os.path.join(self.fx.state, 'batches', 'S1', b + '.released'))
+
+    def release(self, b, sha=None):
+        return self.bash(f'python3 {HOOKS} release {b} {sha or self.SHA}')
+
+
+class BatchStateWorkerTest(BatchStateCase):
+    """Duty 1 (a worker never runs batches.py), the main session's marker touch, piece 8 and prune."""
+
+    def test_a_worker_never_runs_batches_py(self):
+        script = os.path.join(SCRIPTS, 'batches.py')
+        for command in (f'python3 {script} set {self.b1} status=passed reviewed_sha={self.SHA}',
+                        f'python3 {script} --session S1 show', f"bash -c 'python3 {script} table report'"):
+            self.assertIn('only the orchestrator writes batch state', self.bash(command, agent='a1') or '', command)
+        self.assertIsNone(self.bash(f"cat <<'EOF' > notes.md\npython3 {script} set x status=spec\nEOF", agent='a1'))
+        self.assertIsNone(self.bash(f'echo "run batches.py show later"', agent='a1'))
+
+    def test_a_main_session_batches_call_touches_the_marker(self):
+        before = self.fx.marker()['touched']
+        time.sleep(0.01)
+        self.assertIsNone(self.bash(f'python3 {SCRIPTS}/batches.py show'))
+        self.assertGreater(self.fx.marker()['touched'], before)
+
+    def test_piece_8_allows_the_orchestrators_batches_calls(self):
+        def allowed(command, agent=None):
+            out, _ = self.fx.hook('permission', self.fx.payload('Bash', {'command': command}, agent=agent,
+                                                               event='PermissionRequest'))
+            return out is not None
+        script = os.path.join(SCRIPTS, 'batches.py')
+        for command in (f'python3 {script} set {self.b1} status=spec rows=IB-1,IB-2 owned=app.py',
+                        f'python3 {script} show --json --session S1', f'python3 {script} table checkpoint {self.wave}',
+                        f'python3 {script} note {self.b1} minors /tmp/m.txt', f'{script} task {self.b1} add timer b1'):
+            self.assertTrue(allowed(command), command)
+        for command in (f'python3 {script} set {self.b1} status=spec', ):
+            self.assertFalse(allowed(command, agent='a1'), command)
+        for command in (f"python3 {script} note {self.b1} minors 'a;b'", f'python3 {script} set x rows=$X',
+                        f'python3 {script} rm x', f'python3 {script} set x status=spec --force', f'python3 {script}'):
+            self.assertFalse(allowed(command), command)
+
+    def test_prune_ages_out_old_state_files(self):
+        d = os.path.join(self.fx.state, 'batches', 'S0', 'state')
+        old, new = os.path.join(d, 'old.json'), os.path.join(d, 'new.json')
+        write(old, '{}')
+        write(new, '{}')
+        os.utime(old, (time.time() - 15 * 86400,) * 2)
+        self.fx.start_run(sid='S9')   # run-start prunes the state dir
+        self.assertEqual((os.path.exists(old), os.path.exists(new)), (False, True))
+
+
+class SessionStartTest(Case):
+    def start(self, **env):
+        p = subprocess.run([sys.executable, HOOKS, 'session-start'], input=json.dumps(
+            {'hook_event_name': 'SessionStart', 'session_id': 'S-123', 'cwd': self.fx.work, 'source': 'startup'}),
+            capture_output=True, text=True, env=dict(self.fx.env, **env), cwd=self.fx.work)
+        self.assertEqual((p.returncode, p.stdout), (0, ''), p.stderr)
+
+    def test_the_export_is_appended(self):
+        env_file = os.path.join(self.fx.tmp, 'env.sh')
+        write(env_file, 'export OTHER=1\n')
+        self.start(CLAUDE_ENV_FILE=env_file)
+        with open(env_file) as f:
+            self.assertEqual(f.read(), 'export OTHER=1\nexport FOREMAN_SESSION=S-123\n')
+
+    def test_nothing_without_an_env_file(self):
+        before = sorted(os.listdir(self.fx.tmp))
+        self.start()
+        self.assertEqual(sorted(os.listdir(self.fx.tmp)), before)
 
 
 if __name__ == '__main__':

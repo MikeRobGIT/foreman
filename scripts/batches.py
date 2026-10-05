@@ -75,7 +75,7 @@ class Usage(Exception):
 
 
 def batch_time(batch):
-    """Epoch seconds of a `YYYYMMDD-HHMM-...` batch name (local time), or 0 for an undated name (hooks.batch_time)."""
+    """Epoch seconds of a `YYYYMMDD-HHMM-...` batch name (local time), or 0 for an undated name (hooks.py uses this copy)."""
     m = re.match(r'^(\d{8}-\d{4})-', batch)
     try:
         return time.mktime(time.strptime(m.group(1), '%Y%m%d-%H%M')) if m else 0

@@ -8,6 +8,9 @@
     "UserPromptExpansion": [
       { "hooks": [{ "type": "command", "command": "python3", "args": ["${CLAUDE_PLUGIN_ROOT}/scripts/hooks.py", "run-start"], "timeout": 10 }] }
     ],
+    "SessionStart": [
+      { "hooks": [{ "type": "command", "command": "python3", "args": ["${CLAUDE_PLUGIN_ROOT}/scripts/hooks.py", "session-start"], "timeout": 10 }] }
+    ],
     "SessionEnd": [
       { "hooks": [{ "type": "command", "command": "python3", "args": ["${CLAUDE_PLUGIN_ROOT}/scripts/hooks.py", "session-end"], "timeout": 10 }] }
     ],

@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """foreman's settings hooks: one dispatcher, run by hooks/hooks.json as `python3 hooks.py <event>`.
 
-Hook mode, JSON on stdin: run-start, session-end, pretool, posttool, subagent-start, subagent-stop, permission.
+Hook mode, JSON on stdin: run-start, session-start, session-end, pretool, posttool, subagent-start, subagent-stop,
+permission.
 (SessionEnd runs `session-end`, not `run-end`: the CLI verb never reads stdin, which a Bash call may hold open.)
 
 CLI mode, run from the orchestrator's Bash tool. `pretool` records the effect from its own hook input, so the
@@ -23,7 +24,7 @@ import sys
 import time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-FAST = re.compile(r'\b(git|gh|gt)\b|hooks\.py')
+FAST = re.compile(r'\b(git|gh|gt)\b|hooks\.py|batches\.py')
 RUN_TTL = 48 * 3600
 BATCH_TTL = 14 * 86400
 BATCH = re.compile(r'^[A-Za-z0-9_-]+$')
@@ -31,6 +32,8 @@ SHA = re.compile(r'^[0-9a-f]{7,40}$')
 CONTROL = ('run-end', 'release', 'stopping', 'forget')
 CONTROL_TEXT = re.compile(r'hooks\.py\S*\s+(run-end|release|stopping|forget)\b')
 RUN_END = re.compile(r'hooks\.py["\']?\s+run-end')   # posttool's pre-filter: one regex per Bash call
+BATCH_VERBS = ('set', 'note', 'bump', 'stamp', 'task', 'add-round', 'show', 'table', '--session')
+BATCH_TEXT = re.compile(r'batches\.py\S*\s+(set|note|bump|stamp|task|add-round|show|table|--session)\b')
 EDIT_TOOLS = ('Edit', 'Write', 'MultiEdit', 'NotebookEdit')
 BACKLOG_DEFAULT = '.claude/improvement-backlog.md'
 RULES_DEFAULT = '.claude/rules/*.md'
@@ -47,9 +50,10 @@ POST_EDIT = {}     # order -> fn(h, tool_input)
 
 def _load():
     """Imports the fast paths skip: a Bash call that names no git/gh/gt/hooks.py costs one json.load."""
-    global backlog, cfg, state, shellscan, subprocess, shlex, glob, tempfile
+    global backlog, batches, cfg, state, shellscan, subprocess, shlex, glob, tempfile
     sys.path.insert(0, HERE)
     import backlog  # noqa: F401
+    import batches  # noqa: F401
     import cfg  # noqa: F401
     import glob  # noqa: F401
     import shellscan  # noqa: F401
@@ -202,7 +206,7 @@ def prune(sd):
         m = state.read_json(p)
         if not isinstance(m, dict) or now - float(m.get('touched', 0)) >= RUN_TTL:
             rm(p)
-    for p in ls(sd, 'batches/*/*') + ls(sd, 'batches/*/agents/*'):
+    for p in ls(sd, 'batches/*/*') + ls(sd, 'batches/*/agents/*') + ls(sd, 'batches/*/state/*'):
         if os.path.isfile(p) and now - os.path.getmtime(p) >= BATCH_TTL:
             rm(p)
 
@@ -251,7 +255,17 @@ def session_end(h):
         end_run(h.sid)
 
 
+def session_start(h):
+    """Export this session's id to every later Bash call (probe P1): append `export FOREMAN_SESSION=<id>` to
+    $CLAUDE_ENV_FILE, which batches.py reads. Nothing is written when the harness sets no env file."""
+    path = os.environ.get('CLAUDE_ENV_FILE')
+    if path and BATCH.match(h.sid):
+        with open(path, 'a', encoding='utf-8') as f:
+            f.write(f'export FOREMAN_SESSION={h.sid}\n')
+
+
 HANDLERS['run-start'] = run_start
+HANDLERS['session-start'] = session_start
 HANDLERS['session-end'] = session_end
 
 
@@ -297,27 +311,28 @@ def ends_run(sc):
     return False
 
 
-def runs_control(sc, text, cwd):
-    """True when the scanned command runs `<path>/hooks.py <control verb>` as a command: a word naming this
-    hooks.py (basename hooks.py, or the same realpath as control_call tests, so `hooks.py/`, `hooks.py/.` and a
-    symlink count) immediately followed by the verb, in a top-level segment or in the script a shell or eval is
-    given. A mention in a quoted string, a comment or a heredoc isn't a call. Text the scan couldn't read is
+def runs_control(sc, text, cwd, name='hooks.py', verbs=CONTROL, rx=CONTROL_TEXT):
+    """True when the scanned command runs `<path>/<name> <verb>` as a command (by default this hooks.py and its
+    control verbs; piece 11 asks about batches.py): a word naming the script (its basename, or the same realpath as
+    control_call tests, so `hooks.py/`, `hooks.py/.` and a symlink count) immediately followed by the verb, in a
+    top-level segment or in the script a shell or eval is given. A mention in a quoted string, a comment or a
+    heredoc isn't a call. Text the scan couldn't read is
     judged by its raw text. Not seen (accepted limit): a call built at run time, in a $(...) or fed to a shell's
     stdin. It tests a path the way control_call does, so a deny sees every call that would be recorded."""
     if not sc.ok:
-        return bool(CONTROL_TEXT.search(text.replace('\\\n', '')))
+        return bool(rx.search(text.replace('\\\n', '')))
     for seg in sc.segs:
         w = seg.words
         if w is None:
-            if CONTROL_TEXT.search(text[seg.start:seg.end].replace('\\\n', '')):
+            if rx.search(text[seg.start:seg.end].replace('\\\n', '')):
                 return True
             continue
-        if any(b in CONTROL and (os.path.basename(a) == 'hooks.py' or same_file(a, os.path.join(HERE, 'hooks.py')))
+        if any(b in verbs and (os.path.basename(a) == name or same_file(a, os.path.join(HERE, name)))
                for a, b in zip(w, w[1:])):
             return True
         if any(os.path.basename(a) in shellscan.SHELLS + ('eval',) for a in w):
             for script in (a for a in w if re.search(r'\s', a)):
-                if runs_control(shellscan.scan(script, seg.cwd), script, seg.cwd):
+                if runs_control(shellscan.scan(script, seg.cwd), script, seg.cwd, name, verbs, rx):
                     return True
     return False
 
@@ -367,18 +382,9 @@ def pretool_control(h, repo, verb, rest):
     touch_marker(repo, h.sid)
 
 
-def batch_time(batch):
-    """Epoch seconds of a `YYYYMMDD-HHMM-...` batch name (local time), or 0 for an undated name."""
-    m = re.match(r'^(\d{8}-\d{4})-', batch)
-    try:
-        return time.mktime(time.strptime(m.group(1), '%Y%m%d-%H%M')) if m else 0
-    except ValueError:
-        return 0
-
-
 def fresh_marker(dirs, batch):
     """A live run marker in any session, touched after the batch name's time."""
-    since = batch_time(batch)
+    since = batches.batch_time(batch)
     for d in dirs:
         for p in ls(d, 'runs/*.json'):
             m = state.read_json(p)
@@ -1185,7 +1191,7 @@ HANDLERS['subagent-stop'] = subagent_stop
 
 # ---- piece 8: script allow ------------------------------------------------------------------------
 
-SCRIPTS = ('gate-lock.sh', 'wt-setup.sh', 'review.sh', 'bk.py', 'hooks.py')
+SCRIPTS = ('gate-lock.sh', 'wt-setup.sh', 'review.sh', 'bk.py', 'hooks.py', 'batches.py')
 OWN_OPTS = ('--', '--check', '--spec', '--dry-run')
 BAD_TEXT = re.compile(r'[\n\r`<>]|\$\(|\$\{')
 BAD_ARG = re.compile(r'[\'"$`\\;|&<>\x00-\x1f\x7f]')
@@ -1217,6 +1223,9 @@ def gate_args(repo):
 def script_args_ok(name, args, repo, h, cwd):
     if name == 'gate-lock.sh':
         return len(args) == 3 and plain(args[0]) and args[1] == '--' and args[2] in gate_args(repo)
+    if name == 'batches.py':   # the orchestrator's state writes: a known command, every argument one plain word
+        return (not h.agent and bool(args) and args[0] in BATCH_VERBS
+                and all(plain(a) or a in ('--json', '--session') for a in args))
     if not all(plain(a) for a in args):
         return False
     if name == 'wt-setup.sh':
@@ -1510,6 +1519,13 @@ def pretool_bash(h, command):
     if h.agent and runs_control(sc, command, h.cwd) and repo_at(h.cwd):
         h.deny('only the orchestrator ends a run or releases a spec — a worker never runs hooks.py')
         return
+    if runs_control(sc, command, h.cwd, 'batches.py', BATCH_VERBS, BATCH_TEXT):
+        repo = repo_at(h.cwd)
+        if h.active(repo, 'batch_state'):
+            if h.agent:
+                h.deny('only the orchestrator writes batch state — a worker never runs batches.py')
+                return
+            h.touch.add(repo)   # the newest live marker is batches.py's session fallback
     call = control_call(command)
     if call and not h.agent:   # a subagent's call is never recorded, whatever the deny above saw
         repo = repo_at(h.cwd)
