@@ -619,8 +619,8 @@ hours. A session moved to the background, forked or resumed under a new id keeps
 Orchestrator-only CLIs (a worker's call is denied): `python3 $FOREMAN/hooks.py release <batch> <sha>` (exit 3 means
 the hooks are inactive, so nothing gates the batch), `stopping <batch>` before any TaskStop of a tagged worker, and
 `forget <batch>` at W5. `python3 $FOREMAN/batches.py` is the orchestrator's too (a worker's call is denied). The
-checkpoint and report gates let the third call through after two denies against one unchanged table, so a gate
-can't trap the session. Turn pieces off per repo with `hooks_disabled: [<id>, …]`. The user's `! <command>` is
+checkpoint gate lets the third question through after two denies against one unchanged table, and a missing run
+report is handed back only once, so no gate can trap the session. Turn pieces off per repo with `hooks_disabled: [<id>, …]`. The user's `! <command>` is
 never checked: it is the override.
 
 ## Backlog UI (`/foreman ui`)
