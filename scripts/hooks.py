@@ -236,21 +236,33 @@ def continued_in(path, sid, tail=8192):
     return False
 
 
+def live_run(d, name):
+    """True when `runs/<name>.json` in the state dir d is a live run marker (not an alias)."""
+    m = state.read_json(os.path.join(d, 'runs', name + '.json'))
+    return isinstance(m, dict) and 'alias' not in m and time.time() - float(m.get('touched', 0)) < RUN_TTL
+
+
 def adopt(dirs, sid, transcript_path):
     """The run the new session `sid` continues, recorded as the alias `runs/<sid>.json` = {alias, touched} beside
     its marker, or None. A session moved to the background, forked or resumed gets a new id, and the old transcript
     (`<old id>.jsonl` beside the new one) ends with a `continued-in` record naming it; nothing in the hook input names
-    the old id. Only live markers' transcript tails are read, and an alias is never adopted (no chains)."""
+    the old id. The old session is a live run's own (its marker) or one that continued it (an alias of a live marker),
+    and the alias written always names the run itself, so `canonical` stays one hop. A runs file that can't be read
+    is skipped."""
     if not transcript_path or not BATCH.match(sid):
         return None
     for d in dirs:
         for p in ls(d, 'runs/*.json'):
-            m, old = state.read_json(p), os.path.basename(p)[:-len('.json')]
-            if (isinstance(m, dict) and 'alias' not in m and old != sid and BATCH.match(old)
-                    and time.time() - float(m.get('touched', 0)) < RUN_TTL
-                    and continued_in(os.path.join(os.path.dirname(transcript_path), old + '.jsonl'), sid)):
-                state.write_json(os.path.join(d, 'runs', sid + '.json'), {'alias': old, 'touched': time.time()})
-                return old
+            old = os.path.basename(p)[:-len('.json')]
+            try:
+                m = state.read_json(p)
+                run = m.get('alias', old)
+                ok = old != sid and BATCH.match(old) and BATCH.match(run) and run != sid and live_run(d, run)
+            except (AttributeError, TypeError, ValueError):
+                continue
+            if ok and continued_in(os.path.join(os.path.dirname(transcript_path), old + '.jsonl'), sid):
+                state.write_json(os.path.join(d, 'runs', sid + '.json'), {'alias': run, 'touched': time.time()})
+                return run
     return None
 
 
@@ -312,9 +324,34 @@ def end_run(sid):
             rm(p)
 
 
+def carried(d, sid):
+    """True when a live alias in the state dir d names `sid`'s run: another session carries it on."""
+    for p in ls(d, 'runs/*.json'):
+        try:
+            a = state.read_json(p)
+            if (isinstance(a, dict) and a.get('alias') == sid
+                    and time.time() - float(a.get('touched', 0)) < RUN_TTL):
+                return True
+        except (TypeError, ValueError):
+            continue
+    return False
+
+
+def leave_run(sid):
+    """/clear or logout: this session leaves its run, which another live session may still own. Its alias is removed
+    alone, and its own marker stays while a live alias still names it. `run-end` (end_run) removes both."""
+    if not sid or os.sep in sid:
+        return
+    for home in {state.home(), state.DEFAULT_HOME}:
+        for p in ls(home, f'*/runs/{glob.escape(sid)}.json'):
+            a = state.read_json(p)
+            if not (isinstance(a, dict) and 'alias' not in a and carried(os.path.dirname(os.path.dirname(p)), sid)):
+                rm(p)
+
+
 def session_end(h):
     if h.inp.get('reason') in ('clear', 'logout'):
-        end_run(h.sid)
+        leave_run(h.sid)
 
 
 def session_start(h):
@@ -1688,7 +1725,8 @@ def report_gate(h, sc):
     """Duty 3: a `run-end` whose run has batches, before the current report is in the assistant's text, records the
     report as owed and goes on. The paste usually rides in the same message as `run-end`, which PreToolUse can't see
     (P3), so the Stop hook checks the turn's last text instead. Keyed on this session's own id: `run-end` deletes the
-    marker, and the Stop hook has only its own id."""
+    marker, and the Stop hook has only its own id. `since` (the current stamp's time, else a minute before now) bounds
+    the transcript the Stop hook searches; `repo` is the repo whose `hooks_disabled` it reads."""
     if not ends_run(sc):
         return
     repo = repo_at(h.cwd)
@@ -1701,7 +1739,10 @@ def report_gate(h, sc):
     h.touch.add(repo)
     text, tid = batches.render_report(store, bs)
     if table_problem(h, store, 'report.shown', text, 'table report', 'in the run report'):
-        state.write_json(owed_path(repo.dirs[0], h.sid), {'id': tid, 'text': text, 'blocked': 0})
+        shown = store.read('report.shown')
+        since = float(shown['at']) if isinstance(shown, dict) and shown.get('text') == text else time.time() - 60
+        state.write_json(owed_path(repo.dirs[0], h.sid),
+                         {'id': tid, 'text': text, 'blocked': 0, 'since': since, 'repo': repo.top})
 
 
 def manual_run(repo, h):
@@ -1891,30 +1932,48 @@ HANDLERS['posttool'] = posttool
 STOP_ASK = 'foreman: end the run report with the spec-phase table, pasted verbatim as text as the last thing in your reply:'
 
 
+def paid(h, owed):
+    """True when the owed report is in the turn's last text, or in the assistant text the transcript holds since
+    `since` (every message but the last is written by the time Stop fires; the last may not be yet)."""
+    if holds({squash(line) for line in (h.inp.get('last_assistant_message') or '').splitlines()}, owed['text']):
+        return True
+    try:
+        return pasted(owed['text'], h.inp.get('transcript_path'), float(owed.get('since') or 0))
+    except OSError:
+        return False
+
+
 def turn_end(h):
-    """The Stop hook (main session only). A report `run-end` left owed must be in the turn's last text: handed back
-    once with a block, and dropped at the next turn end either way, so a session can never be held."""
+    """The Stop hook (main session only). A report `run-end` left owed must be in the turn's text: handed back once
+    with one block (every owed report together), and dropped at the next turn end either way, so a session can never
+    be held. A turn already continued by a Stop hook (`stop_hook_active`) is never blocked. A debt is dropped silently
+    when its repo has `batch_state` off, or when the run is still live (the `run-end` never ran)."""
     if not h.sid or os.sep in h.sid:
         return
+    ask = []
     for home in {state.home(), state.DEFAULT_HOME}:
         for p in ls(home, f'*/runs/{glob.escape(h.sid)}.owed'):
             owed = state.read_json(p)
-            repo = repo_at(h.cwd)
-            if repo and repo.disabled('batch_state'):
-                rm(p)
-            elif not isinstance(owed, dict) or not isinstance(owed.get('text'), str):
+            if not isinstance(owed, dict) or not isinstance(owed.get('text'), str):
                 rm(p)
                 print(f'foreman: dropped an unreadable owed run report ({p})', file=sys.stderr)
-            elif holds({squash(line) for line in (h.inp.get('last_assistant_message') or '').splitlines()},
-                       owed['text']):
+                continue
+            top = owed.get('repo')
+            repo = repo_at(top if isinstance(top, str) else h.cwd)
+            if repo and (repo.disabled('batch_state') or marker(repo, h.sid)):
                 rm(p)
-            elif int(owed.get('blocked') or 0) >= 1:
+            elif paid(h, owed):
+                rm(p)
+            elif owed.get('blocked') or h.inp.get('stop_hook_active'):
                 rm(p)
                 print('foreman: the run report was not pasted; ending anyway', file=sys.stderr)
             else:
-                state.write_json(p, dict(owed, blocked=1))
-                print(json.dumps({'decision': 'block', 'reason': STOP_ASK + '\n\n' + owed['text']}))
-                return
+                ask.append((p, owed))
+    for p, owed in ask:
+        state.write_json(p, dict(owed, blocked=1))
+    if ask:
+        print(json.dumps({'decision': 'block',
+                          'reason': STOP_ASK + '\n\n' + '\n\n'.join(owed['text'] for _, owed in ask)}))
 
 
 HANDLERS['stop'] = turn_end

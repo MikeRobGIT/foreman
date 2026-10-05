@@ -51,8 +51,8 @@ In `parallel N`, every batch starts with a spec, not code:
   stopped. Its spec is committed with a `Status: parked` line, and its rows get a note.
 - **The tables.** Batch state lives on disk (`scripts/batches.py`), not in the orchestrator's context. The
   checkpoint table and the run report's spec-phase table are printed from it, and with the hooks enabled the
-  checkpoint question waits until the table is in the orchestrator's text, and a run report missing from the final
-  message is handed back once at the end of the turn.
+  checkpoint question waits until the table is in the orchestrator's text, and a run report missing from it is
+  handed back once at the end of the turn.
 
 With the hooks enabled (0.4.0), a worker can't edit or commit code before its spec is released. The spec stays
 frozen after release; any change goes in a `## Deviations after release` section, which a reviewer rules on
@@ -86,7 +86,8 @@ worker's commit whose contents can't be told.
 Run-only pieces act while the session's **run marker** exists: a prompt starting `/foreman` (or `/loop … /foreman`;
 not `ui` or `init`) writes it, the skill runs `hooks.py run-end` when the run ends, `/clear` and logout delete it,
 and it expires after 48 hours. A session moved to the background, forked or resumed gets a new id; it keeps the run
-through an alias file `runs/<new id>.json`, found from the `continued-in` record ending the old transcript.
+through an alias file `runs/<new id>.json`, found from the `continued-in` record ending the old transcript. `/clear`
+and logout leave a run another live session still owns.
 
 | id | applies | what it does |
 |---|---|---|

@@ -3148,20 +3148,26 @@ class BatchStateReportTest(BatchStateCase):
     def owed(self, sid='S1'):
         return state.read_json(self.owed_path(sid))
 
-    def turn_end(self, message=None, sid='S1'):
-        d = {'hook_event_name': 'Stop', 'session_id': sid, 'cwd': self.fx.work, 'transcript_path': self.main,
-             'stop_hook_active': False}
+    def turn_end(self, message=None, sid='S1', cwd=None, active=False):
+        d = {'hook_event_name': 'Stop', 'session_id': sid, 'cwd': cwd or self.fx.work, 'transcript_path': self.main,
+             'stop_hook_active': active}
         if message is not None:
             d['last_assistant_message'] = message
         return self.fx.hook('stop', d)
+
+    def run_end(self, sid='S1'):
+        """A run-end that runs: pretool (which may owe the report), then posttool (which ends the run)."""
+        self.assertIsNone(self.bash(self.FORMS[0], sid=sid))
+        self.fx.hook('posttool', self.fx.payload('Bash', {'command': self.FORMS[0]}, sid=sid, event='PostToolUse'))
 
     def test_run_end_owes_an_unpasted_report_and_is_allowed(self):
         self.batches('set', self.b1, 'status=parked', 'reason=timed-out')
         for command in self.FORMS:
             self.assertIsNone(self.bash(command), command)
             owed = self.owed()
-            self.assertEqual(set(owed), {'id', 'text', 'blocked'}, command)
-            self.assertEqual(owed['blocked'], 0)
+            self.assertEqual(set(owed), {'id', 'text', 'blocked', 'since', 'repo'}, command)
+            self.assertEqual((owed['blocked'], owed['repo']), (0, os.path.realpath(self.fx.work)))
+            self.assertLess(abs(time.time() - 60 - owed['since']), 30)   # no current stamp: the write time minus 60 s
             os.remove(self.owed_path())
         report = self.batches('table', 'report').rstrip('\n')
         self.tool_result(report)                     # a tool result isn't the assistant's text
@@ -3180,7 +3186,7 @@ class BatchStateReportTest(BatchStateCase):
 
     def test_the_turn_end_accepts_the_report_in_the_last_message(self):
         self.batches('set', self.b1, 'status=spec')
-        self.assertIsNone(self.bash(self.FORMS[0]))
+        self.run_end()
         report = self.owed()['text']
         padded = '\n'.join(re.sub(r'\|', ' |  ', line) for line in report.splitlines())
         out, err = self.turn_end('Run complete.\n\n' + padded + '\n')
@@ -3189,7 +3195,7 @@ class BatchStateReportTest(BatchStateCase):
 
     def test_the_turn_end_hands_the_report_back_once(self):
         self.batches('set', self.b1, 'status=spec')
-        self.assertIsNone(self.bash(self.FORMS[0]))
+        self.run_end()
         report = self.owed()['text']
         out, _ = self.turn_end('Run complete.')
         self.assertEqual(out['decision'], 'block')
@@ -3221,12 +3227,72 @@ class BatchStateReportTest(BatchStateCase):
 
     def test_disabled_owes_nothing_and_drops_a_debt(self):
         self.batches('set', self.b1, 'status=spec')
-        self.assertIsNone(self.bash(self.FORMS[0]))
+        self.run_end()
         write(os.path.join(self.fx.work, '.claude/foreman.config.md'),
               CONFIG.replace('---\n', '---\nhooks_disabled: [batch_state]\n', 1))
         self.assertEqual(self.turn_end('Run complete.'), (None, ''))
         self.assertFalse(os.path.exists(self.owed_path()))
+        self.run_marker()
         self.assertIsNone(self.bash(self.FORMS[0]))
+        self.assertFalse(os.path.exists(self.owed_path()))
+
+    def test_the_debts_own_repo_decides_disabled(self):
+        self.batches('set', self.b1, 'status=spec')
+        self.run_end()
+        write(os.path.join(self.fx.work, '.claude/foreman.config.md'),
+              CONFIG.replace('---\n', '---\nhooks_disabled: [batch_state]\n', 1))
+        self.assertEqual(self.turn_end('Run complete.', cwd=self.fx.tmp), (None, ''))   # the cwd is no repo
+        self.assertFalse(os.path.exists(self.owed_path()))
+
+    def test_a_paste_in_an_earlier_message_of_the_turn_is_accepted(self):
+        self.batches('set', self.b1, 'status=spec')
+        report = self.batches('table', 'report')
+        at = state.read_json(os.path.join(self.fx.state, 'batches', 'S1', 'state', 'report.shown'))['at']
+        self.assertIsNone(self.bash(self.FORMS[0]))   # the paste rides in this message: PreToolUse can't see it yet
+        self.assertEqual(self.owed()['since'], at)
+        self.say(report)
+        self.fx.hook('posttool', self.fx.payload('Bash', {'command': self.FORMS[0]}, event='PostToolUse'))
+        self.say('Run complete.')
+        self.assertEqual(self.turn_end('Run complete.'), (None, ''))
+        self.assertFalse(os.path.exists(self.owed_path()))
+
+    def test_a_paste_before_the_stamp_does_not_count(self):
+        self.batches('set', self.b1, 'status=spec')
+        report = self.batches('table', 'report')
+        with open(self.main, 'a') as f:
+            f.write(json.dumps({'type': 'assistant', 'timestamp': iso(time.time() - 600),
+                                'message': {'content': [{'type': 'text', 'text': report}]}}) + '\n')
+        self.run_end()
+        out, _ = self.turn_end('Run complete.')
+        self.assertEqual(out['decision'], 'block')
+
+    def test_a_continued_turn_end_never_blocks(self):
+        self.batches('set', self.b1, 'status=spec')
+        self.run_end()
+        out, err = self.turn_end('Run complete.', active=True)
+        self.assertIsNone(out)
+        self.assertIn('foreman: the run report was not pasted; ending anyway', err)
+        self.assertFalse(os.path.exists(self.owed_path()))
+
+    def test_two_debts_block_once_together(self):
+        self.batches('set', self.b1, 'status=spec')
+        self.run_end()
+        other = os.path.join(self.fx.env['HOME'], '.claude', 'foreman', 'k2', 'runs', 'S1.owed')
+        write(other, json.dumps({'id': 'x', 'text': '| other | table |', 'blocked': 0, 'since': time.time(),
+                                 'repo': self.fx.work}))
+        out, _ = self.turn_end('Run complete.')
+        self.assertEqual(out['decision'], 'block')
+        self.assertIn(self.owed()['text'], out['reason'])
+        self.assertIn('| other | table |', out['reason'])
+        self.assertEqual((self.owed()['blocked'], state.read_json(other)['blocked']), (1, 1))
+        out, err = self.turn_end('Run complete.', active=True)
+        self.assertIsNone(out)
+        self.assertEqual((os.path.exists(self.owed_path()), os.path.exists(other)), (False, False))
+
+    def test_a_run_end_that_never_ran_is_owed_nothing(self):
+        self.batches('set', self.b1, 'status=spec')
+        self.assertIsNone(self.bash(self.FORMS[0]))   # pretool only: rejected or interrupted, the run is still live
+        self.assertEqual(self.turn_end('Run complete.'), (None, ''))
         self.assertFalse(os.path.exists(self.owed_path()))
 
     def test_a_corrupt_debt_fails_open(self):
@@ -3265,9 +3331,13 @@ class ContinuationTest(BatchStateCase):
             {'hook_event_name': 'SessionStart', 'session_id': sid, 'cwd': self.fx.work, 'source': source,
              'transcript_path': os.path.join(self.proj, sid + '.jsonl')}),
             capture_output=True, text=True, env=dict(self.fx.env, CLAUDE_ENV_FILE=env_file), cwd=self.fx.work)
-        self.assertEqual((p.returncode, p.stdout), (0, ''), p.stderr)
+        self.assertEqual((p.returncode, p.stdout, p.stderr), (0, '', ''))
         with open(env_file) as f:
             return f.read()
+
+    def session_end(self, sid):
+        self.fx.hook('session-end', {'hook_event_name': 'SessionEnd', 'session_id': sid, 'cwd': self.fx.work,
+                                     'reason': 'clear'})
 
     def runs_file(self, sid):
         return os.path.join(self.fx.state, 'runs', sid + '.json')
@@ -3321,6 +3391,47 @@ class ContinuationTest(BatchStateCase):
         self.assertEqual(self.session_start(), 'export FOREMAN_SESSION=S2\n')
         self.assertIsNone(self.worker_call())
         self.assertFalse(os.path.exists(self.runs_file('S2')))
+
+    def test_a_second_continuation_adopts_the_run_itself(self):
+        self.continued()
+        self.session_start()
+        self.continued(new='S3', old='S2')
+        write(os.path.join(self.proj, 'S3.jsonl'), '')
+        self.assertEqual(self.session_start(sid='S3'), 'export FOREMAN_SESSION=S1\n')
+        self.assertEqual(state.read_json(self.runs_file('S3'))['alias'], 'S1')   # the run, never the alias S2
+        self.assertIn('only the orchestrator writes batch state', self.worker_call(sid='S3') or '')
+
+    def test_an_alias_whose_run_ended_is_not_adopted(self):
+        self.continued()
+        self.session_start()
+        self.continued(new='S3', old='S2')
+        os.remove(self.runs_file('S1'))
+        self.assertEqual(self.session_start(sid='S3'), 'export FOREMAN_SESSION=S3\n')
+        self.assertFalse(os.path.exists(self.runs_file('S3')))
+
+    def test_a_corrupt_marker_does_not_stop_adoption(self):
+        state.write_json(self.runs_file('S0'), {'touched': 'soon'})
+        state.write_json(self.runs_file('S8'), ['not', 'a', 'marker'])
+        self.continued(new='S3')
+        self.assertEqual(self.session_start(), 'export FOREMAN_SESSION=S2\n')   # every runs file is read
+        self.continued()
+        self.assertEqual(self.session_start(source='resume'), 'export FOREMAN_SESSION=S1\n')
+
+    def test_clear_in_the_continued_session_leaves_the_run_to_the_other(self):
+        self.continued()
+        self.session_start()
+        self.session_end('S2')
+        self.assertEqual((os.path.exists(self.runs_file('S2')), os.path.exists(self.runs_file('S1'))), (False, True))
+
+    def test_clear_in_the_original_session_leaves_the_run_to_its_continuation(self):
+        self.continued()
+        self.session_start()
+        self.session_end('S1')
+        self.assertTrue(os.path.exists(self.runs_file('S1')))
+        self.assertIn('only the orchestrator writes batch state', self.worker_call() or '')
+        os.remove(self.runs_file('S2'))
+        self.session_end('S1')   # no session carries it on: the marker goes
+        self.assertFalse(os.path.exists(self.runs_file('S1')))
 
     def test_run_end_in_the_new_session_ends_the_run_and_owes_the_runs_report(self):
         self.continued()

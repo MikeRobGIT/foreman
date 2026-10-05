@@ -500,7 +500,7 @@ W1-W6 to keep them apart from steps 0-12; W6's stop conditions replace the auton
     in the final report as the spec-phase table: one row per batch with the spec wall-clock, the rounds, the reviewer that
     landed (or the fall-through, or "no cross-model review"), the degraded flag, the reviewer model, the status
     and park reason, and the review rounds after the PR opened. The last column is the measure: follow-up rounds
-    per PR after review. Then `run-end`. If the report table is missing from your final message, the hooks hand it
+    per PR after review. Then `run-end`. If the report table never reaches your text, the hooks hand it
     back once at the end of the turn and ask for it to be pasted.
 
 ### Worker contract
