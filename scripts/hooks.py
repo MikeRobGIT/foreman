@@ -1599,8 +1599,21 @@ def checkpoint_gate(h, ti):
         h.updated = dict(ti, questions=[first] + questions[1:])
 
 
+def batch_call(h, sc, command):
+    """Duty 1: a worker's `batches.py` call is denied; the main session's touches the run marker."""
+    if runs_control(sc, command, h.cwd, 'batches.py', BATCH_VERBS, BATCH_TEXT):
+        repo = repo_at(h.cwd)
+        if h.active(repo, 'batch_state'):
+            if h.agent:
+                h.deny('only the orchestrator writes batch state — a worker never runs batches.py')
+                return
+            h.touch.add(repo)   # the newest live marker is batches.py's session fallback
+
+
 def report_gate(h, sc):
     """Duty 3: `run-end` needs the run's spec-phase report pasted in the assistant's text, when the run has batches."""
+    if not ends_run(sc):
+        return
     repo = repo_at(h.cwd)
     if not h.active(repo, 'batch_state'):
         return
@@ -1767,14 +1780,10 @@ def pretool_bash(h, command):
     if h.agent and runs_control(sc, command, h.cwd) and repo_at(h.cwd):
         h.deny('only the orchestrator ends a run or releases a spec — a worker never runs hooks.py')
         return
-    if runs_control(sc, command, h.cwd, 'batches.py', BATCH_VERBS, BATCH_TEXT):
-        repo = repo_at(h.cwd)
-        if h.active(repo, 'batch_state'):
-            if h.agent:
-                h.deny('only the orchestrator writes batch state — a worker never runs batches.py')
-                return
-            h.touch.add(repo)   # the newest live marker is batches.py's session fallback
-    if not h.agent and ends_run(sc):
+    run_piece(batch_call, h, sc, command)
+    if h.denies:
+        return
+    if not h.agent:
         run_piece(report_gate, h, sc)
         if h.denies:
             return

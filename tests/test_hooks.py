@@ -749,6 +749,18 @@ class PieceIsolationTest(InProcess):
         why, err = self.run_pretool('Bash', {'command': 'git status'})
         self.assertEqual((why, err), (None, ''))
 
+    def test_a_crash_in_the_batch_call_or_run_end_check_keeps_the_push_gate(self):
+        self.fx.start_run()
+        git(self.fx.work, 'switch', '-q', '-c', 'feat')
+        self.fx.commit('app.py', 'print(2)\n')
+        command = f'python3 {SCRIPTS}/batches.py show && git push -u origin HEAD'
+        self.assertIn('no passing gate for this tree', self.run_pretool('Bash', {'command': command})[0])
+        for name in ('runs_control', 'ends_run'):
+            with mock.patch.object(hooks, name, side_effect=RuntimeError('boom')):
+                why, err = self.run_pretool('Bash', {'command': command})
+            self.assertIn('no passing gate for this tree', why or '', name)
+            self.assertIn('foreman hook error: ', err, name)
+
 
 def head_tree(cwd):
     return git(cwd, 'rev-parse', 'HEAD^{tree}').strip()
