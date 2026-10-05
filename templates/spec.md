@@ -40,7 +40,7 @@ Batch `⟦FILL: batch name⟧` on branch `⟦FILL: branch⟧`. Written in the sp
 
 ## Open questions
 
-⟦FILL: product decisions the code can't answer, or "None"⟧
+⟦FILL: each product decision the code can't answer, one bullet each, labelled `- **Blocking:**` (the batch can't be built as specified without the answer) or `- **Non-blocking:**`; or "None — <reason>"; a question that is answered moves to Review responses⟧
 
 ## Review responses
 

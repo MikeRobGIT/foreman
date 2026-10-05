@@ -150,9 +150,9 @@ def get(repo, key, default=None):
     return v
 
 
-def chain(repo):
+def chain(repo, use_env=True):
     """Reviewer chain as (use, model, effort). Legacy `extra_reviewers` commands become `custom` entries."""
-    cfg = load(repo)
+    cfg = load(repo, use_env)
     if cfg.get('reviewers'):
         return [(r.get('use', ''), r.get('model', ''), r.get('effort', '')) for r in cfg['reviewers'] if isinstance(r, dict)]
     return [('custom', cmd, '') for cmd in cfg.get('extra_reviewers') or [] if isinstance(cmd, str)]

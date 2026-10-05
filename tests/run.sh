@@ -14,7 +14,7 @@ git() { /usr/bin/git -c user.name=t -c user.email=t@example.com "$@"; }
 
 echo "## syntax"
 for f in "$root"/scripts/*.sh "$root"/reviewers/*.sh; do check "bash -n ${f#$root/}" bash -n "$f"; done
-check "py_compile" python3 -m py_compile "$root/scripts/cfg.py" "$root/scripts/bk.py" "$root/scripts/backlog.py" "$root/scripts/ui.py" "$root/scripts/state.py" "$root/scripts/shellscan.py" "$root/scripts/hooks.py"
+check "py_compile" python3 -m py_compile "$root/scripts/cfg.py" "$root/scripts/bk.py" "$root/scripts/backlog.py" "$root/scripts/ui.py" "$root/scripts/state.py" "$root/scripts/shellscan.py" "$root/scripts/hooks.py" "$root/scripts/batches.py"
 
 echo "## cfg.py"
 cat >"$T/c.md" <<'EOF'
@@ -49,7 +49,9 @@ check "template: commented-out reviewers = empty chain" test -z "$(tc chain)"
 check "template: timeout" test "$(tc reviewer_timeout_seconds)" = 900
 check "template: empty list" test -z "$(tc required_ci)"
 check "template: gate_exempt" test "$(tc gate_exempt | tr '\n' ' ')" = "docs/** **/*.md "
-check "template: hook lists default empty" test -z "$(tc forbid_trailers)$(tc hooks_disabled)"
+check "template: hooks_disabled defaults empty" test -z "$(tc hooks_disabled)"
+check "template: forbid_trailers ships the attribution default" test "$(tc forbid_trailers | tr '\n' '|')" = 'Co-Authored-By|Claude-Session|/^\W*Generated with \[?Claude Code/|'
+check "template: the hooks_disabled comment names batch_state" grep -qF 'spec_gate, batch_state, status_pane' "$root/templates/foreman.config.md"
 check "template: design_spec_dir" test "$(tc design_spec_dir)" = "docs/superpowers/specs"
 check "template: all six hook keys present" test "$(grep -c -E '^(forbid_trailers|gate_exempt|worker_agent_types|hooks_disabled|design_spec_dir|status_pane):' "$root/templates/foreman.config.md")" = 6
 mkdir -p "$T/tpl/.claude" && cp "$root/templates/improvement-backlog.md" "$T/tpl/.claude/" && printf -- '---\n---\n' >"$T/tpl/.claude/foreman.config.md"
@@ -593,12 +595,142 @@ check "the Worker contract points at the spec phase" appears_before "$sk" '### W
 check "...before the Worker spec phase section" appears_before "$sk" '**Step 2 is the spec phase**' '### Worker spec phase'
 check "...which ends before the Hooks section" appears_before "$sk" '### Worker spec phase' '## Hooks'
 check "...and the Hooks section comes before the Backlog UI section" appears_before "$sk" '## Hooks' '## Backlog UI'
-check "plugin version 0.5.0" grep -qF '"version": "0.5.0"' "$root/.claude-plugin/plugin.json"
+check "plugin version 0.5.1" grep -qF '"version": "0.5.1"' "$root/.claude-plugin/plugin.json"
+check "marketplace version 0.5.1" test "$(python3 -c "import json,sys; print(json.load(open(sys.argv[1]))['plugins'][0]['version'])" "$root/.claude-plugin/marketplace.json")" = 0.5.1
 
+echo "## review.sh .entry and cfg.chain(use_env=False)"
+cd "$R"
+chain 60 30 200 quota good >"$T/chain.md"; rv
+check ".entry: a fall-through to the second entry writes 2" test "$(cat "$T/out/review.log.entry" 2>/dev/null)" = 2
+chain 60 30 200 quota >"$T/chain.md"; rv
+check ".entry: an exhausted chain writes 0" test "$(cat "$T/out/review.log.entry" 2>/dev/null)" = 0
+check ".entry: a TERM-killed run writes none" test ! -e "$T/out/term.log.entry"
+mkdir -p "$T/ue/.claude" && printf -- '---\nreviewers:\n  - { use: codex, model: m }\n---\n' >"$T/ue/.claude/foreman.config.md"
+check "cfg.chain(use_env=False) ignores FOREMAN_CONFIG" test "$(cd "$root/scripts" && FOREMAN_CONFIG=$T/chain.md python3 -c "import cfg; print(cfg.chain('$T/ue', use_env=False)[0][0], cfg.chain('$T/ue')[0][0])")" = "codex quota"
+cd "$T"
+
+echo "## templates: open-question labels"
+check "spec template: Open questions names the Blocking label" grep -qF -- '`- **Blocking:**`' "$root/templates/spec.md"
+check "spec template: ...the Non-blocking label" grep -qF -- '`- **Non-blocking:**`' "$root/templates/spec.md"
+check "spec template: ...and None — <reason>" grep -qF -- '"None — <reason>"' "$root/templates/spec.md"
+
+echo "## SKILL.md 0.5.1: W2, W3, Worker spec phase"
+sk=$root/skills/foreman/SKILL.md
+while IFS= read -r s; do check "SKILL.md has: $s" grep -qF -- "$s" "$sk"; done <<'EOF'
+Admit rows that seem to need a human
+decision: the spec phase parks them `open question` if they do.
+`spec parked (open question)`
+`spec parked (not released by the human)`
+`spec parked (stopped by the human)`
+`spec parked (comment round failed)`
+named `fw-<batch>`, never the bare batch name
+`set <batch> status=spec rows=<id,…> owned=<file,…>`
+`task <batch> add worker fw-<batch>`
+in single quotes (`'owned=app/home/[account]/page.tsx'`): an unquoted `[…]` fails under zsh and
+ToolSearch `select:TaskStop,Monitor`
+TaskStop takes only an id `batches.py` recorded
+Label every open question `- **Blocking:**` (the batch can't be built as
+EOF
+check "W2 no longer filters rows that need a human decision" bash -c "! grep -qF 'need a human decision, or are named' '$sk'"
+check "W3 keeps no state table in context" bash -c "! grep -qF 'Keep a short state table' '$sk'"
+check "P2 (wrapper): W3 points at README's RTK recipe" grep -qF "point the user at README's **RTK** recipe" "$sk"
+check "P2: under RTK the worker can't push (its commits run)" grep -qF "  push. Then point the user at README's **RTK** recipe" "$sk"
+check "W3 loads TaskStop and Monitor before launching" appears_before "$sk" 'Before launching, load the deferred tools with ToolSearch `select:TaskStop,Monitor`.' '- At launch, for each batch:'
+echo "## SKILL.md 0.5.1: W3.5"
+while IFS= read -r s; do check "SKILL.md has: $s" grep -qF -- "$s" "$sk"; done <<'EOF'
+**Open questions are labelled.**
+**A Blocking question parks the batch now** (`reason=open-question`), before any round, at any
+A verdict that rules an open question blocking parks the
+`bump <batch> bounces`, `stamp <batch> sent` and a new timer
+**Every reviewer is recorded and stopped by id.**
+Agent reviewers are dispatched **unnamed** (no `name`)
+`set <batch> status=passed reviewed_sha=<sha>`
+**Never edit a worker's spec**
+**Stopped by the human:**
+then park (`reason=stopped-by-human`)
+| a stop by the human |
+Every timer is a Bash `run_in_background` `sleep`; a foreground `sleep` is refused.
+which is `stamp <batch> comment_sent`
+`set <batch> reviewer_model=<model>`
+TaskStop the superseded one by its recorded id, `task <batch> done <id>`, record the re-dispatch with
+It counts as a bounce: `python3 $FOREMAN/batches.py bump <batch> bounces`, `stamp <batch> sent` and
+Non-blocking questions don't block a pass; they
+EOF
+check "W3.5: the label decides, not the scope" bash -c "! grep -qF 'Open questions outside the batch' '$sk'"
+oq() { awk '/^## Open questions$/{f=1;next} /^## /{f=0} f && NF && !/^- \*\*(Blocking|Non-blocking):\*\* / && !/^None — / && !/^  /' "$1"; }
+check "SKILL.md's label pre-check is oq()'s awk" grep -qF "awk '/^## Open questions\$/{f=1;next} /^## /{f=0} f && NF && !/^- \*\*(Blocking|Non-blocking):\*\* / && !/^None — / && !/^  /' <spec path>" "$sk"
+printf '## Open questions\n\n- **Blocking:** who owns the setting?\n  (it decides the column)\n- **Non-blocking:** the colour\n\n## Review responses\n\n- free text\n' >"$T/oq1.md"
+check "label pre-check: labelled questions pass" test -z "$(oq "$T/oq1.md")"
+printf '## Open questions\n\nNone — the rows are fully specified\n' >"$T/oq2.md"
+check "label pre-check: None — passes" test -z "$(oq "$T/oq2.md")"
+printf '## Open questions\n\n- who owns the setting?\n- **Blocking:** x\n' >"$T/oq3.md"
+check "label pre-check: an unlabelled question is a bounce" test "$(oq "$T/oq3.md")" = '- who owns the setting?'
+check "the old timestamps text is gone" bash -c "! grep -qF 'in the state table. Every message that returns' '$sk'"
+
+echo "## SKILL.md 0.5.1: W3.6 to W6, Hooks"
+while IFS= read -r s; do check "SKILL.md has: $s" grep -qF -- "$s" "$sk"; done <<'EOF'
+Releasing** a batch takes two steps, at its `reviewed_sha` only.
+`set <batch> status=released released_sha=<sha>`
+Run `python3 $FOREMAN/batches.py table checkpoint <wave>`
+A question that covers one batch is single-select: Release, Comment, Park
+Two to four batches: one multi-select question.
+More than four: split them into questions of two to four batches each (5 → 3+2, 9 → 3+3+3)
+More than sixteen: let the human answer in text.
+"cross-model review fell through to <reviewer>"
+which offers only release or park, after a fresh `table checkpoint` is pasted
+parked (`reason=comment-failed`)
+`Monitor` until-loop (`until [ ! -e <log>.pid ]; do sleep 2; done`, 30 s timeout)
+same loop as a `run_in_background` Bash call
+`set <batch> status=parked reason=<reason>`
+`set <batch> status=pr pr=<n>` at the batch's first report
+`bump <batch> pr_rounds` for each send
+named `fw-<batch>-2` (then `-3`, …)
+unnamed, recorded with `task <batch> add reviewer <agent id>`
+**An environment failure** (`fork failed`, `Device not configured`) gets one more try first
+is not the one re-dispatch above, and it never stops a `worker` task.
+read-only reviewer (unnamed, recorded and stopped
+Then stop the batch's workers:
+run `python3 $FOREMAN/batches.py table report` and paste its whole output
+| `batch_state` | run, orchestrator |
+EOF
+check "parking runs in seven steps, in order" bash -c "awk -v a='1. Kill the round' -v b='2. \`python3 \$FOREMAN/hooks.py stopping' -v c='3. TaskStop every live task' -v d='4. Copy the specs to' -v e='5. Name the branch' -v f='6. \`git worktree remove --force' -v g='7. Write the park note' 'index(\$0,a)&&!A{A=NR} index(\$0,b)&&!B{B=NR} index(\$0,c)&&!C{C=NR} index(\$0,d)&&!D{D=NR} index(\$0,e)&&!E{E=NR} index(\$0,f)&&!F{F=NR} index(\$0,g)&&!G{G=NR} END{exit !(A&&A<B&&B<C&&C<D&&D<E&&E<F&&F<G)}' '$sk'"
+check "W6 pastes the report before run-end" appears_before "$sk" 'run `python3 $FOREMAN/batches.py table report`' 'per PR after review. Then `run-end`.'
+check "W3.6 pastes the checkpoint before asking" appears_before "$sk" 'Run `python3 $FOREMAN/batches.py table checkpoint <wave>`' 'A question that covers one batch is single-select'
+check "SKILL.md no longer reads a state table" bash -c "! grep -qF 'state table' '$sk'"
+check "W4.2b environment retry reads verdicts from show --json" grep -qF 'that has a `verdict` mark (`python3 $FOREMAN/batches.py show --json`)' "$sk"
+check "W4.2b owned files come from show --json" grep -qF '(`owned` in `batches.py show --json`)' "$sk"
+check "W4.4 marks the replaced worker done" grep -qF '`python3 $FOREMAN/batches.py task <batch> done <old id>`' "$sk"
+check "W4.6 ignores a TaskStop error for an ended worker" grep -qF 'is ignored, and the task is still marked done).' "$sk"
+check "P3 (next-message): the checkpoint paste is a message of its own" grep -qF 'in a message of its own, make one more call' "$sk"
+check "L1: a table not yet in the transcript is denied, never added to the question" grep -qF 'denied too, never added to the question for you' "$sk"
+check "L1: the hook never rewrites an AskUserQuestion call" bash -c "! grep -q 'updatedInput' '$root/scripts/hooks.py'"
+check "L2: an answered question leaves Open questions for Review responses (label line)" grep -qF 'leaves `## Open questions` and is recorded under **Review responses**; if' "$sk"
+check "L2: ...and the section reads None — <reason> (step 7)" grep -qF 'are left, the section reads `None — <reason>`.' "$sk"
+check "L2: the spec template says an answered question moves to Review responses" grep -qF 'a question that is answered moves to Review responses' "$root/templates/spec.md"
+check "L4: the report is checked at the end of the turn" grep -qF 'back once at the end of the turn and ask for it to be pasted.' "$sk"
+check "L5: SKILL.md says a continued session keeps its run" grep -qF 'forked or resumed under a new id keeps its run through an alias' "$sk"
+check "L4: run-end is never denied for the report" bash -c "! grep -qF 'report.denies' '$root/scripts/hooks.py'"
+check "L4: hooks.json runs the stop hook" grep -qF 'hooks.py", "stop"]' "$root/hooks/hooks.json"
+
+echo "## README 0.5.1"
+rd=$root/README.md
+while IFS= read -r s; do check "README has: $s" grep -qF -- "$s" "$rd"; done <<'EOF'
+| `batch_state` | run, orchestrator |
+"Bash(python3 /path/to/foreman/scripts/batches.py:*)"
+| `scripts/batches.py <command> …` |
+**The tables.** Batch state lives on disk
+`bk.py`, `hooks.py` and `batches.py` (main session only) run without a permission prompt
+EOF
+check "P2 (wrapper): README has the RTK recipe" grep -qF 'exec rtk hook claude <<<"$input"' "$rd"
+check "P2: README says the worker can't push" grep -qF "so the worker can't push. Run RTK" "$rd"
+check "L4: README says the end of the turn hands the report back" grep -qF 'and the end of the turn (a `Stop` hook) hands it back once' "$rd"
+check "L5: README says a continued session keeps its run" grep -qF 'through an alias file `runs/<new id>.json`' "$rd"
+check "README: TaskStop refusals as the guard has them" grep -qF 'TaskStop is refused with no id or with a batch name, and for a worker before `hooks.py stopping`' "$rd"
 echo "## backlog.py + ui.py"
 check "test_backlog.py" python3 "$root/tests/test_backlog.py"
 check "test_ui_api.py" python3 "$root/tests/test_ui_api.py"
 check "test_state.py" python3 "$root/tests/test_state.py"
+check "test_batches.py" python3 "$root/tests/test_batches.py"
 echo "## shellscan.py + hooks.py"
 check "test_shellscan.py" python3 "$root/tests/test_shellscan.py"
 check "test_hooks.py" python3 "$root/tests/test_hooks.py"

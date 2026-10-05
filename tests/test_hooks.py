@@ -81,7 +81,8 @@ class Fx:
                         PATH=bin_dir + os.pathsep + os.environ['PATH'],
                         FAKE_GH_LOG=os.path.join(self.tmp, 'gh.log'), FAKE_GH_PR=os.path.join(self.tmp, 'pr.json'),
                         GIT_AUTHOR_NAME='t', GIT_AUTHOR_EMAIL='t@e', GIT_COMMITTER_NAME='t', GIT_COMMITTER_EMAIL='t@e')
-        self.env.pop('FOREMAN_CONFIG', None)
+        for k in ('FOREMAN_CONFIG', 'FOREMAN_SESSION', 'CLAUDE_ENV_FILE'):   # never the running session's
+            self.env.pop(k, None)
         os.makedirs(self.env['HOME'])
 
     def close(self):
@@ -747,6 +748,18 @@ class PieceIsolationTest(InProcess):
     def test_no_crash_no_note(self):
         why, err = self.run_pretool('Bash', {'command': 'git status'})
         self.assertEqual((why, err), (None, ''))
+
+    def test_a_crash_in_the_batch_call_or_run_end_check_keeps_the_push_gate(self):
+        self.fx.start_run()
+        git(self.fx.work, 'switch', '-q', '-c', 'feat')
+        self.fx.commit('app.py', 'print(2)\n')
+        command = f'python3 {SCRIPTS}/batches.py show && git push -u origin HEAD'
+        self.assertIn('no passing gate for this tree', self.run_pretool('Bash', {'command': command})[0])
+        for name in ('runs_control', 'ends_run'):
+            with mock.patch.object(hooks, name, side_effect=RuntimeError('boom')):
+                why, err = self.run_pretool('Bash', {'command': command})
+            self.assertIn('no passing gate for this tree', why or '', name)
+            self.assertIn('foreman hook error: ', err, name)
 
 
 def head_tree(cwd):
@@ -2410,6 +2423,9 @@ class ScriptAllowGateTextTest(ScriptAllowBase):
 
 
 class SpecGateTest(Case):
+    # piece 11 would refuse these bare `hooks.py release` calls (no batch state); this class tests piece 10 alone
+    config = CONFIG.replace('---\n', '---\nhooks_disabled: [batch_state]\n', 1)
+
     def setUp(self):
         super().setUp()
         self.fx.start_run()
@@ -2800,6 +2816,864 @@ class HookLogTest(Case):
         self.assertEqual(len(lines), 1)
         self.assertEqual((lines[0]['event'], lines[0]['agent_id']), ('pretool', 'a1'))
         self.assertIn('no rebase', lines[0]['out']['hookSpecificOutput']['permissionDecisionReason'])
+
+
+def iso(t):
+    return time.strftime('%Y-%m-%dT%H:%M:%S', time.gmtime(t)) + '.000Z'
+
+
+def name_at(t, suffix):
+    return time.strftime('%Y%m%d-%H%M', time.localtime(t)) + '-' + suffix
+
+
+class BatchStateCase(Case):
+    """Piece 11 through main(): batch files written by scripts/batches.py, hook JSON in, decisions out. The run
+    started an hour ago, so the batch names, dated after it, are in its scope."""
+    SHA = 'c' * 40
+
+    def setUp(self):
+        super().setUp()
+        self.t0 = time.time() - 3600
+        self.b1, self.b2 = name_at(self.t0 + 120, 'w1a'), name_at(self.t0 + 120, 'w1b')
+        self.wave = self.b1[:-1]
+        self.run_marker()
+        self.main = os.path.join(self.fx.tmp, 'main.jsonl')
+        write(self.main, json.dumps({'type': 'user', 'timestamp': iso(self.t0), 'message': {'content': '/foreman'}}) + '\n')
+
+    def run_marker(self, args='', sid='S1'):
+        state.write_json(os.path.join(self.fx.state, 'runs', sid + '.json'),
+                         {'started': self.t0, 'touched': time.time(), 'args': args})
+
+    def batches(self, *args, sid='S1'):
+        p = subprocess.run([sys.executable, os.path.join(SCRIPTS, 'batches.py'), *args, '--session', sid],
+                           capture_output=True, text=True, env=self.fx.env, cwd=self.fx.work)
+        self.assertEqual(p.returncode, 0, p.stderr)
+        return p.stdout
+
+    def passed(self, b, sha=None):
+        """A pass at `sha`, after a round at it when the batch's last round is at another SHA (batches.py's rule)."""
+        sha = sha or self.SHA
+        rounds = json.loads(self.batches('show', b, '--json')).get('rounds') if self.has_batch(b) else []
+        if not rounds or rounds[-1]['sha'] != sha:
+            self.batches('add-round', b, f'r={len(rounds or []) + 1}', 'sha=' + sha, 'entry=0', 'explore=pass',
+                         'crit=0', 'imp=0', 'minor=0')
+        self.batches('set', b, 'status=passed', 'reviewed_sha=' + sha)
+
+    def has_batch(self, b):
+        return os.path.exists(os.path.join(self.fx.state, 'batches', 'S1', 'state', b + '.json'))
+
+    def entry(self, kind, content):
+        with open(self.main, 'a') as f:
+            f.write(json.dumps({'type': kind, 'timestamp': iso(time.time()), 'message': {'content': content}}) + '\n')
+
+    def say(self, text):
+        self.entry('assistant', [{'type': 'text', 'text': text}])
+
+    def tool_result(self, text):
+        self.entry('user', [{'type': 'tool_result', 'tool_use_id': 't1', 'content': text}])
+
+    def call(self, tool, tool_input, sid='S1', agent=None, transcript=None):
+        d = self.fx.payload(tool, tool_input, sid=sid, agent=agent)
+        d['transcript_path'] = transcript or self.main
+        out, err = self.fx.hook('pretool', d)
+        if out and 'updatedInput' in out['hookSpecificOutput']:   # no gate may rewrite the call: never a clean pass
+            return 'updatedInput', err
+        why = out['hookSpecificOutput'].get('permissionDecisionReason') if out else None
+        return why, err
+
+    def ask(self, question='Release which batches?', **kw):
+        return self.call('AskUserQuestion', {'questions': [{'question': question, 'header': 'Release',
+                                                             'multiSelect': True, 'options': []}]}, **kw)[0]
+
+    def bash(self, command, **kw):
+        return self.call('Bash', {'command': command}, **kw)[0]
+
+    def stop(self, **tool_input):
+        return self.call('TaskStop', tool_input)[0]
+
+    def released(self, b):
+        return os.path.exists(os.path.join(self.fx.state, 'batches', 'S1', b + '.released'))
+
+    def release(self, b, sha=None):
+        return self.bash(f'python3 {HOOKS} release {b} {sha or self.SHA}')
+
+
+class BatchStateWorkerTest(BatchStateCase):
+    """Duty 1 (a worker never runs batches.py), the main session's marker touch, piece 8 and prune."""
+
+    def test_a_worker_never_runs_batches_py(self):
+        script = os.path.join(SCRIPTS, 'batches.py')
+        for command in (f'python3 {script} set {self.b1} status=passed reviewed_sha={self.SHA}',
+                        f'python3 {script} --session S1 show', f"bash -c 'python3 {script} table report'"):
+            self.assertIn('only the orchestrator writes batch state', self.bash(command, agent='a1') or '', command)
+        self.assertIsNone(self.bash(f"cat <<'EOF' > notes.md\npython3 {script} set x status=spec\nEOF", agent='a1'))
+        self.assertIsNone(self.bash(f'echo "run batches.py show later"', agent='a1'))
+
+    def test_a_main_session_batches_call_touches_the_marker(self):
+        before = self.fx.marker()['touched']
+        time.sleep(0.01)
+        self.assertIsNone(self.bash(f'python3 {SCRIPTS}/batches.py show'))
+        self.assertGreater(self.fx.marker()['touched'], before)
+
+    def test_piece_8_allows_the_orchestrators_batches_calls(self):
+        def allowed(command, agent=None):
+            out, _ = self.fx.hook('permission', self.fx.payload('Bash', {'command': command}, agent=agent,
+                                                               event='PermissionRequest'))
+            return out is not None
+        script = os.path.join(SCRIPTS, 'batches.py')
+        for command in (f'python3 {script} set {self.b1} status=spec rows=IB-1,IB-2 owned=app.py',
+                        f'python3 {script} show --json --session S1', f'python3 {script} table checkpoint {self.wave}',
+                        f'python3 {script} note {self.b1} minors /tmp/m.txt', f'{script} task {self.b1} add timer b1'):
+            self.assertTrue(allowed(command), command)
+        for command in (f'python3 {script} set {self.b1} status=spec', ):
+            self.assertFalse(allowed(command, agent='a1'), command)
+        for command in (f"python3 {script} note {self.b1} minors 'a;b'", f'python3 {script} set x rows=$X',
+                        f'python3 {script} rm x', f'python3 {script} set x status=spec --force', f'python3 {script}'):
+            self.assertFalse(allowed(command), command)
+        quoted = f"python3 {script} set {self.b1} status=spec 'owned=app/home/[account]/page.tsx,app/(marketing)/a.tsx'"
+        self.assertTrue(allowed(quoted))
+        self.assertFalse(allowed(quoted, agent='a1'))
+
+    def test_a_worker_never_runs_batches_py_with_a_quoted_path(self):
+        script = os.path.join(SCRIPTS, 'batches.py')
+        command = f"python3 {script} set {self.b1} 'owned=app/home/[account]/page.tsx,app/(marketing)/a.tsx'"
+        self.assertIn('only the orchestrator writes batch state', self.bash(command, agent='a1') or '')
+
+    def test_prune_ages_out_old_state_files(self):
+        d = os.path.join(self.fx.state, 'batches', 'S0', 'state')
+        old, new = os.path.join(d, 'old.json'), os.path.join(d, 'new.json')
+        write(old, '{}')
+        write(new, '{}')
+        os.utime(old, (time.time() - 15 * 86400,) * 2)
+        self.fx.start_run(sid='S9')   # run-start prunes the state dir
+        self.assertEqual((os.path.exists(old), os.path.exists(new)), (False, True))
+
+
+class SessionStartTest(Case):
+    def start(self, **env):
+        p = subprocess.run([sys.executable, HOOKS, 'session-start'], input=json.dumps(
+            {'hook_event_name': 'SessionStart', 'session_id': 'S-123', 'cwd': self.fx.work, 'source': 'startup'}),
+            capture_output=True, text=True, env=dict(self.fx.env, **env), cwd=self.fx.work)
+        self.assertEqual((p.returncode, p.stdout), (0, ''), p.stderr)
+
+    def test_the_export_is_appended(self):
+        env_file = os.path.join(self.fx.tmp, 'env.sh')
+        write(env_file, 'export OTHER=1\n')
+        self.start(CLAUDE_ENV_FILE=env_file)
+        with open(env_file) as f:
+            self.assertEqual(f.read(), 'export OTHER=1\nexport FOREMAN_SESSION=S-123\n')
+
+    def test_a_file_without_a_final_newline_gets_one_first(self):
+        for before, after in (('export OTHER=1', 'export OTHER=1\n'), ('', ''), (None, '')):
+            env_file = os.path.join(self.fx.tmp, 'env2.sh')
+            if os.path.exists(env_file):
+                os.remove(env_file)
+            if before is not None:
+                write(env_file, before)
+            self.start(CLAUDE_ENV_FILE=env_file)
+            with open(env_file) as f:
+                self.assertEqual(f.read(), after + 'export FOREMAN_SESSION=S-123\n', repr(before))
+
+    def test_nothing_without_an_env_file(self):
+        before = sorted(os.listdir(self.fx.tmp))
+        self.start()
+        self.assertEqual(sorted(os.listdir(self.fx.tmp)), before)
+
+
+class BatchStateCheckpointTest(BatchStateCase):
+    """Duty 2: the checkpoint gate on AskUserQuestion."""
+
+    def test_a_question_is_gated_until_the_table_is_in_the_assistants_text(self):
+        self.passed(self.b1)
+        self.batches('set', self.b2, 'status=parked', 'reason=open-question')
+        why = self.ask()
+        self.assertIn(f'run `python3 {SCRIPTS}/batches.py table checkpoint {self.wave}`', why)
+        self.assertIn('hooks_disabled: [batch_state]', why)
+        table = self.batches('table', 'checkpoint', self.wave)
+        self.tool_result(table)
+        why = self.ask(question='Q?')                          # shown, not in the text yet: denied, not ridden along
+        self.assertIn(f'paste the output of `python3 {SCRIPTS}/batches.py table checkpoint {self.wave}` as text in a '
+                      'message of its own, make one more call, then ask; the hooks see your text only once the next '
+                      'call starts', why)
+        self.assertIn('hooks_disabled: [batch_state]', why)
+        self.say('Spec checkpoint:\n\n' + table + '\nWhich batches should I release?')
+        self.assertIsNone(self.ask())
+        self.assertIsNone(self.ask(question='Anything else?'))   # any header is gated, and passes once pasted
+
+    def test_a_table_in_a_tool_result_is_denied_every_time_and_the_third_call_passes(self):
+        self.passed(self.b1)
+        self.tool_result(self.batches('table', 'checkpoint', self.wave))
+        for _ in range(2):
+            why = self.ask()
+            self.assertIn('as text in a message of its own, make one more call, then ask;', why)
+        self.assertIsNone(self.ask())                                   # the third deny against one table is the way out
+
+    def test_the_paste_in_its_own_message_releases_the_next_call_without_the_escape(self):
+        self.passed(self.b1)
+        table = self.batches('table', 'checkpoint', self.wave)
+        self.tool_result(table)
+        self.assertIsNotNone(self.ask())                                # deny 1 of 2: the escape is not reached
+        self.say(table)
+        self.assertIsNone(self.ask())                                   # the paste itself passes the call
+
+    def test_no_ask_user_question_call_is_ever_rewritten(self):
+        self.passed(self.b1)
+        table = self.batches('table', 'checkpoint', self.wave)
+        for step in (lambda: None, lambda: self.tool_result(table), lambda: self.say(table)):
+            step()
+            for _ in range(3):
+                self.assertNotEqual(self.call('AskUserQuestion', {'questions': [{'question': 'Q?', 'header': 'H'}]})[0],
+                                    'updatedInput')
+
+    def test_a_question_under_any_header_is_gated_at_the_checkpoint(self):
+        self.passed(self.b1)
+        why = self.call('AskUserQuestion', {'questions': [{'question': 'Should I approve the plan as written?',
+                                                           'header': 'Approve', 'multiSelect': False,
+                                                           'options': []}]})[0]
+        self.assertIn(f'run `python3 {SCRIPTS}/batches.py table checkpoint {self.wave}`', why)
+        self.assertIn('hooks_disabled: [batch_state]', why)
+
+    def test_a_stale_stamp_and_a_re_padded_paste(self):
+        self.passed(self.b1)
+        table = self.batches('table', 'checkpoint', self.wave)
+        notes = os.path.join(self.fx.tmp, 'm.txt')
+        write(notes, 'rename the helper\n')
+        self.batches('note', self.b1, 'minors', notes)
+        self.say(table)
+        self.assertIn('the table changed since it was shown', self.ask())
+        table = self.batches('table', 'checkpoint', self.wave)
+        lines = table.splitlines()
+        padded = [lines[0], '  ' + lines[1].replace('|', ' |  '), '| --- ' * 9 + '|'] + [l.replace(' | ', '  |   ') for l in lines[3:]]
+        self.say('\n'.join(padded))
+        self.assertIsNone(self.ask())
+
+    def test_a_pipe_in_a_minor_finding_and_a_fenced_paste_round_trip(self):
+        self.passed(self.b1)
+        notes = os.path.join(self.fx.tmp, 'm.txt')
+        write(notes, 'split `a | b` into two cases\n')
+        self.batches('note', self.b1, 'minors', notes)
+        table = self.batches('table', 'checkpoint', self.wave)
+        self.assertIn('split `a \\| b` into two cases', table)
+        self.say('```\n' + table + '```')
+        self.assertIsNone(self.ask())
+
+    def test_only_the_checkpoint_moment_is_gated(self):
+        self.assertIsNone(self.ask())                                   # no batch files
+        self.batches('set', self.b1, 'status=review')
+        self.assertIsNone(self.ask(question='Merge PR #12 now that it is released?'))   # nothing passed
+        self.passed(self.b1)
+        self.batches('set', self.b2, 'status=review')
+        self.assertIsNone(self.ask())                                   # a batch of the wave is still in review
+        self.batches('set', self.b2, 'status=parked', 'reason=no-pass')
+        self.assertIsNotNone(self.ask())
+
+    def test_two_waves_at_the_checkpoint_need_both_tables(self):
+        w2 = name_at(self.t0 + 600, 'w2a')
+        self.passed(self.b1)
+        self.passed(w2)
+        self.say(self.batches('table', 'checkpoint', self.wave))
+        self.assertIn(f'table checkpoint {w2[:-1]}', self.ask())
+        self.say(self.batches('table', 'checkpoint', w2[:-1]))
+        self.assertIsNone(self.ask())
+
+    def test_a_comment_round_that_ends_passed_again_is_gated_again(self):
+        self.passed(self.b1)
+        self.say(self.batches('table', 'checkpoint', self.wave))
+        self.assertIsNone(self.ask())
+        self.batches('stamp', self.b1, 'comment_sent')
+        self.assertIsNone(self.ask())                                   # in review: not the checkpoint
+        self.batches('add-round', self.b1, 'r=2', 'sha=' + 'd' * 40, 'entry=0', 'explore=pass', 'crit=0', 'imp=0',
+                     'minor=0')
+        self.passed(self.b1, 'd' * 40)
+        self.assertIn('the table changed since it was shown', self.ask())
+        self.say(self.batches('table', 'checkpoint', self.wave))
+        self.assertIsNone(self.ask())
+
+    def test_the_third_deny_against_one_table_passes_and_a_new_table_resets_the_count(self):
+        self.passed(self.b1)
+        self.assertIsNotNone(self.ask())
+        self.assertIsNotNone(self.ask())
+        why, err = self.call('AskUserQuestion', {'questions': []})
+        self.assertIsNone(why)
+        self.assertIn('let this call through after 2 denies', err)
+        self.passed(self.b2)                                            # the table changes: the count starts again
+        self.assertIsNotNone(self.ask())
+
+    def test_a_corrupt_batch_file_and_an_unreadable_transcript_fail_open(self):
+        self.passed(self.b1)
+        self.batches('table', 'checkpoint', self.wave)
+        os.remove(self.main)
+        why, err = self.call('AskUserQuestion', {'questions': []})
+        self.assertIsNone(why)
+        self.assertIn('could not read the transcript', err)
+        write(os.path.join(self.fx.state, 'batches', 'S1', 'state', self.b2 + '.json'), '{torn')
+        why, err = self.call('AskUserQuestion', {'questions': []})
+        self.assertIsNone(why)
+        self.assertIn('foreman hook error: checkpoint_gate', err)
+
+
+class TranscriptTailTest(InProcess):
+    """assistant_lines reads a transcript from its end and stops at the first entry older than the stamp."""
+
+    def test_reading_stops_at_the_first_older_entry_from_the_end(self):
+        now = time.time()
+        path = os.path.join(self.fx.tmp, 't.jsonl')
+        # an out-of-order first line: a reader that scanned forward and filtered by time would find it
+        lines = [{'type': 'assistant', 'timestamp': iso(now + 100), 'message': {'content': [{'type': 'text', 'text': 'EARLY'}]}},
+                 {'type': 'user', 'timestamp': iso(now - 100), 'message': {'content': 'old'}},
+                 {'type': 'assistant', 'timestamp': iso(now + 5), 'message': {'content': [{'type': 'text', 'text': 'a  b\nc'}]}}]
+        write(path, '\n'.join(json.dumps(e) for e in lines) + '\nnot json\n')
+        self.assertEqual(hooks.assistant_lines(path, now), {'ab', 'c'})
+
+    def test_a_large_transcript_stays_fast(self):
+        path = os.path.join(self.fx.tmp, 'big.jsonl')
+        old = json.dumps({'type': 'assistant', 'timestamp': iso(time.time() - 7200),
+                          'message': {'content': [{'type': 'text', 'text': 'x' * 400}]}}) + '\n'
+        with open(path, 'w') as f:
+            f.write(old * 100_000)   # about 50 MB
+            f.write(json.dumps({'type': 'assistant', 'timestamp': iso(time.time()),
+                                'message': {'content': [{'type': 'text', 'text': '| t |'}]}}) + '\n')
+        start = time.time()
+        self.assertEqual(hooks.assistant_lines(path, time.time() - 60), {'|t|'})
+        self.assertLess(time.time() - start, 0.5)
+
+
+class BatchStateReportTest(BatchStateCase):
+    """Duty 3: run-end with an unpasted report owes it; the Stop hook asks for it once at the end of the turn."""
+    FORMS = (f'python3 {HOOKS} run-end', f'python3 {HOOKS} run-end 2>&1', f'cd {SCRIPTS} && python3 ./hooks.py run-end')
+
+    def owed_path(self, sid='S1'):
+        return os.path.join(self.fx.state, 'runs', sid + '.owed')
+
+    def owed(self, sid='S1'):
+        return state.read_json(self.owed_path(sid))
+
+    def turn_end(self, message=None, sid='S1', cwd=None, active=False):
+        d = {'hook_event_name': 'Stop', 'session_id': sid, 'cwd': cwd or self.fx.work, 'transcript_path': self.main,
+             'stop_hook_active': active}
+        if message is not None:
+            d['last_assistant_message'] = message
+        return self.fx.hook('stop', d)
+
+    def run_end(self, sid='S1'):
+        """A run-end that runs: pretool (which may owe the report), then posttool (which ends the run)."""
+        self.assertIsNone(self.bash(self.FORMS[0], sid=sid))
+        self.fx.hook('posttool', self.fx.payload('Bash', {'command': self.FORMS[0]}, sid=sid, event='PostToolUse'))
+
+    def test_run_end_owes_an_unpasted_report_and_is_allowed(self):
+        self.batches('set', self.b1, 'status=parked', 'reason=timed-out')
+        for command in self.FORMS:
+            self.assertIsNone(self.bash(command), command)
+            owed = self.owed()
+            self.assertEqual(set(owed), {'id', 'text', 'blocked', 'since', 'repo'}, command)
+            self.assertEqual((owed['blocked'], owed['repo']), (0, os.path.realpath(self.fx.work)))
+            self.assertLess(abs(time.time() - 60 - owed['since']), 30)   # no current stamp: the write time minus 60 s
+            os.remove(self.owed_path())
+        report = self.batches('table', 'report').rstrip('\n')
+        self.tool_result(report)                     # a tool result isn't the assistant's text
+        self.assertIsNone(self.bash(self.FORMS[0]))
+        self.assertEqual(self.owed()['text'], report)
+        self.assertIn('parked: spec phase timed out', report)
+        self.assertEqual(self.owed()['id'], report.split('\n', 1)[0].split()[-1])
+        self.assertFalse(os.path.exists(os.path.join(self.fx.state, 'batches', 'S1', 'state', 'report.denies')))
+
+    def test_posttool_still_ends_the_run(self):
+        self.batches('set', self.b1, 'status=spec')
+        self.assertIsNone(self.bash(self.FORMS[0]))
+        self.fx.hook('posttool', self.fx.payload('Bash', {'command': self.FORMS[0]}, event='PostToolUse'))
+        self.assertIsNone(self.fx.marker())
+        self.assertIsNotNone(self.owed())
+
+    def test_the_turn_end_accepts_the_report_in_the_last_message(self):
+        self.batches('set', self.b1, 'status=spec')
+        self.run_end()
+        report = self.owed()['text']
+        padded = '\n'.join(re.sub(r'\|', ' |  ', line) for line in report.splitlines())
+        out, err = self.turn_end('Run complete.\n\n' + padded + '\n')
+        self.assertEqual((out, err), (None, ''))
+        self.assertFalse(os.path.exists(self.owed_path()))
+
+    def test_the_turn_end_hands_the_report_back_once(self):
+        self.batches('set', self.b1, 'status=spec')
+        self.run_end()
+        report = self.owed()['text']
+        out, _ = self.turn_end('Run complete.')
+        self.assertEqual(out['decision'], 'block')
+        self.assertTrue(out['reason'].startswith('foreman: end the run report with the spec-phase table, pasted '
+                                                 'verbatim as text as the last thing in your reply:\n\n'))
+        self.assertIn(report, out['reason'])
+        self.assertEqual(self.owed()['blocked'], 1)
+        out, err = self.turn_end(None)            # a turn with no text
+        self.assertIsNone(out)
+        self.assertIn('foreman: the run report was not pasted; ending anyway', err)
+        self.assertFalse(os.path.exists(self.owed_path()))
+
+    def test_a_turn_end_with_nothing_owed_says_nothing(self):
+        self.assertEqual(self.turn_end('hello'), (None, ''))
+        self.assertEqual(self.turn_end(None, sid='S9'), (None, ''))
+
+    def test_a_report_pasted_earlier_owes_nothing(self):
+        self.batches('set', self.b1, 'status=parked', 'reason=timed-out')
+        self.say(self.batches('table', 'report'))
+        self.say('Run complete.')
+        for command in self.FORMS:
+            self.assertIsNone(self.bash(command), command)
+        self.assertFalse(os.path.exists(self.owed_path()))
+
+    def test_run_end_with_no_batch_files_owes_nothing(self):
+        self.run_marker(sid='S2')
+        self.assertIsNone(self.bash(self.FORMS[0], sid='S2'))
+        self.assertFalse(os.path.exists(self.owed_path('S2')))
+
+    def test_disabled_owes_nothing_and_drops_a_debt(self):
+        self.batches('set', self.b1, 'status=spec')
+        self.run_end()
+        write(os.path.join(self.fx.work, '.claude/foreman.config.md'),
+              CONFIG.replace('---\n', '---\nhooks_disabled: [batch_state]\n', 1))
+        self.assertEqual(self.turn_end('Run complete.'), (None, ''))
+        self.assertFalse(os.path.exists(self.owed_path()))
+        self.run_marker()
+        self.assertIsNone(self.bash(self.FORMS[0]))
+        self.assertFalse(os.path.exists(self.owed_path()))
+
+    def test_the_debts_own_repo_decides_disabled(self):
+        self.batches('set', self.b1, 'status=spec')
+        self.run_end()
+        write(os.path.join(self.fx.work, '.claude/foreman.config.md'),
+              CONFIG.replace('---\n', '---\nhooks_disabled: [batch_state]\n', 1))
+        self.assertEqual(self.turn_end('Run complete.', cwd=self.fx.tmp), (None, ''))   # the cwd is no repo
+        self.assertFalse(os.path.exists(self.owed_path()))
+
+    def test_a_paste_in_an_earlier_message_of_the_turn_is_accepted(self):
+        self.batches('set', self.b1, 'status=spec')
+        report = self.batches('table', 'report')
+        at = state.read_json(os.path.join(self.fx.state, 'batches', 'S1', 'state', 'report.shown'))['at']
+        self.assertIsNone(self.bash(self.FORMS[0]))   # the paste rides in this message: PreToolUse can't see it yet
+        self.assertEqual(self.owed()['since'], at)
+        self.say(report)
+        self.fx.hook('posttool', self.fx.payload('Bash', {'command': self.FORMS[0]}, event='PostToolUse'))
+        self.say('Run complete.')
+        self.assertEqual(self.turn_end('Run complete.'), (None, ''))
+        self.assertFalse(os.path.exists(self.owed_path()))
+
+    def test_a_paste_before_the_stamp_does_not_count(self):
+        self.batches('set', self.b1, 'status=spec')
+        report = self.batches('table', 'report')
+        with open(self.main, 'a') as f:
+            f.write(json.dumps({'type': 'assistant', 'timestamp': iso(time.time() - 600),
+                                'message': {'content': [{'type': 'text', 'text': report}]}}) + '\n')
+        self.run_end()
+        out, _ = self.turn_end('Run complete.')
+        self.assertEqual(out['decision'], 'block')
+
+    def test_a_continued_turn_end_never_blocks(self):
+        self.batches('set', self.b1, 'status=spec')
+        self.run_end()
+        out, err = self.turn_end('Run complete.', active=True)
+        self.assertIsNone(out)
+        self.assertIn('foreman: the run report was not pasted; ending anyway', err)
+        self.assertFalse(os.path.exists(self.owed_path()))
+
+    def test_two_debts_block_once_together(self):
+        self.batches('set', self.b1, 'status=spec')
+        self.run_end()
+        other = os.path.join(self.fx.env['HOME'], '.claude', 'foreman', 'k2', 'runs', 'S1.owed')
+        write(other, json.dumps({'id': 'x', 'text': '| other | table |', 'blocked': 0, 'since': time.time(),
+                                 'repo': self.fx.work}))
+        out, _ = self.turn_end('Run complete.')
+        self.assertEqual(out['decision'], 'block')
+        self.assertIn(self.owed()['text'], out['reason'])
+        self.assertIn('| other | table |', out['reason'])
+        self.assertEqual((self.owed()['blocked'], state.read_json(other)['blocked']), (1, 1))
+        out, err = self.turn_end('Run complete.', active=True)
+        self.assertIsNone(out)
+        self.assertEqual((os.path.exists(self.owed_path()), os.path.exists(other)), (False, False))
+
+    def test_a_run_end_that_never_ran_is_owed_nothing(self):
+        self.batches('set', self.b1, 'status=spec')
+        self.assertIsNone(self.bash(self.FORMS[0]))   # pretool only: rejected or interrupted, the run is still live
+        self.assertEqual(self.turn_end('Run complete.'), (None, ''))
+        self.assertFalse(os.path.exists(self.owed_path()))
+
+    def test_a_corrupt_debt_fails_open(self):
+        write(self.owed_path(), '{not json')
+        out, err = self.turn_end('Run complete.')
+        self.assertIsNone(out)
+        self.assertIn('foreman', err)
+        self.assertFalse(os.path.exists(self.owed_path()))
+
+    def test_prune_ages_out_an_old_debt(self):
+        write(self.owed_path('S0'), '{"id": "x", "text": "x", "blocked": 0}')
+        os.utime(self.owed_path('S0'), (time.time() - 49 * 3600,) * 2)
+        self.fx.start_run(sid='S9')
+        self.assertFalse(os.path.exists(self.owed_path('S0')))
+
+
+class ContinuationTest(BatchStateCase):
+    """L5: a session continued under a new id (moved to the background, forked, resumed) keeps its run through an
+    alias `runs/<new>.json` = {alias: <old>}, found from the `continued-in` record ending the old transcript."""
+
+    def setUp(self):
+        super().setUp()
+        self.proj = os.path.join(self.fx.tmp, 'proj')
+        self.new = os.path.join(self.proj, 'S2.jsonl')
+        write(os.path.join(self.proj, 'S1.jsonl'),
+              json.dumps({'type': 'user', 'timestamp': iso(self.t0), 'message': {'content': '/foreman'}}) + '\n')
+        write(self.new, '')
+
+    def continued(self, new='S2', old='S1'):
+        with open(os.path.join(self.proj, old + '.jsonl'), 'a') as f:
+            f.write(json.dumps({'type': 'continued-in', 'sessionId': old, 'continuedInSessionId': new}) + '\n')
+
+    def session_start(self, sid='S2', source='fork'):
+        env_file = os.path.join(self.fx.tmp, f'env-{sid}-{source}.sh')
+        p = subprocess.run([sys.executable, HOOKS, 'session-start'], input=json.dumps(
+            {'hook_event_name': 'SessionStart', 'session_id': sid, 'cwd': self.fx.work, 'source': source,
+             'transcript_path': os.path.join(self.proj, sid + '.jsonl')}),
+            capture_output=True, text=True, env=dict(self.fx.env, CLAUDE_ENV_FILE=env_file), cwd=self.fx.work)
+        self.assertEqual((p.returncode, p.stdout, p.stderr), (0, '', ''))
+        with open(env_file) as f:
+            return f.read()
+
+    def session_end(self, sid):
+        self.fx.hook('session-end', {'hook_event_name': 'SessionEnd', 'session_id': sid, 'cwd': self.fx.work,
+                                     'reason': 'clear', 'transcript_path': os.path.join(self.proj, sid + '.jsonl')})
+
+    def fork_alias(self, sid='S2', run='S1', touched=None):
+        """An alias written straight to disk: a true fork, whose original transcript records no continuation."""
+        state.write_json(self.runs_file(sid), {'alias': run, 'touched': time.time() if touched is None else touched})
+
+    def runs_file(self, sid):
+        return os.path.join(self.fx.state, 'runs', sid + '.json')
+
+    def worker_call(self, sid='S2'):
+        return self.bash(f'python3 {SCRIPTS}/batches.py show', sid=sid, agent='a1', transcript=self.new)
+
+    def test_a_fork_or_resume_adopts_the_run_and_exports_its_id(self):
+        self.continued()
+        for source in ('fork', 'resume'):
+            self.assertEqual(self.session_start(source=source), 'export FOREMAN_SESSION=S2\n', source)
+            alias = state.read_json(self.runs_file('S2'))
+            self.assertEqual(alias['alias'], 'S1')
+            self.assertLess(time.time() - alias['touched'], 60)
+            self.assertEqual(set(alias), {'alias', 'touched'})
+        self.assertEqual(self.fx.marker()['started'], self.t0)   # the run's own marker is untouched in shape
+
+    def test_a_second_run_in_the_continued_session_keeps_batches_py_and_the_hooks_together(self):
+        self.continued()
+        exported = self.session_start().split('=')[1].strip()
+        self.fx.hook('posttool', self.fx.payload('Bash', {'command': f'python3 {HOOKS} run-end'}, sid='S2',
+                                                 event='PostToolUse'))
+        self.fx.start_run('S2')   # a second /foreman in the same session: the alias is gone, the run is S2's own
+        b = name_at(time.time(), 'w1a')
+        p = subprocess.run([sys.executable, os.path.join(SCRIPTS, 'batches.py'), 'set', b, 'status=spec'],
+                           capture_output=True, text=True, env=dict(self.fx.env, FOREMAN_SESSION=exported),
+                           cwd=self.fx.work)
+        self.assertEqual(p.returncode, 0, p.stderr)
+        self.assertEqual([x['batch'] for x in json.loads(self.batches('show', '--json', sid='S2'))], [b])
+
+    def test_the_continued_session_keeps_the_run_only_hooks(self):
+        self.continued()
+        self.session_start()
+        self.assertIn('only the orchestrator writes batch state', self.worker_call() or '')
+        self.passed(self.b1)
+        self.assertIn(f'table checkpoint {self.wave}', self.ask(sid='S2', transcript=self.new) or '')
+        before = self.fx.marker()['touched']
+        time.sleep(0.01)
+        self.assertIsNone(self.bash(f'python3 {SCRIPTS}/batches.py show', sid='S2', transcript=self.new))
+        self.assertGreater(self.fx.marker()['touched'], before)                     # the run's marker
+        self.assertGreater(state.read_json(self.runs_file('S2'))['touched'], before)   # and the alias
+
+    def test_batches_py_with_the_new_id_reads_the_runs_state(self):
+        self.continued()
+        self.session_start()
+        self.batches('set', self.b1, 'status=spec')
+        self.assertEqual([b['batch'] for b in json.loads(self.batches('show', '--json', sid='S2'))], [self.b1])
+        self.assertTrue(self.batches('table', 'report', sid='S2').startswith('foreman report S1 '))
+
+    def test_adoption_without_session_start(self):
+        self.continued()
+        self.assertIn('only the orchestrator writes batch state', self.worker_call() or '')
+        self.assertEqual(state.read_json(self.runs_file('S2'))['alias'], 'S1')
+
+    def test_an_unrelated_continuation_adopts_nothing(self):
+        self.continued(new='S3')
+        self.assertEqual(self.session_start(), 'export FOREMAN_SESSION=S2\n')
+        self.assertIsNone(self.worker_call())
+        self.assertFalse(os.path.exists(self.runs_file('S2')))
+
+    def test_no_live_marker_writes_nothing(self):
+        self.continued()
+        os.remove(self.runs_file('S1'))
+        self.assertEqual(self.session_start(), 'export FOREMAN_SESSION=S2\n')
+        self.assertIsNone(self.worker_call())
+        self.assertFalse(os.path.exists(self.runs_file('S2')))
+
+    def test_a_second_continuation_adopts_the_run_itself(self):
+        self.continued()
+        self.session_start()
+        self.continued(new='S3', old='S2')
+        write(os.path.join(self.proj, 'S3.jsonl'), '')
+        self.assertEqual(self.session_start(sid='S3'), 'export FOREMAN_SESSION=S3\n')
+        self.assertEqual(state.read_json(self.runs_file('S3'))['alias'], 'S1')   # the run, never the alias S2
+        self.assertIn('only the orchestrator writes batch state', self.worker_call(sid='S3') or '')
+
+    def test_an_alias_whose_run_ended_is_not_adopted(self):
+        self.continued()
+        self.session_start()
+        self.continued(new='S3', old='S2')
+        os.remove(self.runs_file('S1'))
+        self.assertEqual(self.session_start(sid='S3'), 'export FOREMAN_SESSION=S3\n')
+        self.assertFalse(os.path.exists(self.runs_file('S3')))
+
+    def test_a_corrupt_marker_does_not_stop_adoption(self):
+        state.write_json(self.runs_file('S0'), {'touched': 'soon'})
+        state.write_json(self.runs_file('S8'), ['not', 'a', 'marker'])
+        self.continued(new='S3')
+        self.assertEqual(self.session_start(), 'export FOREMAN_SESSION=S2\n')   # every runs file is read
+        self.assertFalse(os.path.exists(self.runs_file('S2')))
+        self.continued()
+        self.assertEqual(self.session_start(source='resume'), 'export FOREMAN_SESSION=S2\n')
+        self.assertEqual(state.read_json(self.runs_file('S2'))['alias'], 'S1')
+
+    def test_clear_in_a_true_fork_leaves_the_live_original_its_run(self):
+        self.continued()            # adopt's own path: the record it needs, then SessionStart fork; S1 still runs
+        self.session_start()
+        self.session_end('S2')
+        self.assertEqual((os.path.exists(self.runs_file('S2')), os.path.exists(self.runs_file('S1'))), (False, True))
+        self.assertNotIn('ended', self.fx.marker())
+
+    def test_clear_in_both_sessions_leaves_no_marker(self):
+        self.fork_alias()
+        self.session_end('S1')
+        self.assertTrue(self.fx.marker()['ended'])
+        self.assertLess(time.time() - self.fx.marker()['touched'], 60)   # the TTL still applies
+        self.session_end('S2')
+        self.assertEqual((os.path.exists(self.runs_file('S2')), os.path.exists(self.runs_file('S1'))), (False, False))
+
+    def test_clear_after_a_move_to_the_background_leaves_the_marker_to_its_ttl(self):
+        self.continued()
+        self.session_start()
+        self.session_end('S2')   # a move and a true fork look alike: the original's marker is kept, to expire by TTL
+        self.assertEqual((os.path.exists(self.runs_file('S2')), os.path.exists(self.runs_file('S1'))), (False, True))
+        self.assertNotIn('ended', self.fx.marker())
+
+    def test_a_new_run_in_the_original_forgets_that_it_ended(self):
+        self.fork_alias()
+        self.session_end('S1')
+        self.fx.start_run('S1')
+        self.assertNotIn('ended', self.fx.marker())
+
+    def test_a_new_run_in_the_continued_session_forgets_that_it_ended(self):
+        self.fork_alias()
+        self.session_end('S1')
+        self.fx.start_run('S2')   # resolves to the run's marker through the alias
+        self.assertNotIn('ended', self.fx.marker())
+        self.assertEqual(state.read_json(self.runs_file('S2'))['alias'], 'S1')
+
+    def test_run_end_removes_every_alias_of_the_run(self):
+        self.fork_alias('S2')
+        self.fork_alias('S3')
+        self.fx.hook('posttool', self.fx.payload('Bash', {'command': f'python3 {HOOKS} run-end'}, sid='S2',
+                                                 event='PostToolUse'))
+        self.assertEqual([f for f in os.listdir(os.path.join(self.fx.state, 'runs')) if f.endswith('.json')], [])
+        self.fx.start_run('S1')
+        self.session_end('S1')   # no stale sibling alias keeps the new run's marker
+        self.assertFalse(os.path.exists(self.runs_file('S1')))
+
+    def test_an_expired_alias_carries_nothing(self):
+        self.fork_alias(touched=time.time() - 49 * 3600)
+        self.session_end('S1')
+        self.assertFalse(os.path.exists(self.runs_file('S1')))
+
+    def test_an_alias_is_never_a_run_to_adopt(self):
+        state.write_json(self.runs_file('S0'), {'started': self.t0, 'touched': time.time(), 'args': ''})
+        self.fork_alias('S1', run='S0')   # the run's file is itself an alias (corrupt or racing)
+        self.fork_alias('S2', run='S1')
+        self.continued(new='S3', old='S2')
+        write(os.path.join(self.proj, 'S3.jsonl'), '')
+        self.assertEqual(self.session_start(sid='S3'), 'export FOREMAN_SESSION=S3\n')
+        self.assertFalse(os.path.exists(self.runs_file('S3')))
+
+    def test_clear_in_the_original_session_leaves_the_run_to_its_continuation(self):
+        self.continued()
+        self.session_start()
+        self.session_end('S1')
+        self.assertTrue(os.path.exists(self.runs_file('S1')))
+        self.assertIn('only the orchestrator writes batch state', self.worker_call() or '')
+        os.remove(self.runs_file('S2'))
+        self.session_end('S1')   # no session carries it on: the marker goes
+        self.assertFalse(os.path.exists(self.runs_file('S1')))
+
+    def test_run_end_in_the_new_session_ends_the_run_and_owes_the_runs_report(self):
+        self.continued()
+        self.session_start()
+        self.batches('set', self.b1, 'status=spec')
+        run_end = f'python3 {HOOKS} run-end'
+        self.assertIsNone(self.bash(run_end, sid='S2', transcript=self.new))
+        owed = state.read_json(os.path.join(self.fx.state, 'runs', 'S2.owed'))
+        self.assertEqual(owed['text'], self.batches('table', 'report', sid='S2').rstrip('\n'))
+        self.fx.hook('posttool', self.fx.payload('Bash', {'command': run_end}, sid='S2', event='PostToolUse'))
+        self.assertEqual((os.path.exists(self.runs_file('S2')), os.path.exists(self.runs_file('S1'))), (False, False))
+
+
+class BatchStateReleaseTest(BatchStateCase):
+    """Duty 5: the release check on hooks.py release."""
+
+    def test_auto_merge_releases_only_a_passed_batch_at_its_reviewed_sha(self):
+        self.run_marker('parallel 2 --auto-merge')
+        self.batches('set', self.b1, 'status=review')
+        self.assertIn('release only a passed batch', self.release(self.b1))
+        self.passed(self.b1)
+        self.assertIn(f'at its reviewed SHA {self.SHA}', self.release(self.b1, 'd' * 40))
+        self.batches('stamp', self.b1, 'comment_sent')
+        self.assertIn('reviewed SHA (none)', self.release(self.b1))
+        self.assertFalse(self.released(self.b1))
+        self.passed(self.b1)
+        self.assertIsNone(self.release(self.b1, self.SHA[:12]))       # an abbreviation of the reviewed SHA
+        self.assertTrue(self.released(self.b1))
+
+    def test_a_manual_release_needs_the_checkpoint_pasted_after_the_pass(self):
+        self.passed(self.b1)
+        self.assertIn('show the checkpoint table first', self.release(self.b1))
+        table = self.batches('table', 'checkpoint', self.wave)
+        self.assertIn('show the checkpoint table first', self.release(self.b1))   # shown, not pasted
+        self.say(table)
+        self.assertIsNone(self.release(self.b1))
+        self.assertTrue(self.released(self.b1))
+
+    def test_a_mixed_wave_is_gated_again_after_a_comment_round(self):
+        self.passed(self.b1)
+        self.passed(self.b2)
+        self.say(self.batches('table', 'checkpoint', self.wave))
+        self.assertIsNone(self.release(self.b1))   # recorded by hooks.py; `set status=released` skipped on purpose
+        self.batches('stamp', self.b2, 'comment_sent')
+        self.batches('add-round', self.b2, 'r=2', 'sha=' + 'd' * 40, 'entry=0', 'explore=pass', 'crit=0', 'imp=0',
+                     'minor=0')
+        self.passed(self.b2, 'd' * 40)
+        self.assertIn('the table changed', self.ask())
+        self.assertIn('show the checkpoint table first', self.release(self.b2, 'd' * 40))
+        self.say(self.batches('table', 'checkpoint', self.wave))
+        self.assertIsNone(self.ask())
+        self.assertIsNone(self.release(self.b2, 'd' * 40))
+
+    def test_a_re_pass_at_a_new_sha_needs_a_fresh_checkpoint_before_a_manual_release(self):
+        self.passed(self.b1)
+        table = self.batches('table', 'checkpoint', self.wave)
+        self.say(table)
+        self.passed(self.b1, 'd' * 40)                                  # a new round passed, no comment round between
+        stamps = json.loads(self.batches('show', self.b1, '--json'))['stamps']
+        self.assertEqual([k for k, _ in stamps], ['passed', 'passed'])
+        self.assertIn('show the checkpoint table first', self.release(self.b1, 'd' * 40))
+        self.assertFalse(self.released(self.b1))
+        self.say(self.batches('table', 'checkpoint', self.wave))
+        self.assertIsNone(self.release(self.b1, 'd' * 40))
+        self.assertTrue(self.released(self.b1))
+
+    def test_a_release_without_state_is_denied_only_for_a_spec_phase_worker(self):
+        self.assertIsNone(self.release(self.b2))
+        self.assertTrue(self.released(self.b2))
+        state.write_json(os.path.join(self.fx.state, 'batches', 'S1', 'agents', 'a1'),
+                         {'batch': self.b1, 'spec': True, 'briefed': True, 'time': time.time()})
+        self.assertIn(f'record the batch with `python3 {SCRIPTS}/batches.py set {self.b1}', self.release(self.b1))
+        self.assertFalse(self.released(self.b1))
+
+
+class BatchStateTaskStopTest(BatchStateCase):
+    """Duty 4: the TaskStop guard, and piece 11 off."""
+
+    def test_taskstop_needs_an_id_never_a_batch_name(self):
+        self.batches('set', self.b1, 'status=spec')
+        self.batches('task', self.b1, 'add', 'timer', 'bg123')
+        self.assertIn('TaskStop needs a task id', self.stop())
+        self.assertIn('TaskStop needs a task id', self.stop(task_id=''))
+        self.assertIn('not a batch name', self.stop(task_id=self.b1))
+        self.assertIn(f'batches.py show {self.b1}', self.stop(shell_id=self.b1))
+        self.assertIsNone(self.stop(task_id='bg123'))
+        self.assertIsNone(self.stop(task_id='some-other-task'))
+
+    def test_a_worker_is_stopped_only_after_stopping(self):
+        fw = 'fw-' + self.b1
+        self.batches('set', self.b1, 'status=spec')
+        self.batches('task', self.b1, 'add', 'worker', fw)
+        for ti in ({'task_id': fw}, {'shell_id': fw}, {'task_id': fw + '@foreman-team'}):
+            self.assertIn(f'hooks.py stopping {self.b1}` first', self.stop(**ti) or '', ti)
+        self.fx.bash(f'python3 {HOOKS} stopping {self.b1}')
+        self.assertIsNone(self.stop(task_id=fw))
+        time.sleep(0.01)
+        self.batches('task', self.b1, 'add', 'worker', fw + '-2')    # a replacement launched after `stopping`
+        self.assertIn('stopping', self.stop(task_id=fw + '-2') or '')
+        self.fx.bash(f'python3 {HOOKS} stopping {self.b1}')
+        self.assertIsNone(self.stop(task_id=fw + '-2'))
+
+    def test_an_unrecorded_worker_id_counts_as_a_worker(self):
+        self.batches('set', self.b1, 'status=spec')
+        self.assertIn('stopping', self.stop(task_id='fw-' + self.b1) or '')
+        self.assertIn('stopping', self.stop(task_id=f'fw-{self.b1}-3') or '')
+        state.write_json(os.path.join(self.fx.state, 'batches', 'S1', 'agents', 'a77'),
+                         {'batch': self.b1, 'spec': True, 'briefed': True, 'time': time.time()})
+        self.assertIn('stopping', self.stop(task_id='a77') or '')
+        self.fx.bash(f'python3 {HOOKS} stopping {self.b1}')
+        for tid in ('fw-' + self.b1, f'fw-{self.b1}-3', 'a77'):
+            self.assertIsNone(self.stop(task_id=tid), tid)
+
+    def test_no_run_or_disabled_gates_nothing(self):
+        self.passed(self.b1)
+        os.remove(os.path.join(self.fx.state, 'runs', 'S1.json'))
+        self.assertIsNone(self.ask())
+        self.assertIsNone(self.stop())
+        self.run_marker()
+        write(os.path.join(self.fx.work, '.claude/foreman.config.md'),
+              CONFIG.replace('---\n', '---\nhooks_disabled: [batch_state]\n', 1))
+        self.assertIsNone(self.ask())
+        self.assertIsNone(self.bash(f'python3 {HOOKS} run-end'))
+        self.assertIsNone(self.release(self.b1, 'd' * 40))
+        self.assertIsNone(self.bash(f'python3 {SCRIPTS}/batches.py show', agent='a1'))
+
+
+def template_trailers_line():
+    """The template's own `forbid_trailers:` line, so the test follows the shipped default."""
+    with open(os.path.join(HERE, '..', 'templates', 'foreman.config.md'), encoding='utf-8') as f:
+        return next(l for l in f if l.startswith('forbid_trailers:'))
+
+
+class TemplateTrailerTest(Case):
+    config = CONFIG.replace('forbid_trailers: [Co-Authored-By, Claude-Session, Generated with]\n', template_trailers_line())
+
+    def test_the_default_refuses_the_footer_and_nothing_like_it(self):
+        self.assertIn('Generated with', self.fx.bash(
+            'git commit -m "fix: x" -m "🤖 Generated with [Claude Code](https://claude.com/claude-code)"'))
+        self.assertIn('Generated with', self.fx.bash('gh pr create --title t --body "Generated with Claude Code"'))
+        self.assertIn('Co-Authored-By', self.fx.bash('git commit -m "x" -m "Co-Authored-By: a <a@b>"'))
+        for msg in ('the footer reads Generated with Claude Code', 'Generated with protoc 25.1'):
+            self.assertIsNone(self.fx.bash(f'git commit -m "x" -m "{msg}"'), msg)
+
+
+class AbsoluteGitTest(Case):
+    """`/usr/bin/git commit` and `/usr/bin/git push` are judged like `git commit` and `git push` (pieces 1, 2, 10)."""
+
+    def setUp(self):
+        super().setUp()
+        self.fx.start_run()
+        git(self.fx.work, 'switch', '-q', '-c', 'feat')
+
+    def test_the_gate_before_a_push(self):
+        self.fx.commit('app.py', 'print(2)\n')
+        self.assertIn('no passing gate for this tree', self.fx.bash('/usr/bin/git push -u origin HEAD'))
+        self.fx.gate()
+        self.assertIsNone(self.fx.bash('/usr/bin/git push -u origin HEAD'))
+
+    def test_the_worker_guard(self):
+        self.assertIn('no force-push', self.fx.bash('/usr/bin/git push --force', agent='a1'))
+        self.assertIn('no rebase', self.fx.bash('/usr/bin/git rebase origin/main', agent='a1'))
+
+    def test_the_spec_gate(self):
+        state.write_json(os.path.join(self.fx.state, 'batches', 'S1', 'agents', 'a1'),
+                         {'batch': 'w1b', 'spec': True, 'briefed': True, 'time': time.time()})
+        write(os.path.join(self.fx.work, 'app.py'), 'print(3)\n')
+        git(self.fx.work, 'add', 'app.py')
+        self.assertIn('this commit would include app.py', self.fx.bash('/usr/bin/git commit -m wip', agent='a1'))
+        self.assertIn("isn't released yet", self.fx.bash('/usr/bin/git push -u origin HEAD', agent='a1'))
 
 
 if __name__ == '__main__':
