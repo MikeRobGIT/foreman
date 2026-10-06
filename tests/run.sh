@@ -773,6 +773,13 @@ check "README's Hooks table has the verdict_receipt row" grep -qF '| `verdict_re
 check "README says how to turn it off" grep -qF 'hooks_disabled: [verdict_receipt]' "$root/README.md"
 check "the design spec is committed" test -f "$root/docs/superpowers/specs/2026-10-05-verdict-receipt-design.md"
 
+echo "## SKILL.md: the PR fix-round cap and the compaction reminder"
+w44=$(awk '/^  4\. \*\*Findings\*\*/{f=1} f&&/^  5\. \*\*/{f=0} f' "$sk")
+check "W4.4 resumes the worker for rounds 1 to 3" grep -qF 'Rounds 1-3' <<<"$w44"
+check "W4.4 hands rounds 4 and 5 to a fresh worker with the consolidated scope" grep -qF 'Rounds 4-5' <<<"$w44"
+check "W4.4 stops at round 6 and leaves the PR open for the human" grep -qF 'Round 6' <<<"$w44"
+check "README says a compaction in a live run re-injects where the steps are" grep -qF 'compaction' "$root/README.md"
+
 echo "## review.sh .entry and cfg.chain(use_env=False)"
 cd "$R"
 chain 60 30 200 quota good >"$T/chain.md"; rv

@@ -108,7 +108,7 @@ worker's commit whose contents can't be told.
 
 Run-only pieces act while the session's **run marker** exists: a prompt starting `/foreman` (or `/loop … /foreman`;
 not `ui`, `init` or `seed`) writes it, the skill runs `hooks.py run-end` when the run ends, `/clear` and logout delete it,
-and it expires after 48 hours. A session moved to the background, forked or resumed gets a new id; it keeps the run
+and it expires after 48 hours. After a compaction in a live run, the session-start hook says where the skill's steps and the batch state are (`batches.py show`), because a long wave compacts them away. A session moved to the background, forked or resumed gets a new id; it keeps the run
 through an alias file `runs/<new id>.json`, found from the `continued-in` record ending the old transcript. `/clear`
 and logout leave a run another live session may still own; a marker no session holds any more expires by its
 48-hour TTL.

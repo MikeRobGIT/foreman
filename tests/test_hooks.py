@@ -3154,6 +3154,32 @@ class SessionStartTest(Case):
         self.start()
         self.assertEqual(sorted(os.listdir(self.fx.tmp)), before)
 
+    def compact(self, sid='S1', source='compact'):
+        p = subprocess.run([sys.executable, HOOKS, 'session-start'], input=json.dumps(
+            {'hook_event_name': 'SessionStart', 'session_id': sid, 'cwd': self.fx.work, 'source': source}),
+            capture_output=True, text=True, env=self.fx.env, cwd=self.fx.work)
+        self.assertEqual(p.returncode, 0, p.stderr)
+        return json.loads(p.stdout)['hookSpecificOutput'] if p.stdout.strip() else None
+
+    def test_a_compaction_in_a_live_run_reminds_the_session_where_the_rules_are(self):
+        self.fx.start_run(prompt='/foreman parallel 2 --auto-merge')
+        out = self.compact()
+        self.assertEqual(out['hookEventName'], 'SessionStart')
+        ctx = out['additionalContext']
+        self.assertIn('/foreman parallel 2 --auto-merge', ctx)
+        self.assertIn('re-read the foreman skill', ctx)
+        self.assertIn(f'python3 {SCRIPTS}/batches.py show', ctx)
+
+    def test_a_compaction_with_no_run_says_nothing(self):
+        self.assertIsNone(self.compact())
+        self.fx.start_run(sid='S1')
+        self.assertIsNone(self.compact(sid='S2'))   # another session's run is not this session's
+
+    def test_other_sources_say_nothing_even_in_a_live_run(self):
+        self.fx.start_run()
+        for source in ('startup', 'clear'):
+            self.assertIsNone(self.compact(source=source), source)
+
 
 class BatchStateCheckpointTest(BatchStateCase):
     """Duty 2: the checkpoint gate on AskUserQuestion."""
