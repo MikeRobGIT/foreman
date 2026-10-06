@@ -76,10 +76,10 @@ def main():
     next_id = first_id = max(max(ids, default=0), backlog.reserved_max_id(repo, BACKLOG, P)) + 1
     if ids:
         anchor = max(n for n, l in enumerate(lines) if (m := ROW.match(l)) and int(m.group(1)) == max(ids))
-    else:  # a table with no rows yet (/foreman seed): new rows go under its |---| line
-        seps = [n for n, l in enumerate(lines) if re.match(r'^\|[-| :]+\|\s*$', l)]
+    else:  # a table with no rows yet (/foreman seed): new rows go under the |---| line below its `| id |` header
+        seps = [n for n in range(1, len(lines)) if re.match(r'^\|[-| :]+\|\s*$', lines[n]) and re.match(r'^\| *id *\|', lines[n - 1], re.I)]
         if not seps:
-            raise SystemExit(f'{BACKLOG}: no backlog table to add rows to (no |---| header line)')
+            raise SystemExit(f'{BACKLOG}: no backlog table to add rows to (want a "| id | ..." header line followed by a |---| line)')
         anchor = seps[0]
 
     def find(id_):
@@ -165,9 +165,9 @@ def main():
             elif issue:
                 problems.append(f'{row[:12]}: {issue[1]} " | " separators, want 5 (escape a pipe as \\|)')
             elif (cells := backlog.split_cells(row)) is None or len(cells) != 6:
-                problems.append(f'{row[:12]}: new row must be "| id | title | risk | status | acceptance | source |"')
+                problems.append(f'{row[:30]}: new row must be "| id | title | risk | status | acceptance | source |"')
             elif bad := backlog.validate_cells(cells, P):
-                problems.append(f'{row[:12]}: {"; ".join(bad)}')
+                problems.append(f'"{cells[1][:30]}": {"; ".join(bad)}')  # by title: its id was renumbered already
             else:
                 new_rows.append(row)
                 log.append(f'new    {row[:60]}')

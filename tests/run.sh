@@ -109,6 +109,31 @@ for bad in '| IB-NEW-a | t | urgent | ready | a | s |' '| IB-NEW-a | t | low | s
   check "bk.py refuses new row [$bad] (exit 1)" test $? = 1
   check "...and writes nothing" cmp -s "$T/seed-before.md" "$T/seed/.claude/improvement-backlog.md"
 done
+# a legend table above the backlog table must not take the rows
+mkdir -p "$T/seed2/.claude" && printf -- '---\n---\n' >"$T/seed2/.claude/foreman.config.md"
+printf '# Backlog\n\n| key | meaning |\n|-----|---------|\n| low | small |\n\n| id | title | risk | status | acceptance | source |\n|----|-------|------|--------|------------|--------|\n' >"$T/seed2/.claude/improvement-backlog.md"
+python3 "$root/scripts/bk.py" "$T/seed2" --no-fetch "$T/seed.json" >/dev/null 2>&1
+check "bk.py puts seeded rows under the | id | table, not a legend table above it" awk '/^\| low /{l=NR} /^\| id /{h=NR} /^\| IB-/{if (h && !r) r=NR} END{exit !(l && h && l < h && r > h + 1)}' "$T/seed2/.claude/improvement-backlog.md"
+# no | id | header: refuse rather than guess a table
+printf '# Backlog\n\n| key | meaning |\n|-----|---------|\n' >"$T/seed2/.claude/improvement-backlog.md"
+cp "$T/seed2/.claude/improvement-backlog.md" "$T/seed2-before.md"
+python3 "$root/scripts/bk.py" "$T/seed2" --no-fetch "$T/seed.json" >"$T/seed2.out" 2>&1
+check "bk.py refuses an empty backlog with no | id | header (exit 1)" test $? = 1
+check "...and writes nothing" cmp -s "$T/seed2-before.md" "$T/seed2/.claude/improvement-backlog.md"
+# a non-default prefix on an empty table
+mkdir -p "$T/seed3/.claude" && printf -- '---\nid_prefix: FM\n---\n' >"$T/seed3/.claude/foreman.config.md"
+printf '| id | title | risk | status | acceptance | source |\n|----|-------|------|--------|------------|--------|\n' >"$T/seed3/.claude/improvement-backlog.md"
+echo '{"pr": 0, "new_rows": ["| FM-NEW-a | first | low | ready | passes | seed |"]}' >"$T/seed3.json"
+python3 "$root/scripts/bk.py" "$T/seed3" --no-fetch "$T/seed3.json" >/dev/null 2>&1
+check "bk.py numbers a non-default prefix on an empty table from FM-1" grep -q '^| FM-1 | first |' "$T/seed3/.claude/improvement-backlog.md"
+# the real flow: `init` was pushed, the placeholder is deleted, origin still holds it, so ids start above IB-1
+git init -q --bare -b main "$T/seed-origin.git" && git clone -q "$T/seed-origin.git" "$T/seed4" 2>/dev/null
+mkdir -p "$T/seed4/.claude" && cp "$root/templates/improvement-backlog.md" "$T/seed4/.claude/" && printf -- '---\n---\n' >"$T/seed4/.claude/foreman.config.md"
+git -C "$T/seed4" add -A && git -C "$T/seed4" commit -qm init && git -C "$T/seed4" push -q origin HEAD:main 2>/dev/null
+grep -v 'setup example, replace me' "$T/seed4/.claude/improvement-backlog.md" >"$T/seed4.new" && mv "$T/seed4.new" "$T/seed4/.claude/improvement-backlog.md"
+python3 "$root/scripts/bk.py" "$T/seed4" "$T/seed.json" >/dev/null 2>&1
+check "bk.py (real origin): seeded ids start above the placeholder's id on origin" test "$(grep -E '^\| IB-' "$T/seed4/.claude/improvement-backlog.md" | cut -c1-8 | tr '\n' ' ')" = "| IB-2 | | IB-3 | "
+check "...and only the backlog changed" test "$(git -C "$T/seed4" status --short)" = " M .claude/improvement-backlog.md"
 
 echo "## wt-setup.sh"
 mkdir -p "$T/repo" && cd "$T/repo" && git init -q -b main && echo x >f && git add f && git commit -qm init
@@ -614,6 +639,7 @@ check "...which ends before the Hooks section" appears_before "$sk" '### Worker 
 check "...and the Hooks section comes before the Backlog UI section" appears_before "$sk" '## Hooks' '## Backlog UI'
 check "the Seed section sits between Init and Step 0.5" appears_before "$sk" '## Init' '## Seed'
 check "...and ends before Step 0.5" appears_before "$sk" '## Seed' '## Step 0.5'
+check "Seed dry-runs before it deletes the placeholder" appears_before "$sk" '2. Run `python3 "$FOREMAN/bk.py" <repo> --dry-run <file>`' '3. Only once the dry run is clean'
 check "Seed numbers rows through bk.py" grep -qF 'python3 "$FOREMAN/bk.py" <repo> --dry-run <file>' "$SK"
 check "seed is in the argument hint and the token list" test "$(grep -c -F 'seed [<prd-path>] [append]' "$SK")" = 2
 check "plugin version 0.6.0" grep -qF '"version": "0.6.0"' "$root/.claude-plugin/plugin.json"

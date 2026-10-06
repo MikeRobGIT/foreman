@@ -557,7 +557,9 @@ You run steps 2-8 on your batch in your own worktree, with these overrides:
   path), RULE NOTES, NEW ROWS, RETRO, risks. End with ONE fenced `json` block the orchestrator feeds to
   `bookkeeping_tool`: `{"done": [{"id", "note"}], "append": [{"id", "note"}], "new_rows": ["| <prefix>-NEW-a | title | risk | ready | acceptance | source |"],
   "rule_notes": [{"file", "old", "new"}]}` (`old` is the exact sentence, one match; a raw ` | ` in a note or a row
-  shifts the table's columns: write `\|`; the orchestrator adds `pr` and numbers `<prefix>-NEW-*` from the real max id).
+  shifts the table's columns: write `\|`; the orchestrator adds `pr` and numbers `<prefix>-NEW-*` from the real max id;
+  a new row's risk is exactly `low`, `medium` or `high`, its status a known word (`ready`) and its title not empty:
+  one bad row makes `bk.py` refuse the whole report).
   The block may also carry `"spec": "<spec path>"`, which `bk.py` ignores.
 
 ### Worker spec phase
@@ -680,8 +682,9 @@ never commit, push or open a PR. Not a run: no run marker, no worker.
 1. **Check the backlog.** Read `backlog_path` and `id_prefix` with `python3 "$FOREMAN/cfg.py" <repo> <key> <default>`
    (`<repo>` is `git rev-parse --show-toplevel`). If the backlog file doesn't exist, stop and suggest
    `/foreman init`. If it holds a row other than the template's placeholder (the one whose source is
-   `setup example, replace me`), stop and say so unless `append` was given; with `append`, keep every existing
-   row and number the new ones after them.
+   `setup example, replace me`), stop and say so unless `append` was given. With `append`, keep every existing
+   row; `bk.py` numbers the new ones above every existing id and puts them after the highest-numbered row. The
+   placeholder is dropped either way.
 2. **Survey.** Read the README and docs, the directory layout, the tests and the `gate`. Grep for
    `TODO|FIXME|HACK`. Look for untested core modules, dead config, stale docs and gate gaps. Build on what exists;
    don't propose what the code already does. Don't run the gate and don't install anything. With a
@@ -697,19 +700,22 @@ never commit, push or open a PR. Not a run: no run marker, no worker.
    - `risk: high` for schema or migration changes, auth, payments, a public API or a wide blast radius (those
      rows run only when named); otherwise `low` or `medium`. `status: ready`, or `deferred` as above.
 4. **Size.** Score each draft 1-10 for effort and blast radius. A row at 7 or more is more than one PR: split it
-   into rows of 6 or less, the prerequisite first. Write at most 15 rows, best first; say in the report what you
-   left out.
-5. **Write.**
-   1. If the placeholder row is present, delete that one line with Edit.
-   2. Save `{"pr": 0, "new_rows": ["| <prefix>-NEW-a | title | risk | ready | acceptance | source |", ...]}` to a
+   into rows of 6 or less, the prerequisite first. A row you can't split below 7 is `deferred`, and its
+   `acceptance` says what makes it too big. Write at most 15 rows, best first; say in the report what you left out.
+5. **Write.** Use `bk.py` itself, not `bookkeeping_tool`: a custom tool may not add rows to an empty table.
+   1. Save `{"pr": 0, "new_rows": ["| <prefix>-NEW-a | title | risk | ready | acceptance | source |", ...]}` to a
       scratch file, one distinct `-NEW-<x>` placeholder per row, one line per row, a literal pipe in a cell
       written `\|`.
-   3. Run `python3 "$FOREMAN/bk.py" <repo> --dry-run <file>`, then the same without `--dry-run`. It numbers the
-      rows above every id on origin and in open UI branches and refuses the whole write on a bad row: fix the rows
-      it lists under PROBLEMS and run it again. Don't edit the backlog around it. A write that succeeded is
+   2. Run `python3 "$FOREMAN/bk.py" <repo> --dry-run <file>`. It refuses the whole write on a bad row (a risk
+      other than `low`, `medium` or `high`, an unknown status word, an empty title, a raw ` | `): fix the rows it lists under PROBLEMS and run it again. The ids a dry run prints are one too high
+      while the placeholder is still in the file.
+   3. Only once the dry run is clean: if the placeholder row is present, delete that one line with Edit, then
+      run the same command without `--dry-run`. Don't edit the backlog around `bk.py`. A write that succeeded is
       final: running it again adds the rows a second time.
 6. **Report** the written rows (id, risk, title), what was left out and why, and the next steps: read the diff,
    edit what you disagree with (or reorder in `/foreman ui` once it's on `origin`), commit, run `/foreman`.
+   Ids start above the highest id on origin's default branch or in an open UI branch, and an id is never
+   reused: after a pushed `init` the first row is `<prefix>-2`, not `<prefix>-1`.
 
 ## Step 0.5 — Load config (do this first, before step 0)
 
