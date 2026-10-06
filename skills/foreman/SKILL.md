@@ -586,7 +586,7 @@ You are in it when your prompt's first line ends in ` spec-phase`.
    `- **Scope request:**` line. Label every open question `- **Blocking:**` (the batch can't be built as
    specified without the answer) or `- **Non-blocking:**`; on a Blocking one, finish the spec and report
    `SPEC READY` at once (step 5). If `{{design_spec_dir}}` already holds a parked spec for these rows
-   (`Status: parked`), start from it: delete its `Status: parked` line and its old Review responses, then revise
+   (`Status: parked`), start from it: delete its `Status: parked` line and its old Review responses, add any section the current template has that the parked spec lacks (a spec parked under an older template would otherwise fail the pre-check twice and park again), then revise
    it. Commit it with `git add -- <spec path> && git commit -m "<message>"` in a call of its own, never `git add -A`,
    as your branch's first commit. Don't push. The build phase continues on this same branch.
 5. Report with `SPEC READY <absolute worktree path> <branch> <spec path> <sha>` as the FIRST line of your final
@@ -806,6 +806,7 @@ Read `.claude/foreman.config.md`, or the legacy `.claude/improve-next.config.md`
 
 ### 6. Request review — independent local reviewers
 - Invoke `superpowers:requesting-code-review` if available (a Claude `general-purpose` subagent reviewer); without it, dispatch that subagent yourself with the diff, the row's `acceptance` and the Critical/Important/Minor labels the merge gates read.
+  - **Give it a Spec axis, reported apart from defects** (one axis can hide the other). The spec is the row's `acceptance` plus your step-2 plan. It reports: (a) what the spec asked for that is missing or only partly done; (b) what the diff does that nobody asked for (scope creep); (c) what looks implemented but looks wrong. Each finding quotes the spec line it rests on.
 - **Also run the reviewer chain**: `$FOREMAN/review.sh <base> <log>` (base = the PR's base branch, e.g. `main`) — a cross-model second opinion (a different model family catches different defects). Run it in the background; each reviewer is bounded by `reviewer_timeout_seconds` and the stall watchdog, and the chain moves to the next reviewer on quota, credits, auth, an unknown model, a stall or a timeout.
   - Exit 0 = a real review is in `<log>`, and `<log>.reviewer` names the reviewer; read and triage it. Exit 1 = the chain is exhausted (`<log>.attempts` says why each fell through): say on the PR that no cross-model review ran and rely on the Claude reviewer. Never treat a missing review as a pass, and never `2>/dev/null` the run.
   - The chain sends the diff (or the repo, for reviewers that read it) to every provider it tries.

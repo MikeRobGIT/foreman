@@ -42,6 +42,11 @@ is `/foreman:foreman`.
 In `parallel N`, every batch starts with a spec, not code:
 - **The spec.** The worker explores the code, writes `<design_spec_dir>/<date>-<rows>-design.md` from
   `templates/spec.md`, and commits it as the branch's first commit.
+- **The sections.** Beyond the code-reading ones, the template asks for `Out of scope`, a `Seams` line and
+  `Feedback loop (bug rows)` under Tests, a `Review focus` section (inputs the design implies that no test
+  exercises), `create`/`modify`/`reference` labels in the outline, and a `Door` and `Blast radius` line under
+  Risks. Reviewers also report what they `Declined to judge`. A spec parked under an older template gets the
+  new sections added when its batch restarts. Attributions are in `NOTICE`.
 - **The review.** The orchestrator reviews it in rounds: the reviewer chain in spec mode
   (`review.sh --spec`), plus a read-only Claude reviewer that derives its own list of callers and writers
   before it reads the spec's list. A round with no Critical or Important finding passes.
