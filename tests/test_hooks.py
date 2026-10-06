@@ -1783,6 +1783,140 @@ class TrailerGuardTest(Case):
             self.assertIn('Co-Authored-By', self.fx.bash(command) or '', name)
 
 
+class VerdictReceiptTest(Case):
+    """An autonomous merge needs a PASS from a verifier, for the SHA it names (docs/superpowers/specs/2026-10-05-verdict-receipt-design.md)."""
+
+    def setUp(self):
+        super().setUp()
+        self.fx.start_run(prompt='/foreman --auto-merge')
+        self.sha = git(self.fx.work, 'rev-parse', 'HEAD').strip()
+
+    def receipt(self, pr=5, sha=None):
+        return os.path.join(self.fx.state, 'verdict', f'{pr}-{sha or self.sha}')
+
+    def stop(self, msg, prompt=None, agent='v1', agent_type='Explore', active=False, sid='S1'):
+        prompt = f'foreman-verifier: 5 {self.sha}\nReview PR 5.' if prompt is None else prompt
+        d = {'hook_event_name': 'SubagentStop', 'session_id': sid, 'cwd': self.fx.work, 'agent_id': agent,
+             'agent_type': agent_type, 'agent_transcript_path': transcript(self.fx, agent, prompt),
+             'last_assistant_message': msg, 'stop_hook_active': active}
+        out, self.err = self.fx.hook('subagent-stop', d)
+        return out['reason'] if out else None
+
+    def verdict(self, word='PASS', sha=None, **kw):
+        return self.stop(f'VERDICT {word} {sha or self.sha}\nno findings', **kw)
+
+    def merge(self, sha=None, pr='5', sid='S1'):
+        return self.fx.bash(f'gh pr merge {pr} --squash --match-head-commit {sha or self.sha}', sid=sid)
+
+    # the writer
+
+    def test_a_pass_writes_a_receipt(self):
+        self.assertIsNone(self.verdict('PASS'))
+        r = state.read_json(self.receipt())
+        self.assertEqual((r['verdict'], r['pr'], r['sha']), ('PASS', 5, self.sha))
+
+    def test_a_fail_writes_a_fail_receipt(self):
+        self.assertIsNone(self.verdict('FAIL'))
+        self.assertEqual(state.read_json(self.receipt())['verdict'], 'FAIL')
+
+    def test_a_short_sha_is_stored_under_the_full_one(self):
+        self.assertIsNone(self.stop(f'VERDICT PASS {self.sha[:7]}\nok', prompt=f'foreman-verifier: 5 {self.sha[:7]}\nx'))
+        self.assertEqual(state.read_json(self.receipt())['sha'], self.sha)
+
+    def test_a_message_without_a_verdict_line_is_sent_back_once(self):
+        why = self.stop('Looks fine to me.')
+        self.assertIn(f'VERDICT PASS {self.sha}', why)
+        self.assertFalse(os.path.exists(self.receipt()))
+        self.assertIsNone(self.stop('Looks fine to me.', active=True))   # the second stop goes through
+
+    def test_a_verdict_for_another_sha_is_sent_back_and_writes_nothing(self):
+        self.assertIn('names', self.stop('VERDICT PASS ' + 'a' * 40 + '\nok'))
+        self.assertEqual(os.listdir(os.path.dirname(self.receipt())) if os.path.isdir(os.path.dirname(self.receipt())) else [], [])
+
+    def test_a_sha_that_is_not_a_commit_writes_nothing_and_does_not_trap_the_verifier(self):
+        bad = 'deadbeef'
+        self.assertIsNone(self.stop(f'VERDICT PASS {bad}\nok', prompt=f'foreman-verifier: 5 {bad}\nx'))
+        self.assertIn('does not resolve', self.err)
+        self.assertFalse(os.path.isdir(os.path.dirname(self.receipt())))
+
+    def test_a_worker_tag_never_writes_a_receipt(self):
+        self.stop(f'VERDICT PASS {self.sha}\nok', prompt='foreman-worker: w1a\nrows')
+        self.assertFalse(os.path.exists(self.receipt()))
+
+    def test_an_untagged_agent_never_writes_a_receipt(self):
+        self.assertIsNone(self.stop(f'VERDICT PASS {self.sha}\nok', prompt='just a helper'))
+        self.assertFalse(os.path.exists(self.receipt()))
+
+    def test_no_receipt_outside_a_live_run(self):
+        self.assertIsNone(self.verdict('PASS', sid='S2'))
+        self.assertFalse(os.path.exists(self.receipt()))
+
+    def test_a_disabled_piece_writes_nothing(self):
+        write(os.path.join(self.fx.work, '.claude/foreman.config.md'),
+              CONFIG.replace('---\n', '---\nhooks_disabled: [verdict_receipt]\n', 1))
+        self.assertIsNone(self.verdict('PASS'))
+        self.assertFalse(os.path.exists(self.receipt()))
+
+    # the gate
+
+    def test_an_autonomous_merge_with_no_receipt_is_denied(self):
+        why = self.merge()
+        self.assertIn('no independent verdict for PR 5 at', why)
+        self.assertIn(f'foreman-verifier: 5 {self.sha[:7]}', why)
+
+    def test_a_pass_receipt_allows_the_merge_and_a_short_sha_matches_it(self):
+        self.verdict('PASS')
+        self.assertIsNone(self.merge())
+        self.assertIsNone(self.merge(sha=self.sha[:7]))
+
+    def test_a_fail_receipt_denies_with_the_fix_instruction(self):
+        self.verdict('FAIL')
+        self.assertIn('failed PR 5 at', self.merge())
+
+    def test_a_receipt_for_an_older_head_does_not_cover_a_newer_one(self):
+        self.verdict('PASS')
+        self.fx.commit('app.py', 'print(2)\n', cwd=self.fx.work)
+        new = git(self.fx.work, 'rev-parse', 'HEAD').strip()
+        self.assertIn('no independent verdict for PR 5 at', self.merge(sha=new))
+
+    def test_a_receipt_for_another_pr_does_not_cover_this_one(self):
+        self.stop(f'VERDICT PASS {self.sha}\nok', prompt=f'foreman-verifier: 6 {self.sha}\nx')
+        self.assertIn('no independent verdict for PR 5 at', self.merge())
+
+    def test_the_pr_number_comes_from_pr_view_when_the_command_has_none(self):
+        self.verdict('PASS')
+        write(self.fx.env['FAKE_GH_PR'], json.dumps({'headRefName': 'feat', 'number': 5, 'commits': []}))
+        self.assertIsNone(self.fx.bash(f'gh pr merge --squash --match-head-commit {self.sha}'))
+
+    def test_a_merge_with_no_readable_pr_number_is_denied(self):
+        self.assertIn("which PR", self.fx.bash(f'gh pr merge --squash --match-head-commit {self.sha}'))
+
+    def test_the_missing_pin_is_still_merge_disciplines_to_say(self):
+        self.assertIn('add `--match-head-commit <sha>`', self.fx.bash('gh pr merge 5 --squash'))
+
+    def test_loop_and_parallel_auto_merge_are_gated_but_manual_runs_are_not(self):
+        for sid, prompt, gated in (('L', '/foreman loop', True), ('P', '/foreman parallel 4 --auto-merge', True),
+                                   ('M', '/foreman', False), ('PM', '/foreman parallel 4', False),
+                                   ('T', '/loop 2h /foreman --auto-merge', True)):
+            self.fx.start_run(sid=sid, prompt=prompt)
+            why = self.merge(sid=sid)
+            self.assertEqual('no independent verdict' in (why or ''), gated, prompt)
+
+    def test_gt_and_gh_api_merges_keep_their_own_denials(self):
+        self.assertIn('no gt merge during a run', self.fx.bash('gt merge'))
+        self.assertIn('no gh api merge during a run', self.fx.bash('gh api -X PUT repos/o/r/pulls/5/merge -f sha=abc1234'))
+
+    def test_hooks_disabled_drops_the_gate(self):
+        write(os.path.join(self.fx.work, '.claude/foreman.config.md'),
+              CONFIG.replace('---\n', '---\nhooks_disabled: [verdict_receipt]\n', 1))
+        self.assertIsNone(self.merge())
+
+    def test_a_subagent_merge_is_still_workers_never_merge(self):
+        why = self.fx.bash(f'gh pr merge 5 --squash --match-head-commit {self.sha}', agent='a1')
+        self.assertIn('workers never merge', why)
+        self.assertNotIn('independent verdict', why)
+
+
 class BacklogCheckTest(Case):
     def post(self, path, tool='Edit', **kw):
         out, _ = self.fx.hook('posttool', self.fx.payload(tool, {'file_path': path}, event='PostToolUse', **kw))

@@ -760,6 +760,19 @@ check "seed writes Depends on for rows it orders foundation-first" grep -qF 'Dep
 check "seed in append mode skips a draft that matches an existing row" grep -qF 'matches an existing row' <<<"$seedsec"
 check "the Arguments list names the picker's exit codes" grep -qF 'exit 1 means none is eligible' "$sk"
 
+echo "## SKILL.md and README: the verdict receipt"
+step11=$(awk '/^### 11\. Merge decision/{f=1;next} /^### 12\. /{f=0} f' "$sk")
+check "step 11 dispatches a verifier whose prompt starts with the tag" grep -qF 'foreman-verifier: <pr> <sha>' <<<"$step11"
+check "step 11 names the verdict line" grep -qF 'VERDICT PASS <sha>' <<<"$step11"
+check "step 11 says a FAIL is a step-8 finding and two FAILs stop the loop" grep -qF 'two FAILs' <<<"$step11"
+check "step 11 says manual mode needs no verifier" grep -qF 'Manual mode needs none' <<<"$step11"
+check "W4.2b's reviewer carries the verifier tag under --auto-merge" bash -c "grep -F 'foreman-verifier: <pr> <sha>' '$sk' | wc -l | grep -qE '^ *[2-9]'"
+check "the Non-negotiables mention the hook-enforced verdict" grep -qF 'returned `VERDICT PASS <sha>`' "$sk"
+check "SKILL.md's Hooks table has the verdict_receipt row" grep -qF '| `verdict_receipt` |' "$sk"
+check "README's Hooks table has the verdict_receipt row" grep -qF '| `verdict_receipt` |' "$root/README.md"
+check "README says how to turn it off" grep -qF 'hooks_disabled: [verdict_receipt]' "$root/README.md"
+check "the design spec is committed" test -f "$root/docs/superpowers/specs/2026-10-05-verdict-receipt-design.md"
+
 echo "## review.sh .entry and cfg.chain(use_env=False)"
 cd "$R"
 chain 60 30 200 quota good >"$T/chain.md"; rv

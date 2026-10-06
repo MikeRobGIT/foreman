@@ -71,7 +71,7 @@ spec_phase_timeout: 60          # minutes of worker time in the spec phase befor
 forbid_trailers: [Co-Authored-By, Claude-Session, "/^\W*Generated with \[?Claude Code/"]   # lines that must never start a commit, PR or comment message; an entry written /.../ is a regex searched within each line (this one matches only the "Generated with Claude Code" footer); empty this list to allow attribution lines [none]
 gate_exempt: [docs/**, "**/*.md"]   # gitignore-style paths a push may change without a gate receipt; backlog_path and rules_glob always may [docs/**, **/*.md]
 worker_agent_types: [general-purpose, workflow-subagent]   # subagent types the briefing and report check apply to [these two]
-hooks_disabled: []              # hook ids off in this repo: gate_before_push, worker_guard, merge_discipline, trailer_guard, backlog_check, worker_briefing, report_check, script_allow, spec_gate, batch_state, status_pane [none]
+hooks_disabled: []              # hook ids off in this repo: gate_before_push, worker_guard, merge_discipline, verdict_receipt, trailer_guard, backlog_check, worker_briefing, report_check, script_allow, spec_gate, batch_state, status_pane [none]
 status_pane: true               # the wave status band above the prompt during a run [true]
 ---
 
