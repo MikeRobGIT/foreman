@@ -60,7 +60,7 @@ Tokens may be combined in any order (e.g. `IB-03 loop`; ids use the config's `id
   mode** (`loop`/`--auto-merge` token) self-merge is allowed ONLY on a fully-green pass — `{{gate}}` +
   matched `{{extra_gates}}` green, `{{required_ci}}` + all `{{review_bots}}` green with **no unresolved
   Critical/Important** finding after step-8 triage, step-9 browser-verify passed (or a justified
-  zero-surface skip), in parallel mode a W4.2b verdict on the merge SHA with no Critical or Important finding and no deviation ruled unacceptable, and `risk != high`. Anything short of that STOPs and notifies. Never merge on yellow.
+  zero-surface skip), in parallel mode a W4.2b verdict on the merge SHA with no Critical or Important finding and no deviation ruled unacceptable, and `risk != high`. Anything short of that STOPs and notifies. Never merge on yellow. In autonomous mode the hooks also refuse `gh pr merge` until a verifier who did not write the code has returned `VERDICT PASS <sha>` for the head SHA (step 11).
 - **Wait for ALL configured review bots + CI before addressing** (step 7).
 - **Browser-verify EVERY change with an app surface, in the claude-in-chrome browser** (step 9) — the skip is a narrow, explicitly-justified exception (zero application surface only). Playwright and "the code looks right" are never substitutes for the live check.
 - **Parallel mode: no code before the batch's spec is released** (W3.5, W3.6). The hooks' spec gate (piece 10) enforces it; without the hooks, W3.5's diff pre-check is the only guard.
@@ -426,6 +426,7 @@ W1-W6 to keep them apart from steps 0-12; W6's stop conditions replace the auton
        TaskStopping every live `reviewer` task of the run that has a `verdict` mark (`python3 $FOREMAN/batches.py show --json`). This retry
        is not the one re-dispatch above, and it never stops a `worker` task.
      - **If the head moves,** run it again on the new SHA. W4.6 merges only a SHA whose W4.2b verdict is clean.
+  - **Under `--auto-merge` the hook needs the verdict on file.** Start W4.2b's reviewer prompt with `foreman-verifier: <pr> <sha>` and have it end with `VERDICT PASS <sha>` (no Critical or Important finding, no deviation ruled unacceptable) or `VERDICT FAIL <sha>` as the first line of its last message; `verdict_receipt` then lets `gh pr merge` through at that SHA only.
      - **A deviation that adds a file outside the outline, or changes a row's acceptance,** gets one spec round
        before merge. It runs only after W4.2b has ruled, and only when W4.2b didn't rule it unacceptable (an
        unacceptable one goes straight to W4.4).
@@ -619,6 +620,7 @@ hours. A session moved to the background, forked or resumed under a new id keeps
 | `gate_before_push` | run | `git push`, `gh pr create` and `gt submit` need a gate receipt for the pushed tree (minted by `gate-lock.sh` with the exact `gate`), unless the branch changes only exempt paths |
 | `worker_guard` | run, subagents | no merge, force-push, push to the default branch, rebase, `gt modify` once pushed, or backlog/rules/config edits |
 | `merge_discipline` | run | `gh pr merge` needs `--match-head-commit`; `--delete-branch` is refused while another worktree holds the branch; no `gt merge`; no merging `gh api` call |
+| `verdict_receipt` | run | in an autonomous run (`loop`/`--auto-merge`), `gh pr merge` needs a PASS receipt for the PR and the `--match-head-commit` SHA. The receipt is written at SubagentStop from a `foreman-verifier: <pr> <sha>` agent whose last message starts `VERDICT PASS <sha>` or `VERDICT FAIL <sha>` |
 | `trailer_guard` | always | `forbid_trailers` lines are refused in commit, PR and comment messages, and in a merge that would keep them |
 | `backlog_check` | always | after an edit of the backlog, its problem rows are reported back |
 | `worker_briefing`, `report_check` | tagged workers | a subagent whose prompt starts `foreman-worker: <batch>` is briefed with the Worker contract, and its final report's `json` block is checked once |
@@ -854,6 +856,8 @@ Do the bookkeeping now and commit it to **this PR's branch** so it is reviewed a
 - Post the concise summary either way: what changed, gate result, bot-round count, browser evidence (or skip-note), declined → new-backlog items, and confirmation the bookkeeping is folded in.
 - **Manual mode (default):** HALT and ask the human to approve the merge of the PR at the head SHA recorded in step 7 (name the SHA in the ask). **Never self-merge.**
 - **Autonomous mode (`loop`/`--auto-merge`):** evaluate the auto-merge gate (Non-negotiables). All conditions green → note "auto-merging (loop mode)" and proceed to step 12. Any condition unmet → leave the PR open, post exactly which one failed, and STOP for a human (do not merge).
+  - **Verifier (the hook enforces it).** On the FINAL head SHA, after steps 7, 8 and 10 have stopped moving it, dispatch a read-only agent (`Explore`) that did not write this code. The FIRST line of its prompt is `foreman-verifier: <pr> <sha>`, then the PR, the row's `acceptance`, the diff at that SHA and the Critical/Important/Minor labels. It ends with `VERDICT PASS <sha>` (no Critical or Important finding) or `VERDICT FAIL <sha>` as the first line of its last message. The SubagentStop hook records the receipt, and `verdict_receipt` refuses `gh pr merge` at a SHA with no PASS.
+  - A FAIL is a step-8 finding: fix it, then verify the new head. After two FAILs on one PR, stop the loop. A verifier that crashes or never answers leaves the merge closed: stop and notify. A new commit is a new SHA and needs a new verdict. Manual mode needs none: the human's approval at the SHA is the verdict.
 
 ### 12. Merge & sync (on human approval, or auto in loop mode)
 - `gh pr merge <n> --squash --match-head-commit <the head SHA you verified> --delete-branch`, run from the main checkout (the merge flag follows repo policy — use `--merge`/`--rebase` if the project isn't squash-only) → merge-tool "post-merge sync". A squash-merge isn't recognized by `git branch -d` as "merged", so if the local branch lingers delete it with `git branch -D <branch>` and `git remote prune origin`. The tree is already clean (bookkeeping merged atomically in step 10), so the next pass's step 0 starts fresh — in autonomous mode the command loops straight back to **step 1** for the next item (no `/loop` tick needed). When the pass ends here (manual mode), run `python3 $FOREMAN/hooks.py run-end`.

@@ -267,7 +267,7 @@ def adopt(dirs, sid, transcript_path):
 
 
 def prune(sd):
-    """Drop markers untouched for 48 hours, owed reports older than that, and batch files older than 14 days."""
+    """Drop markers untouched for 48 hours, owed reports older than that, and batch files and verdict receipts older than 14 days."""
     now = time.time()
     for p in ls(sd, 'runs/*.json'):
         m = state.read_json(p)
@@ -276,7 +276,7 @@ def prune(sd):
     for p in ls(sd, 'runs/*.owed'):
         if now - os.path.getmtime(p) >= RUN_TTL:
             rm(p)
-    for p in ls(sd, 'batches/*/*') + ls(sd, 'batches/*/agents/*') + ls(sd, 'batches/*/state/*'):
+    for p in ls(sd, 'batches/*/*') + ls(sd, 'batches/*/agents/*') + ls(sd, 'batches/*/state/*') + ls(sd, 'verdict/*'):
         if os.path.isfile(p) and now - os.path.getmtime(p) >= BATCH_TTL:
             rm(p)
 
@@ -847,12 +847,12 @@ _pr_cache = {}
 
 
 def pr_view(c):
-    """`gh pr view <n> --json headRefName,commits` for a `gh pr merge` candidate, cached per call; None when gh
+    """`gh pr view <n> --json headRefName,commits,number` for a `gh pr merge` candidate, cached per call; None when gh
     fails or answers anything but an object (the checks that need it then don't apply)."""
     n = positionals(c.args, GH_MERGE_VALUE_OPTS)[:1]
     key = (c.cwd, c.ghrepo, tuple(n))
     if key not in _pr_cache:
-        argv = ['gh', 'pr', 'view', *n, '--json', 'headRefName,commits'] + (['-R', c.ghrepo] if c.ghrepo else [])
+        argv = ['gh', 'pr', 'view', *n, '--json', 'headRefName,commits,number'] + (['-R', c.ghrepo] if c.ghrepo else [])
         try:
             p = subprocess.run(argv, cwd=c.cwd, capture_output=True, text=True, timeout=4)
             view = json.loads(p.stdout) if p.returncode == 0 else None
@@ -991,6 +991,65 @@ def other_worktree(c):
 
 
 BASH_PIECES[3] = merge_discipline
+
+
+# ---- piece 11: verdict receipt --------------------------------------------------------------------
+
+def autonomous_run(h, repo):
+    """True when this session's run was started with `loop` or `--auto-merge` (the marker keeps the arguments)."""
+    m = marker(repo, h.run_sid(repo))
+    return bool(m) and bool({'loop', '--auto-merge'} & set(str(m[1].get('args') or '').split()))
+
+
+def verdict_of(repo, pr, sha):
+    """'PASS' or 'FAIL' for PR `pr` at a head SHA that starts with `sha`, else None."""
+    sha = sha.lower()
+    for d in repo.dirs:
+        vd = os.path.join(d, 'verdict')
+        try:
+            names = sorted(os.listdir(vd))
+        except OSError:
+            continue
+        for n in names:
+            if n.startswith(f'{pr}-{sha}'):
+                r = state.read_json(os.path.join(vd, n))
+                if isinstance(r, dict) and str(r.get('pr')) == str(pr) and str(r.get('sha', '')).startswith(sha):
+                    return r.get('verdict')
+    return None
+
+
+def verdict_receipt(h, sc):
+    for c in sc.cmds:
+        if (c.prog, c.sub) != ('gh', 'pr merge'):
+            continue
+        repo = cmd_repo(c, h)
+        if not h.active(repo, 'verdict_receipt') or not autonomous_run(h, repo):
+            continue
+        h.touch.add(repo)
+        if c.denied or c.args is None or c.cwd is None:   # worker_guard and merge_discipline already spoke
+            continue
+        pinned = [v for v in opt_values(c.args, ('--match-head-commit',)) if v]
+        if not pinned:   # merge_discipline says to add the pin
+            continue
+        sha = pinned[0]
+        pos = positionals(c.args, GH_MERGE_VALUE_OPTS)[:1]
+        m = re.search(r'(?:^|/pull/)(\d+)$', pos[0]) if pos else None
+        pr = m.group(1) if m else str((pr_view(c) or {}).get('number') or '')   # a branch or URL: gh resolves it
+        if not pr:
+            h.deny("foreman can't tell which PR this merge is for, so it can't look up its verdict: run "
+                   '`gh pr merge <n> --match-head-commit <sha>` with the PR number')
+            continue
+        verdict = verdict_of(repo, pr, sha)
+        if verdict == 'PASS':
+            continue
+        if verdict == 'FAIL':
+            h.deny(f'the verifier failed PR {pr} at {sha}: fix its findings (step 8), then verify the new head')
+        else:
+            h.deny(f'no independent verdict for PR {pr} at {sha}: dispatch a verifier whose prompt starts '
+                   f'`foreman-verifier: {pr} {sha}` and merge after it returns `VERDICT PASS {sha}`')
+
+
+BASH_PIECES[11] = verdict_receipt
 
 
 # ---- piece 4: trailer guard -----------------------------------------------------------------------
@@ -1305,7 +1364,49 @@ def stopping_allowed(repo, h, batch):
     return born is None or float(born) < float(stop.get('time', 0))
 
 
+VERIFIER_TAG = re.compile(r'^foreman-verifier: (\d+) ([0-9a-f]{7,40})\s*$')
+VERDICT_LINE = re.compile(r'^VERDICT (PASS|FAIL) ([0-9a-f]{7,40})\b')
+
+
+def verifier_tag(text):
+    """(pr, sha) when a prompt's first line is `foreman-verifier: <pr> <sha>`, else None."""
+    m = VERIFIER_TAG.match((text or '').split('\n', 1)[0].rstrip('\r'))
+    return (m.group(1), m.group(2)) if m else None
+
+
+def record_verdict(h):
+    """Write the receipt for a tagged verifier's `VERDICT PASS|FAIL <sha>` first line. Returns a reason to send
+    the verifier back with (one try; the caller drops it when the stop hook is already active), else None."""
+    repo = repo_at(h.cwd)
+    if not h.active(repo, 'verdict_receipt'):
+        return None
+    tag = verifier_tag(transcript_head(h.inp.get('agent_transcript_path') or '')[0])
+    if not tag:
+        return None
+    pr, sha = tag
+    first = next((l for l in (h.inp.get('last_assistant_message') or '').splitlines() if l.strip()), '')
+    m = VERDICT_LINE.match(first.strip())
+    if not m:
+        return (f"end your message with `VERDICT PASS {sha}` or `VERDICT FAIL {sha}` as its first line: foreman records "
+                f'it as the independent verdict for PR {pr} at that SHA')
+    if not (m.group(2).startswith(sha) or sha.startswith(m.group(2))):
+        return (f'your verdict line names {m.group(2)[:12]} but you were asked about {sha[:12]}: re-check that head and '
+                f'answer `VERDICT PASS {sha}` or `VERDICT FAIL {sha}`')
+    full = (state.git(h.cwd, 'rev-parse', '--verify', '--quiet', sha + '^{commit}') or '').strip()
+    if not re.fullmatch(r'[0-9a-f]{40}', full):
+        print(f'foreman: verdict not recorded: {sha} does not resolve to a commit in {h.cwd}', file=sys.stderr)
+        return None
+    for d in repo.dirs:
+        state.write_json(os.path.join(d, 'verdict', f'{pr}-{full}'),
+                         {'verdict': m.group(1), 'pr': int(pr), 'sha': full, 'time': time.time()})
+    return None
+
+
 def subagent_stop(h):
+    why = record_verdict(h)   # before the stop_hook_active return: a verifier sent back answers with it set
+    if why and not h.inp.get('stop_hook_active'):
+        print(json.dumps({'decision': 'block', 'reason': 'foreman: ' + why}))
+        return
     if h.inp.get('stop_hook_active'):
         return
     repo = repo_at(h.cwd)

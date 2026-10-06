@@ -97,6 +97,19 @@ check "...and nothing reached origin" bash -c "! git ls-remote --exit-code origi
 run --resume "$SID" "Run this exact Bash command once and report its output: git push -u origin HEAD"
 check "after the gate the push went through" git ls-remote --exit-code origin feat
 
+echo "## an autonomous merge needs a verifier's verdict"
+run --max-turns 2 "/foreman --auto-merge"
+SID2=$(python3 -c "import json; ids=[json.loads(l)['session_id'] for l in open('$T/out.jsonl') if '\"session_id\"' in l]; print(ids[-1])")
+check "the --auto-merge run has its own marker" test -f "$SD/runs/$SID2.json"
+SHA=$(git rev-parse HEAD)
+run --resume "$SID2" "Run this exact Bash command once and report its output: gh pr merge 1 --squash --match-head-commit $SHA"
+check "the merge with no verdict was denied" logged pretool 'no independent verdict for PR 1'
+check "...and gh never merged" bash -c "! grep -q 'pr merge' '$T/gh.log' 2>/dev/null"
+run --resume "$SID2" "Use the Agent tool exactly once, with subagent_type Explore and a prompt of two lines. Line 1 is exactly: foreman-verifier: 1 $SHA   Line 2 is exactly: Reply with this one line and nothing else: VERDICT PASS $SHA   When the agent returns, reply done."
+check "the verifier's PASS wrote a receipt" test -s "$SD/verdict/1-$SHA"
+run --resume "$SID2" "Run this exact Bash command once and report its output: gh pr merge 1 --squash --match-head-commit $SHA"
+check "after the verdict the merge went through" grep -q 'pr merge' "$T/gh.log"
+
 echo
 echo "passed $pass, failed $fail   (temp dir: $T; KEEP=1 keeps it)"
 [ "$fail" = 0 ]
