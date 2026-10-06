@@ -950,15 +950,20 @@ EDIT_PIECES[0] = worker_guard_edit
 
 def merge_discipline(h, sc):
     for c in sc.cmds:
-        if (c.prog, c.sub) not in (('gh', 'pr merge'), ('gt', 'merge')):
+        api = (c.prog, c.sub) == ('gh', 'api') and shellscan.gh_api_merge(c.args, subagent=False)
+        if not api and (c.prog, c.sub) not in (('gh', 'pr merge'), ('gt', 'merge')):
             continue
         repo = cmd_repo(c, h)
+        if repo is None and api:   # an API merge names its repo in the path, not its directory (as in worker_guard)
+            repo = repo_at(h.cwd)
         if not h.active(repo, 'merge_discipline'):
             continue
         h.touch.add(repo)
         if c.denied:   # piece 2 already told this worker never to merge; telling it how to would undo that
             continue
-        if c.prog == 'gt':
+        if api:
+            h.deny('no gh api merge during a run — merge with `gh pr merge <n> --match-head-commit <sha>`')
+        elif c.prog == 'gt':
             h.deny('no gt merge during a run — merge with `gh pr merge <n> --match-head-commit <sha>`')
         elif c.args is None or c.cwd is None:
             h.deny("merge the SHA you verified — foreman couldn't read this merge; run `gh pr merge <n> "

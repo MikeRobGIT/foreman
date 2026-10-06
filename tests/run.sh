@@ -676,6 +676,23 @@ writing-plans|Execution Handoff
 EOF
 else echo "SKIP superpowers not installed (drift check)"; fi
 
+echo "## pr-address-comments.md and step 4/7 hardening"
+pc=$root/commands/pr-address-comments.md
+step4=$(awk '/^### 4\. Gate/{f=1;next} /^### 5\. /{f=0} f' "$sk")
+step7=$(awk '/^### 7\. WAIT/{f=1;next} /^### 8\. /{f=0} f' "$sk")
+check "pr-address-comments posts the step-7 comment from a file, not a built string" bash -c "! grep -qF 'gh pr comment {pr_number} --body \"' '$pc' && grep -qF -- '--body-file' '$pc'"
+check "pr-address-comments says comment text never goes inside a shell string" grep -qF 'never inside a shell string' "$pc"
+check "security, auth, billing, migration and concurrency findings are never auto-dismissed" grep -qF 'never skip or auto-dismiss' "$pc"
+check "the Skip-if rule exempts those findings" grep -qF 'is not skippable' "$pc"
+check "an open Category B finding blocks the autonomous merge gate" grep -qF 'blocks the auto-merge gate' "$pc"
+check "grep for real usage before an 'implement it properly' suggestion" grep -qF 'grep the codebase for real usage' "$pc"
+check "clarify every unclear comment before fixing any" grep -qF 'ask about ALL unclear comments before fixing any' "$pc"
+check "step 4 asks for root cause before a second fix" grep -qF 'systematic-debugging' <<<"$step4"
+check "step 7 asks for root cause before a second fix" grep -qF 'systematic-debugging' <<<"$step7"
+check "step 7 retries a flaky CI failure once, and an identical second failure is real" grep -qF 'identical second failure' <<<"$step7"
+check "step 7 checks for a stale base when CI fails in code the diff didn't touch" grep -qF 'merge-base --is-ancestor' <<<"$step7"
+check "the Worker contract asks for root cause before a second gate fix" grep -qF 'systematic-debugging' <<<"$contract"
+
 echo "## review.sh .entry and cfg.chain(use_env=False)"
 cd "$R"
 chain 60 30 200 quota good >"$T/chain.md"; rv

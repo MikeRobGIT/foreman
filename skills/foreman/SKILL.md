@@ -536,7 +536,8 @@ You run steps 2-8 on your batch in your own worktree, with these overrides:
   `$FOREMAN/gate-lock.sh <batch> -- '<gate>'` (never take or clear a slot by hand). That run mints the gate receipt
   a push needs: commit every file the gate changed and list it in your report, then push in its own call, after the
   gate and the commit; don't edit files while a gate runs. A red that appears only under load: re-run that file alone, then the whole
-  gate, which must end green in one run.
+  gate, which must end green in one run. A red your first fix didn't clear: find its root cause (`superpowers:systematic-debugging`
+  if available) before a second fix.
 - Step 8: push follow-up commits; never amend or force-push once the PR is open. Update your branch (merge
   `origin/main` into it, do not rebase) only when it conflicts or the orchestrator asks, then re-run the gate.
 - Step 10: do not edit the backlog, the rules files or generated files. Report RULE NOTES (quote the exact
@@ -614,7 +615,7 @@ hours. A session moved to the background, forked or resumed under a new id keeps
 |---|---|---|
 | `gate_before_push` | run | `git push`, `gh pr create` and `gt submit` need a gate receipt for the pushed tree (minted by `gate-lock.sh` with the exact `gate`), unless the branch changes only exempt paths |
 | `worker_guard` | run, subagents | no merge, force-push, push to the default branch, rebase, `gt modify` once pushed, or backlog/rules/config edits |
-| `merge_discipline` | run | `gh pr merge` needs `--match-head-commit`; `--delete-branch` is refused while another worktree holds the branch; no `gt merge` |
+| `merge_discipline` | run | `gh pr merge` needs `--match-head-commit`; `--delete-branch` is refused while another worktree holds the branch; no `gt merge`; no merging `gh api` call |
 | `trailer_guard` | always | `forbid_trailers` lines are refused in commit, PR and comment messages, and in a merge that would keep them |
 | `backlog_check` | always | after an edit of the backlog, its problem rows are reported back |
 | `worker_briefing`, `report_check` | tagged workers | a subagent whose prompt starts `foreman-worker: <batch>` is briefed with the Worker contract, and its final report's `json` block is checked once |
@@ -794,7 +795,7 @@ Read `.claude/foreman.config.md`, or the legacy `.claude/improve-next.config.md`
 
 ### 4. Gate
 - Run the gate under a slot, from the checkout's top level, with the configured string as ONE argument:
-  `$FOREMAN/gate-lock.sh orchestrator -- '{{gate}}'`. Loop fix → rerun until green. During a run the hooks deny a
+  `$FOREMAN/gate-lock.sh orchestrator -- '{{gate}}'`. Loop fix → rerun until green; when the first fix doesn't turn it green, find the root cause before a second one (`superpowers:systematic-debugging` if available). During a run the hooks deny a
   push (`git push`, `gh pr create`, `gt submit`) whose tree has no passing gate receipt, so when the branch changes
   any non-exempt path, re-run this after every change you push (steps 7, 8 and 10 included); a branch that changes
   only exempt paths needs no receipt.
@@ -816,6 +817,8 @@ Read `.claude/foreman.config.md`, or the legacy `.claude/improve-next.config.md`
   - **All `{{review_bots}}` have posted** (or, if discovering, the comment set has stabilized).
   - **`{{required_ci}}` is green.**
 - Red CI → fix → merge-tool "amend + re-push" → re-wait. Ignore known-environmental failures listed in the project rules.
+  - **Classify a red before acting.** A flake or infrastructure failure (lost runner, network, quota) earns ONE re-run; an identical second failure is real, not flake. A failure in code the diff never touched means a stale base: check `git merge-base --is-ancestor origin/<default> HEAD` and merge the default branch in before changing any code.
+  - **When your first fix doesn't turn it green,** find the root cause before a second one (`superpowers:systematic-debugging` if available).
 - **Optional E2E (`{{e2e}}`):** if the project marks E2E non-gating / opt-in, don't block on it — read it for signal, investigate *persistent* reds via the report artifact.
 - **Ceiling:** if a required bot never posts, or CI stays pending, after ~90 minutes counted from when the check starts (a check still queued after 3 hours means CI is down) (or a fixed poll cap), STOP and notify the human instead of polling forever — a missing bot (outage, app removed, misconfig) must not hang the pass.
 - **Poll hygiene:** a settle-loop that exits on "0 pending" must FIRST confirm the `gh pr checks` output is non-empty (e.g. it contains a known job name) before counting — `gh pr checks` intermittently returns empty output that a bare pending-counter misreads as "settled" while jobs are still running.
