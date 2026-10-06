@@ -93,6 +93,23 @@ python3 "$root/scripts/bk.py" "$T/bk" "$T/bad.json" >/dev/null 2>&1
 check "bk.py refuses an unknown id (exit 1)" test $? = 1
 check "refusal writes nothing" cmp -s "$T/before.md" "$T/bk/.claude/backlog.md"
 
+echo "## bk.py seeds an empty backlog"
+mkdir -p "$T/seed/.claude" && printf -- '---\n---\n' >"$T/seed/.claude/foreman.config.md"
+printf '# Improvement Backlog\n\n| id | title | risk | status | acceptance | source |\n|----|-------|------|--------|------------|--------|\n' >"$T/seed/.claude/improvement-backlog.md"
+cat >"$T/seed.json" <<'EOF'
+{"pr": 0, "new_rows": ["| IB-NEW-a | first | low | ready | passes | seed |", "| IB-NEW-b | second | high | ready | also | README.md:3 |"]}
+EOF
+python3 "$root/scripts/bk.py" "$T/seed" --no-fetch "$T/seed.json" >"$T/seed.out" 2>&1
+check "bk.py seeds a table with no rows (exit 0)" test $? = 0
+check "seeded rows numbered IB-1, IB-2 in order, under the separator" test "$(grep -n -E '^\|----|^\| IB-' "$T/seed/.claude/improvement-backlog.md" | cut -c1-8 | tr '\n' ' ')" = "4:|----| 5:| IB-1 6:| IB-2 "
+for bad in '| IB-NEW-a | t | urgent | ready | a | s |' '| IB-NEW-a | t | low | someday | a | s |' '| IB-NEW-a | t | low | ready | a | s'; do
+  printf '{"pr": 0, "new_rows": ["%s"]}' "$bad" >"$T/seedbad.json"
+  cp "$T/seed/.claude/improvement-backlog.md" "$T/seed-before.md"
+  python3 "$root/scripts/bk.py" "$T/seed" --no-fetch "$T/seedbad.json" >/dev/null 2>&1
+  check "bk.py refuses new row [$bad] (exit 1)" test $? = 1
+  check "...and writes nothing" cmp -s "$T/seed-before.md" "$T/seed/.claude/improvement-backlog.md"
+done
+
 echo "## wt-setup.sh"
 mkdir -p "$T/repo" && cd "$T/repo" && git init -q -b main && echo x >f && git add f && git commit -qm init
 printf 'SECRET=1\n' >"$T/repo/.env.local"
@@ -595,8 +612,12 @@ check "the Worker contract points at the spec phase" appears_before "$sk" '### W
 check "...before the Worker spec phase section" appears_before "$sk" '**Step 2 is the spec phase**' '### Worker spec phase'
 check "...which ends before the Hooks section" appears_before "$sk" '### Worker spec phase' '## Hooks'
 check "...and the Hooks section comes before the Backlog UI section" appears_before "$sk" '## Hooks' '## Backlog UI'
-check "plugin version 0.5.1" grep -qF '"version": "0.5.1"' "$root/.claude-plugin/plugin.json"
-check "marketplace version 0.5.1" test "$(python3 -c "import json,sys; print(json.load(open(sys.argv[1]))['plugins'][0]['version'])" "$root/.claude-plugin/marketplace.json")" = 0.5.1
+check "the Seed section sits between Init and Step 0.5" appears_before "$sk" '## Init' '## Seed'
+check "...and ends before Step 0.5" appears_before "$sk" '## Seed' '## Step 0.5'
+check "Seed numbers rows through bk.py" grep -qF 'python3 "$FOREMAN/bk.py" <repo> --dry-run <file>' "$SK"
+check "seed is in the argument hint and the token list" test "$(grep -c -F 'seed [<prd-path>] [append]' "$SK")" = 2
+check "plugin version 0.6.0" grep -qF '"version": "0.6.0"' "$root/.claude-plugin/plugin.json"
+check "marketplace version 0.6.0" test "$(python3 -c "import json,sys; print(json.load(open(sys.argv[1]))['plugins'][0]['version'])" "$root/.claude-plugin/marketplace.json")" = 0.6.0
 
 echo "## review.sh .entry and cfg.chain(use_env=False)"
 cd "$R"

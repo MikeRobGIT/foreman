@@ -73,8 +73,14 @@ def main():
                            stdin=subprocess.DEVNULL, env={**os.environ, 'GIT_TERMINAL_PROMPT': '0'}, timeout=30)
         except subprocess.TimeoutExpired:
             pass
-    next_id = first_id = max(max(ids), backlog.reserved_max_id(repo, BACKLOG, P)) + 1
-    anchor = max(n for n, l in enumerate(lines) if (m := ROW.match(l)) and int(m.group(1)) == max(ids))
+    next_id = first_id = max(max(ids, default=0), backlog.reserved_max_id(repo, BACKLOG, P)) + 1
+    if ids:
+        anchor = max(n for n, l in enumerate(lines) if (m := ROW.match(l)) and int(m.group(1)) == max(ids))
+    else:  # a table with no rows yet (/foreman seed): new rows go under its |---| line
+        seps = [n for n, l in enumerate(lines) if re.match(r'^\|[-| :]+\|\s*$', l)]
+        if not seps:
+            raise SystemExit(f'{BACKLOG}: no backlog table to add rows to (no |---| header line)')
+        anchor = seps[0]
 
     def find(id_):
         hits = [n for n, l in enumerate(lines) if l.startswith(f'| {id_} |')]
@@ -158,6 +164,10 @@ def main():
                 problems.append(f'{row[:12]}: new row has a newline')
             elif issue:
                 problems.append(f'{row[:12]}: {issue[1]} " | " separators, want 5 (escape a pipe as \\|)')
+            elif (cells := backlog.split_cells(row)) is None or len(cells) != 6:
+                problems.append(f'{row[:12]}: new row must be "| id | title | risk | status | acceptance | source |"')
+            elif bad := backlog.validate_cells(cells, P):
+                problems.append(f'{row[:12]}: {"; ".join(bad)}')
             else:
                 new_rows.append(row)
                 log.append(f'new    {row[:60]}')

@@ -1,7 +1,7 @@
 ---
 name: foreman
-description: One improvement pass from the backlog — plan → PR → wait for bots + CI → address comments → browser-verify → stop for human merge. Manual by default; with `--auto-merge` (or `loop`) it self-drives the backlog, auto-merging each fully-green pass and moving to the next item (no `/loop` needed). With `parallel N` it runs N worktree-isolated workers on separate batches at once (many items per invocation) while merging stays one PR at a time. `init` scaffolds the config and backlog for a new project. Project-agnostic; reads .claude/foreman.config.md.
-argument-hint: "[init|ui|ui stop] [item-id] [tag:<x>] [loop|--auto-merge] [parallel N]"
+description: One improvement pass from the backlog — plan → PR → wait for bots + CI → address comments → browser-verify → stop for human merge. Manual by default; with `--auto-merge` (or `loop`) it self-drives the backlog, auto-merging each fully-green pass and moving to the next item (no `/loop` needed). With `parallel N` it runs N worktree-isolated workers on separate batches at once (many items per invocation) while merging stays one PR at a time. `init` scaffolds the config and backlog for a new project; `seed` drafts the first backlog rows from the codebase and an optional PRD. Project-agnostic; reads .claude/foreman.config.md.
+argument-hint: "[init|seed [<prd-path>] [append]|ui|ui stop] [item-id] [tag:<x>] [loop|--auto-merge] [parallel N]"
 disable-model-invocation: true
 ---
 
@@ -37,6 +37,8 @@ Tokens may be combined in any order (e.g. `IB-03 loop`; ids use the config's `id
 
 - `init` — **set up a project** (see **Init**): write `.claude/foreman.config.md` and the backlog from the
   plugin's templates, filled with what can be detected. Runs alone; other tokens are ignored.
+- `seed [<prd-path>] [append]` — **draft the first backlog rows** from the codebase and an optional PRD (see
+  **Seed**). Runs alone; other tokens are ignored.
 - `ui` — **open the backlog UI** (see **Backlog UI**); `ui stop` stops it.
 - (none) — pick the topmost `status: ready` item from the configured backlog.
 - `<item-id>` (e.g. `IB-07`) — run that specific item (the only way to start a `risk: high` item).
@@ -599,8 +601,8 @@ You are in it when your prompt's first line ends in ` spec-phase`.
 
 The plugin's settings hooks (`hooks/hooks.json`, served by `$FOREMAN/hooks.py`) enforce parts of this file at the
 tool call. They fire in every session where the plugin is enabled, but only in a repo with a foreman config.
-Run-only pieces act only while this session's **run marker** exists: a prompt starting `/foreman` (not `ui` or
-`init`) writes it, `python3 $FOREMAN/hooks.py run-end` at every termination deletes it, and it expires after 48
+Run-only pieces act only while this session's **run marker** exists: a prompt starting `/foreman` (not `ui`,
+`init` or `seed`) writes it, `python3 $FOREMAN/hooks.py run-end` at every termination deletes it, and it expires after 48
 hours. A session moved to the background, forked or resumed under a new id keeps its run through an alias.
 
 | id | when | what it does |
@@ -667,7 +669,47 @@ Set up a project for foreman. Write files only; never commit, push or open a PR.
    detected values and keeping every comment; and the backlog (`backlog_path`, default
    `.claude/improvement-backlog.md`) from `${CLAUDE_PLUGIN_ROOT}/templates/improvement-backlog.md`.
 4. **Report** each key: detected value and from where, or "not detected — set it by hand". Then the next
-   steps: review the config, add real rows to the backlog, commit both, run `/foreman`.
+   steps: review the config, add real rows to the backlog (`/foreman seed` drafts them from the code), commit
+   both, run `/foreman`.
+
+## Seed (`/foreman seed`)
+
+Draft the backlog's first rows from the codebase and, if one is given, a PRD. Write the backlog file only;
+never commit, push or open a PR. Not a run: no run marker, no worker.
+
+1. **Check the backlog.** Read `backlog_path` and `id_prefix` with `python3 "$FOREMAN/cfg.py" <repo> <key> <default>`
+   (`<repo>` is `git rev-parse --show-toplevel`). If the backlog file doesn't exist, stop and suggest
+   `/foreman init`. If it holds a row other than the template's placeholder (the one whose source is
+   `setup example, replace me`), stop and say so unless `append` was given; with `append`, keep every existing
+   row and number the new ones after them.
+2. **Survey.** Read the README and docs, the directory layout, the tests and the `gate`. Grep for
+   `TODO|FIXME|HACK`. Look for untested core modules, dead config, stale docs and gate gaps. Build on what exists;
+   don't propose what the code already does. Don't run the gate and don't install anything. With a
+   `<prd-path>`, read it too: turn every explicit requirement into rows and fill gaps around them. A requirement
+   that needs a human decision becomes a `deferred` row that says what is unclear.
+3. **Draft rows.** One row = one PR-sized unit:
+   - Atomic: one concern each. Order them foundation first (test and tooling gaps before features), because the
+     topmost `ready` row runs first.
+   - The most direct path. No row for speculative or cosmetic work.
+   - `acceptance` is verifiable: a test that fails before and passes after, a command's output, a green gate.
+     Never "improve X".
+   - `source`: `file:line`, the PRD section, or `seed`.
+   - `risk: high` for schema or migration changes, auth, payments, a public API or a wide blast radius (those
+     rows run only when named); otherwise `low` or `medium`. `status: ready`, or `deferred` as above.
+4. **Size.** Score each draft 1-10 for effort and blast radius. A row at 7 or more is more than one PR: split it
+   into rows of 6 or less, the prerequisite first. Write at most 15 rows, best first; say in the report what you
+   left out.
+5. **Write.**
+   1. If the placeholder row is present, delete that one line with Edit.
+   2. Save `{"pr": 0, "new_rows": ["| <prefix>-NEW-a | title | risk | ready | acceptance | source |", ...]}` to a
+      scratch file, one distinct `-NEW-<x>` placeholder per row, one line per row, a literal pipe in a cell
+      written `\|`.
+   3. Run `python3 "$FOREMAN/bk.py" <repo> --dry-run <file>`, then the same without `--dry-run`. It numbers the
+      rows above every id on origin and in open UI branches and refuses the whole write on a bad row: fix the rows
+      it lists under PROBLEMS and run it again. Don't edit the backlog around it. A write that succeeded is
+      final: running it again adds the rows a second time.
+6. **Report** the written rows (id, risk, title), what was left out and why, and the next steps: read the diff,
+   edit what you disagree with (or reorder in `/foreman ui` once it's on `origin`), commit, run `/foreman`.
 
 ## Step 0.5 — Load config (do this first, before step 0)
 

@@ -282,7 +282,7 @@ def prune(sd):
 
 
 def run_args(inp):
-    """The /foreman arguments when this prompt starts a run, else None. `ui` and `init` aren't runs.
+    """The /foreman arguments when this prompt starts a run, else None. `ui`, `init` and `seed` aren't runs.
     UserPromptExpansion carries the command and its arguments as separate fields (probe P1)."""
     if inp.get('hook_event_name') == 'UserPromptExpansion':
         if inp.get('command_name') not in ('foreman', 'foreman:foreman'):
@@ -294,7 +294,7 @@ def run_args(inp):
             return None
         args = m.group(1).strip()
     words = args.split()
-    return None if words and words[0] in ('ui', 'init') else args
+    return None if words and words[0] in ('ui', 'init', 'seed') else args
 
 
 def run_start(h):
