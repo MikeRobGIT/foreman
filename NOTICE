@@ -1,0 +1,24 @@
+foreman adapts ideas and some short phrasings from the projects below. No files were copied. Each is MIT
+licensed; their notices follow, and the full licenses are in their repositories.
+
+mattpocock/skills (https://github.com/mattpocock/skills), Copyright (c) 2026 Matt Pocock
+  - The "Spec axis" review in skills/foreman/SKILL.md step 6 (missing, unasked, looks-implemented-but-wrong,
+    each finding quoting the spec line) follows its code-review skill.
+  - The Seams, Feedback loop (bug rows) and independent-source test rule in templates/spec.md follow its
+    to-spec, diagnosing-bugs and tdd skills.
+
+obra/superpowers (https://github.com/obra/superpowers), Copyright (c) 2025 Jesse Vincent
+  - The Review focus section and the "Declined to judge" line in the review prompts, and the rule that a
+    spec's silence is not permission, follow its 6.4.x writing-plans and review guidance.
+
+michael-denyer/pstack-claude (https://github.com/michael-denyer/pstack-claude), Copyright (c) 2026 Lauren Tan
+and Michael Denyer
+  - Classifying a red CI run before acting (one re-run for a flake, an identical second failure is real, a
+    stale base) follows its babysit playbook.
+  - Never auto-dismissing security, auth, billing, migration and concurrency findings, and posting comment text
+    from a file instead of a shell string, follow its bugbot-triage reference and babysit playbook.
+
+Permission notice (applies to each project above): Permission is hereby granted, free of charge, to any person
+obtaining a copy of the software and associated documentation files, to deal in the software without
+restriction, subject to the copyright notice and permission notice being included in all copies or substantial
+portions of the software. The software is provided "as is", without warranty of any kind.

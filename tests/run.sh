@@ -565,7 +565,19 @@ echo "## templates/spec.md and the W3.5 pre-check"
 tpl=$root/templates/spec.md
 fills() { grep -n '⟦FILL' "$1"; }
 missing() { grep '^## ' "$tpl" | while IFS= read -r h; do grep -qxF "$h" "$1" || echo "missing section: $h"; done; }
-check "spec template: the spec's sections, in order" test "$(grep '^## ' "$tpl" 2>/dev/null | tr '\n' '|')" = '## Rows|## Current behaviour|## Change|## Callers and writers checked|## Rules that apply|## Tests|## Implementation outline|## Surface|## Risks|## Open questions|## Review responses|'
+check "spec template: the spec's sections, in order" test "$(grep '^## ' "$tpl" 2>/dev/null | tr '\n' '|')" = '## Rows|## Current behaviour|## Change|## Out of scope|## Callers and writers checked|## Rules that apply|## Tests|## Review focus|## Implementation outline|## Surface|## Risks|## Open questions|## Review responses|'
+check "spec template: Tests asks for the seam" grep -qF 'Seams:' "$tpl"
+check "spec template: Tests takes expected values from an independent source" grep -qF 'independent source' "$tpl"
+check "spec template: a bug row names the one command that goes red first" grep -qF 'Feedback loop (bug rows):' "$tpl"
+check "spec template: the outline labels each file create, modify or reference" grep -qF '`create`, `modify` or `reference`' "$tpl"
+check "spec template: Risks names the door and the blast radius" grep -qF 'Door:' "$tpl"
+check "spec template: Review focus pins each input to a test" grep -qF 'uncovered — <why>' "$tpl"
+check "spec-review-prompt: a test that can't disagree with the code" grep -qF 'independent source' "$root/templates/spec-review-prompt.md"
+check "spec-review-prompt: the spec's silence is not permission" grep -qF "silence is not permission" "$root/templates/spec-review-prompt.md"
+check "spec-review-prompt: reviewers list what they declined to judge" grep -qF 'Declined to judge:' "$root/templates/spec-review-prompt.md"
+check "spec-review-prompt: checks Out of scope and Review focus" bash -c "grep -qF 'Out of scope' '$root/templates/spec-review-prompt.md' && grep -qF 'Review focus' '$root/templates/spec-review-prompt.md'"
+check "review-prompt: reviewers list what they declined to judge" grep -qF 'Declined to judge:' "$root/templates/review-prompt.md"
+check "review-prompt: a test whose expected values come from the code under test" grep -qF 'independent source' "$root/templates/review-prompt.md"
 check "spec template: Review responses reads 'None — round 1'" grep -qx 'None — round 1' "$tpl"
 check "spec template: scope requests have a stated form" grep -qF -- '- **Scope request:**' "$tpl"
 check "pre-check flags the unfilled template" test "$(fills "$tpl" | wc -l)" -ge 10
@@ -692,6 +704,9 @@ check "step 7 asks for root cause before a second fix" grep -qF 'systematic-debu
 check "step 7 retries a flaky CI failure once, and an identical second failure is real" grep -qF 'identical second failure' <<<"$step7"
 check "step 7 checks for a stale base when CI fails in code the diff didn't touch" grep -qF 'merge-base --is-ancestor' <<<"$step7"
 check "the Worker contract asks for root cause before a second gate fix" grep -qF 'systematic-debugging' <<<"$contract"
+step6=$(awk '/^### 6\. Request review/{f=1;next} /^### 7\. /{f=0} f' "$sk")
+check "step 6 gives the Claude reviewer a Spec axis, kept apart from defects" grep -qF 'Spec axis' <<<"$step6"
+check "a worker resuming a parked spec adds the template's newer sections" grep -qF 'add any section the current template has' <<<"$specphase"
 
 echo "## review.sh .entry and cfg.chain(use_env=False)"
 cd "$R"
