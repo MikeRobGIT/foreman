@@ -471,6 +471,23 @@ class PublishTest(unittest.TestCase):
         finally:
             self.f.server.repo.publishing.release()
 
+    def test_publish_refuses_edits_that_introduce_a_dependency_problem(self):
+        self.f.request('POST', '/api/ops', {'op': 'set', 'id': 'IB-2', 'field': 'acceptance', 'value': 'B. **Depends on:** IB-99'})
+        before = self.remote_branches()
+        status, res, _ = self.f.request('POST', '/api/publish')
+        self.assertEqual(status, 502, res)
+        self.assertIn('IB-2: depends on IB-99, which is not in the backlog', res['error'])
+        self.assertEqual(self.remote_branches(), before)   # nothing was pushed
+        status, data, _ = self.f.request('GET', '/api/backlog')
+        self.assertEqual(len(data['ops']), 1)   # the edit stays pending
+        self.assertEqual(len(git(self.f.work, 'worktree', 'list').splitlines()), 1)
+
+    def test_publish_accepts_a_valid_dependency(self):
+        self.f.request('POST', '/api/ops', {'op': 'set', 'id': 'IB-2', 'field': 'acceptance', 'value': 'B. **Depends on:** IB-1'})
+        status, res, _ = self.f.request('POST', '/api/publish')
+        self.assertEqual(status, 200, res)
+        self.assertEqual(res['applied'], 1)
+
     def test_all_conflicts_publishes_nothing(self):
         self.f.request('POST', '/api/ops', {'op': 'move', 'id': 'IB-2', 'to': 'top'})
         ops = self.f.server.repo.load_ops()

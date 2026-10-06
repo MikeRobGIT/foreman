@@ -1809,6 +1809,21 @@ class BacklogCheckTest(Case):
         self.assertIn('IB-3: 7 " | " separators, want 5', ctx)
         self.assertIn('IB-3: on 2 rows', ctx)
 
+    def test_a_row_done_while_its_dependency_is_not_is_warned_never_denied(self):
+        write(self.backlog_path(), BACKLOG + '| IB-8 | Eight | low | ready | first | s |\n'
+              '| IB-9 | Nine | low | done (#4) | after. **Depends on:** IB-8 | s |\n')
+        ctx = self.post(self.backlog_path())
+        self.assertIn('IB-9: done while IB-8 is not done', ctx)
+
+    def test_dependency_problems_are_reported_with_the_other_problems(self):
+        write(self.backlog_path(), BACKLOG + '| IB-8 | Eight | low | ready | **Depends on:** IB-99 | s |\n')
+        self.assertIn('IB-8: depends on IB-99, which is not in the backlog', self.post(self.backlog_path()))
+
+    def test_a_done_row_with_a_done_dependency_is_clean(self):
+        write(self.backlog_path(), BACKLOG + '| IB-8 | Eight | low | done (#3) | first | s |\n'
+              '| IB-9 | Nine | low | done (#4) | **Depends on:** IB-8 | s |\n')
+        self.assertIsNone(self.post(self.backlog_path()))
+
     def test_crlf_backlog(self):
         # a CRLF file is read as is (newline=''), so every row ends in \r and the check must not carry it along
         self.write_raw(BACKLOG.replace('\n', '\r\n'))
@@ -2299,6 +2314,18 @@ class ScriptAllowTest(ScriptAllowBase):
         self.assertTrue(self.allowed(f'python3 {SCRIPTS}/bk.py {self.fx.work} --dry-run /tmp/r.json'))
         self.assertTrue(self.allowed(f'python3 {SCRIPTS}/bk.py {self.fx.work} /tmp/r.json'))
         self.assertTrue(self.allowed(f'python3 {SCRIPTS}/bk.py {self.fx.work} --dry-run /tmp/r.json', agent='a1'))
+
+    def test_the_picker_is_allowed_in_its_exact_shape_only(self):
+        ready = f'python3 {SCRIPTS}/backlog.py ready {self.fx.work}'
+        for tail in ('', ' --no-high', ' --json', ' --tag e2e', ' --done IB-1,IB-2', ' --limit 3',
+                     ' --tag e2e --no-high --done IB-1 --limit 1 --json'):
+            self.assertTrue(self.allowed(ready + tail), tail)
+            self.assertTrue(self.allowed(ready + tail, agent='a1'), tail)   # read-only, so workers may too
+        for bad in (f'python3 {SCRIPTS}/backlog.py {self.fx.work}', f'python3 {SCRIPTS}/backlog.py ready',
+                    ready + ' --bogus', ready + ' --tag', ready + ' --tag $(id)', ready + ' --done IB-1;ls',
+                    ready + ' --limit', ready + ' --tag --json', f'python3 {SCRIPTS}/backlog.py write {self.fx.work}',
+                    ready + ' extra'):
+            self.assertFalse(self.allowed(bad), bad)
 
     def test_one_paren_wrap_with_cd_and_review_spec(self):
         self.assertTrue(self.allowed(f'(cd {self.wt} && {SCRIPTS}/review.sh --spec docs/s.md origin/main /tmp/r.log)'))

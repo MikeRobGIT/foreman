@@ -255,6 +255,100 @@ def assign_ids(bl, tmp_ids, floor=0):
     return mapping
 
 
+MARKER = '**Depends on:**'
+
+
+def _marker(prefix):
+    p = re.escape(prefix)
+    return re.compile(rf'\*\*Depends on:\*\* ({p}-\d+(?:, {p}-\d+)*)')
+
+
+def deps(row, prefix):
+    """The ids in a row's `**Depends on:** IB-1, IB-2` marker, in order; [] when it has none or none is valid."""
+    m = _marker(prefix).search(row.acceptance)
+    return m.group(1).split(', ') if m else []
+
+
+def _issues(bl, done=()):
+    """{row id: [(problem, wait reason), ...]} for the dependency problems of each row, in file order."""
+    index = {}
+    for r in bl.rows():
+        index.setdefault(r.id, r)
+    out = {}
+    edges = {}
+    for r in bl.rows():
+        found = []
+        n = r.acceptance.count(MARKER)
+        if n > 1:
+            found.append(('two Depends on markers',) * 2)
+        elif n == 1 and not deps(r, bl.prefix):
+            found.append(('Depends on names no valid ids',) * 2)
+        else:
+            for d in deps(r, bl.prefix):
+                if d == r.id:
+                    found.append(('depends on itself',) * 2)
+                elif d in done:
+                    continue
+                elif d not in index:
+                    found.append((f'depends on {d}, which is not in the backlog', f'{d} is not in the backlog'))
+                elif index[d].status == 'cancelled':
+                    found.append((f'depends on {d}, which is cancelled', f'{d} is cancelled'))
+                elif index[d].status != 'done':
+                    edges.setdefault(r.id, []).append(d)
+        if found:
+            out[r.id] = found
+    for start in edges:   # a row is on a cycle when an open dependency path leads back to it
+        seen, stack = set(), list(edges[start])
+        while stack:
+            cur = stack.pop()
+            if cur == start:
+                out.setdefault(start, []).append(('on a dependency cycle',) * 2)
+                break
+            if cur not in seen:
+                seen.add(cur)
+                stack.extend(edges.get(cur, ()))
+    return out
+
+
+def dep_problems(bl):
+    """['<id>: <problem>', ...] for every row's dependency problems, in file order."""
+    issues = _issues(bl)
+    return [f'{r.id}: {p}' for r in bl.rows() if r.id in issues for p, _ in issues[r.id]]
+
+
+def done_early(bl):
+    """['<id>: done while <dep> is not done', ...]: rows marked done ahead of a dependency, in file order."""
+    index = {}
+    for r in bl.rows():
+        index.setdefault(r.id, r)
+    return [f'{r.id}: done while {d} is not done' for r in bl.rows() if r.status == 'done'
+            for d in deps(r, bl.prefix) if d in index and index[d].status != 'done']
+
+
+def eligible(bl, tag=None, no_high=False, done=()):
+    """(ids, waiting): the `ready` rows whose dependencies are all done, and [(id, [reason, ...])] for those that wait.
+
+    `done` holds ids merged in this run that the file still shows as `ready`. Both lists keep file order."""
+    index = {}
+    for r in bl.rows():
+        index.setdefault(r.id, r)
+    issues = _issues(bl, set(done))
+    ids, waiting = [], []
+    for r in bl.rows():
+        if r.status != 'ready' or (tag and f'[{tag}]' not in r.title) or (no_high and r.risk == 'high'):
+            continue
+        reasons = [why for _, why in issues.get(r.id, ())]
+        if not reasons:
+            for d in deps(r, bl.prefix):
+                dep = index[d]
+                if d in done or dep.status == 'done':
+                    continue
+                reasons.append(f'{d} is risk: high and waits for a human' if dep.risk == 'high' and dep.status == 'ready'
+                               else f'{d} is not done')
+        (waiting.append((r.id, reasons)) if reasons else ids.append(r.id))
+    return ids, waiting
+
+
 UI_REFSPEC = '+refs/heads/backlog/ui-*:refs/remotes/origin/backlog/ui-*'
 
 
@@ -288,3 +382,63 @@ def describe(op, mapping=None):
     to = op['to']
     where = to if isinstance(to, str) else f'{next(iter(to))} {mapping.get(next(iter(to.values())), next(iter(to.values())))}'
     return f'{id_}: moved to {where}'
+
+
+USAGE = 'usage: backlog.py ready <repo> [--tag <x>] [--no-high] [--done <id,id>] [--limit <n>] [--json]'
+
+
+def main(argv):
+    """`ready`: print the eligible row ids, one per line (exit 0), or exit 1 when none is eligible; waiting rows go to stderr."""
+    import json
+    import os
+    import sys
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    import cfg
+    if len(argv) < 2 or argv[0] != 'ready':
+        raise SystemExit(f'{USAGE}\n(exit 0 = ids printed, 1 = none eligible, 2 = usage or file error)')
+    repo, rest = argv[1], argv[2:]
+    tag, done, limit, no_high, as_json, i = None, [], None, False, False, 0
+    try:
+        while i < len(rest):
+            a = rest[i]
+            if a == '--no-high':
+                no_high = True
+            elif a == '--json':
+                as_json = True
+            elif a in ('--tag', '--done', '--limit') and i + 1 < len(rest):
+                i += 1
+                if a == '--tag':
+                    tag = rest[i]
+                elif a == '--done':
+                    done = [x for x in rest[i].split(',') if x]
+                else:
+                    limit = int(rest[i])
+                    if limit < 1:
+                        raise ValueError
+            else:
+                raise ValueError
+            i += 1
+    except ValueError:
+        print(USAGE, file=sys.stderr)
+        return 2
+    path = os.path.join(repo, cfg.get(repo, 'backlog_path', '.claude/improvement-backlog.md'))
+    try:
+        text = open(path, encoding='utf-8', errors='replace', newline='').read()
+    except OSError as e:
+        print(f'backlog.py: {e}', file=sys.stderr)
+        return 2
+    ids, waiting = eligible(parse(text, str(cfg.get(repo, 'id_prefix', 'IB'))), tag, no_high, done)
+    ids = ids[:limit] if limit else ids
+    if as_json:
+        print(json.dumps({'ready': ids, 'waiting': [{'id': i_, 'reasons': r} for i_, r in waiting]}))
+    elif ids:
+        print('\n'.join(ids))
+    if not as_json:
+        for id_, reasons in waiting:
+            print(f'waiting: {id_}: {"; ".join(reasons)}', file=sys.stderr)
+    return 0 if ids else 1
+
+
+if __name__ == '__main__':
+    import sys
+    raise SystemExit(main(sys.argv[1:]))

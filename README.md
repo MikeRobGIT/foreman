@@ -64,6 +64,23 @@ With the hooks enabled (0.4.0), a worker can't edit or commit code before its sp
 frozen after release; any change goes in a `## Deviations after release` section, which a reviewer rules on
 before merge.
 
+## Row dependencies
+
+A row can say what must be `done` before it starts, with a marker inside its `acceptance` cell:
+`**Depends on:** IB-12, IB-14` (your `id_prefix`; ids joined by `, `). It is a marker, not a column, so every
+existing backlog and every tool that counts six cells keeps working, and a row without one behaves as before.
+
+- **The pick is code.** Step 1 and the parallel pool call `backlog.py ready`: a `ready` row is offered only when
+  every row it names is `done`. File order is still the priority. Rows that wait are listed with the reason, and an
+  autonomous run that finds only waiting rows ends with "no eligible rows; N waiting", never "backlog empty". A row
+  named by id runs anyway, after the unmet dependencies are echoed (manual mode asks first).
+- **Problems.** A dependency that is missing, cancelled, the row itself or on a cycle makes the row wait. A
+  `risk: high` dependency that is still `ready` is named as waiting for a human. A marker with no valid id is a
+  problem too, since dropping it silently would run the row early.
+- **Write paths.** `bk.py` and the UI's Publish refuse a change that introduces a dependency problem, and ignore
+  ones already in the file, so one bad row can't block bookkeeping for code that already merged.
+  `/foreman seed` writes the markers for the rows it orders foundation-first.
+
 ## Backlog UI
 
 `/foreman ui` starts a local web UI for the backlog: the ready queue in pick order (drag to reorder), search and
@@ -102,10 +119,10 @@ and logout leave a run another live session may still own; a marker no session h
 | `worker_guard` | run, subagents | no merge (`gh pr merge`, `gt merge`, merging `gh api` calls), force-push, push to the default branch, rebase, `gt modify` once pushed, or edits of the backlog, the rules files or the foreman config |
 | `merge_discipline` | run, everyone | `gh pr merge` needs `--match-head-commit <sha>`; `--delete-branch` is refused while another worktree holds the branch; no `gt merge`; no merging `gh api` call (`PUT …/pulls/<n>/merge`, a `mergePullRequest` mutation), which skipped the SHA pin before 0.7.0 |
 | `trailer_guard` | foreman repo | `forbid_trailers` lines are refused in commit, PR and comment messages, and in a `gh pr merge` that would keep them |
-| `backlog_check` | foreman repo | after an Edit/Write of the backlog, problem rows (wrong `\|` count, duplicate ids) are reported back |
+| `backlog_check` | foreman repo | after an Edit/Write of the backlog, problem rows (wrong `\|` count, duplicate ids) are reported back, and so are dependency problems and a row marked `done` ahead of a `Depends on` row (a note only, never a denial) |
 | `worker_briefing` | tagged workers | a subagent whose prompt starts `foreman-worker: <batch>` gets the Worker contract, rendered |
 | `report_check` | tagged workers | a tagged worker's final report must end with a valid `json` block that `bk.py --dry-run` accepts; it is sent back once |
-| `script_allow` | run | `gate-lock.sh`, `wt-setup.sh`, `review.sh`, `bk.py`, `hooks.py` and `batches.py` (main session only) run without a permission prompt, in strict shapes only |
+| `script_allow` | run | `gate-lock.sh`, `wt-setup.sh`, `review.sh`, `bk.py`, `hooks.py` and `batches.py` (main session only) run without a permission prompt, in strict shapes only; so does the read-only `backlog.py ready` |
 | `spec_gate` | run, `spec-phase` workers | edits and commits stay in `design_spec_dir`, and nothing is pushed, until the orchestrator runs `hooks.py release <batch> <sha>` |
 | `batch_state` | run, orchestrator | a worker's `batches.py` call is denied; at the spec checkpoint every question is denied until the current `batches.py table checkpoint` is in the orchestrator's text, pasted in a message of its own (a table not yet in the transcript is denied too; the hook never edits the question; the third try against one unchanged table goes through); a `run-end` before `batches.py table report` is in the orchestrator's text leaves the report owed, and the end of the turn (a `Stop` hook) hands it back once, then lets the session stop; TaskStop is refused with no id or with a batch name, and for a worker before `hooks.py stopping` (an id it doesn't know passes); `hooks.py release` needs a passed batch at its reviewed SHA and, in a manual run, the checkpoint table pasted after the pass |
 | `status_pane` | run | a band above the prompt: one line per batch (its status with the round or PR, and for a PR its CI, bots, unresolved threads and merge state); without batch files, one line per worker worktree |
@@ -251,6 +268,7 @@ spec mode (`FOREMAN_REVIEW_MODE=spec`; `_lib.sh` makes the others fall through).
 | `scripts/review.sh [--spec <spec path>] <base> <log>` | the reviewer chain; `--spec` reviews a batch spec (exit 0 landed, 1 exhausted, 2 hard error, 143 terminated) |
 | `scripts/gate-lock.sh [--name L] <owner> -- <cmd>` | run a gate holding one of `gate_slots` slots shared by every worktree of the repo (`~/.claude/gate-locks/<repo>`); stale slots (holder dead 90+ min) are reclaimed; exits with the command's code |
 | `scripts/wt-setup.sh <worktree>` / `--check <dir>` | copy env files, install, stale-install check; `--check` with no `stale_check` configured fails |
+| `scripts/backlog.py ready <repo> [--tag x] [--no-high] [--done ids] [--limit n] [--json]` | the picker: print the eligible `ready` row ids in file order (exit 0), exit 1 when none is eligible, 2 on a usage or file error; rows that wait print to stderr with the reason (see **Row dependencies**) |
 | `scripts/bk.py <repo> [--dry-run] <reports...>` | fold worker JSON reports into the backlog and rules files (also how `/foreman seed` adds rows to an empty table); a `new_rows` entry must be a 6-cell row with a valid risk and status (since 0.6.0 this applies to worker reports too); writes nothing on any mismatch |
 | `scripts/cfg.py <repo> <key> [default]` | read a config key (no PyYAML needed) |
 | `scripts/hooks.py <event>` | the hooks' dispatcher; orchestrator CLIs `run-end` (always exits 0), `release <batch> <sha>`, `stopping <batch>`, `forget <batch>` (these three exit 3 when the hooks are inactive) |

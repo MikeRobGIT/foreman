@@ -226,5 +226,103 @@ class OpsTest(unittest.TestCase):
         self.assertEqual(ready_ids, ['NEW-1', 'IB-1', 'IB-5'])
 
 
+def table(*rows):
+    """A backlog with the given (id, risk, status, acceptance) rows, titles T<n>."""
+    out = ['# Backlog', '', '| id | title | risk | status | acceptance | source |', '|---|---|---|---|---|---|']
+    for id_, risk, status, acc in rows:
+        out.append(f'| {id_} | T{id_[3:]} | {risk} | {status} | {acc} | s |')
+    return backlog.parse('\n'.join(out) + '\n')
+
+
+def ready(bl, **kw):
+    ids, waiting = backlog.eligible(bl, kw.get('tag'), kw.get('no_high', False), kw.get('done', ()))
+    return ids, dict(waiting)
+
+
+class DepsTest(unittest.TestCase):
+    def test_marker_lists_ids_in_order(self):
+        bl = table(('IB-1', 'low', 'ready', 'Do it. **Depends on:** IB-3, IB-2; then more.'))
+        self.assertEqual(backlog.deps(bl.rows()[0], 'IB'), ['IB-3', 'IB-2'])
+
+    def test_prose_and_other_ids_are_not_dependencies(self):
+        bl = table(('IB-1', 'low', 'ready', 'Needs IB-2 first, and depends on IB-3 being merged.'))
+        self.assertEqual(backlog.deps(bl.rows()[0], 'IB'), [])
+
+    def test_two_markers_is_a_problem(self):
+        bl = table(('IB-1', 'low', 'ready', '**Depends on:** IB-2 and **Depends on:** IB-3'), ('IB-2', 'low', 'done (#1)', 'x'),
+                   ('IB-3', 'low', 'done (#2)', 'x'))
+        self.assertEqual(backlog.dep_problems(bl), ['IB-1: two Depends on markers'])
+
+    def test_a_marker_with_no_valid_id_is_a_problem_not_a_silent_drop(self):
+        bl = table(('IB-1', 'low', 'ready', '**Depends on:** NEW-1'))
+        self.assertEqual(backlog.deps(bl.rows()[0], 'IB'), [])
+        self.assertEqual(backlog.dep_problems(bl), ['IB-1: Depends on names no valid ids'])
+        ids, waiting = ready(bl)
+        self.assertEqual((ids, waiting), ([], {'IB-1': ['Depends on names no valid ids']}))
+
+    def test_problems_missing_self_cancelled_cycle(self):
+        bl = table(('IB-1', 'low', 'ready', '**Depends on:** IB-9'),
+                   ('IB-2', 'low', 'ready', '**Depends on:** IB-2'),
+                   ('IB-3', 'low', 'ready', '**Depends on:** IB-4'),
+                   ('IB-4', 'low', 'cancelled — nope', 'x'),
+                   ('IB-5', 'low', 'ready', '**Depends on:** IB-6'),
+                   ('IB-6', 'low', 'ready', '**Depends on:** IB-7'),
+                   ('IB-7', 'low', 'ready', '**Depends on:** IB-5'))
+        self.assertEqual(backlog.dep_problems(bl), [
+            'IB-1: depends on IB-9, which is not in the backlog', 'IB-2: depends on itself',
+            'IB-3: depends on IB-4, which is cancelled',
+            'IB-5: on a dependency cycle', 'IB-6: on a dependency cycle', 'IB-7: on a dependency cycle'])
+
+
+class EligibleTest(unittest.TestCase):
+    def test_no_markers_is_todays_ready_order(self):
+        bl = table(('IB-1', 'low', 'done (#1)', 'x'), ('IB-2', 'low', 'ready', 'x'), ('IB-3', 'high', 'ready', 'x'))
+        self.assertEqual(ready(bl)[0], ['IB-2', 'IB-3'])
+        self.assertEqual([bl.lines[i].id for i in bl.ready_indexes()], ['IB-2', 'IB-3'])
+
+    def test_a_row_waits_for_an_open_dependency(self):
+        bl = table(('IB-1', 'low', 'ready', '**Depends on:** IB-2'), ('IB-2', 'low', 'ready', 'x'))
+        ids, waiting = ready(bl)
+        self.assertEqual(ids, ['IB-2'])
+        self.assertEqual(waiting, {'IB-1': ['IB-2 is not done']})
+
+    def test_done_or_passed_done_satisfies(self):
+        bl = table(('IB-1', 'low', 'ready', '**Depends on:** IB-2, IB-3'), ('IB-2', 'low', 'done (#4)', 'x'), ('IB-3', 'low', 'ready', 'x'))
+        self.assertEqual(ready(bl)[0], ['IB-3'])
+        self.assertEqual(ready(bl, done=('IB-3',))[0], ['IB-1', 'IB-3'])
+
+    def test_every_non_done_status_waits(self):
+        for status in ('ready', 'in-progress', 'deferred', 'blocked — why'):
+            bl = table(('IB-1', 'low', 'ready', '**Depends on:** IB-2'), ('IB-2', 'low', status, 'x'))
+            self.assertNotIn('IB-1', ready(bl)[0], status)
+
+    def test_a_high_risk_dependency_names_the_human(self):
+        bl = table(('IB-1', 'low', 'ready', '**Depends on:** IB-2'), ('IB-2', 'high', 'ready', 'x'))
+        ids, waiting = ready(bl, no_high=True)
+        self.assertEqual(ids, [])
+        self.assertEqual(waiting['IB-1'], ['IB-2 is risk: high and waits for a human'])
+
+    def test_problem_rows_wait_with_the_reason(self):
+        bl = table(('IB-1', 'low', 'ready', '**Depends on:** IB-9'), ('IB-2', 'low', 'ready', '**Depends on:** IB-2'),
+                   ('IB-3', 'low', 'ready', '**Depends on:** IB-4'), ('IB-4', 'low', 'ready', '**Depends on:** IB-3'))
+        ids, waiting = ready(bl)
+        self.assertEqual(ids, [])
+        self.assertEqual(sorted(waiting), ['IB-1', 'IB-2', 'IB-3', 'IB-4'])
+        self.assertIn('IB-9 is not in the backlog', waiting['IB-1'])
+        self.assertIn('depends on itself', waiting['IB-2'])
+        self.assertIn('on a dependency cycle', waiting['IB-3'])
+
+    def test_tag_and_no_high_filter_candidates(self):
+        bl = backlog.parse('| IB-1 | [e2e] A | low | ready | x | s |\n| IB-2 | B | low | ready | x | s |\n| IB-3 | [e2e] C | high | ready | x | s |\n')
+        self.assertEqual(ready(bl, tag='e2e')[0], ['IB-1', 'IB-3'])
+        self.assertEqual(ready(bl, tag='e2e', no_high=True)[0], ['IB-1'])
+
+    def test_an_unparsed_line_is_not_a_dependency(self):
+        bl = backlog.parse('| IB-1 | A | low | ready | **Depends on:** IB-2 | s |\n| IB-2 | broken | low | ready |\n')
+        ids, waiting = ready(bl)
+        self.assertEqual(ids, [])
+        self.assertIn('IB-2 is not in the backlog', waiting['IB-1'])
+
+
 if __name__ == '__main__':
     unittest.main()

@@ -1125,11 +1125,18 @@ def backlog_check(h, ti):
     if not h.active(repo, 'backlog_check', run_only=False) or repo.rel(path) != os.path.normpath(repo.backlog):
         return
     with open(path, encoding='utf-8', errors='replace', newline='') as f:
-        rows, probs = backlog_problems(f.read(), str(repo.get('id_prefix', 'IB')))
+        text = f.read()
+    prefix = str(repo.get('id_prefix', 'IB'))
+    rows, probs = backlog_problems(text, prefix)
+    bl = backlog.parse(text, prefix)
+    notes = []   # dependency findings only inform: a row can be edited into a bad state and out again
     if probs:
-        print(json.dumps({'hookSpecificOutput': {'hookEventName': 'PostToolUse', 'additionalContext':
-              f'foreman: the backlog now has {rows} problem rows: {"; ".join(probs[:10])}. '
-              'Fix them before committing.'}}))
+        notes.append(f'foreman: the backlog now has {rows} problem rows: {"; ".join(probs[:10])}. Fix them before committing.')
+    deps = backlog.dep_problems(bl) + backlog.done_early(bl)
+    if deps:
+        notes.append(f'foreman: dependencies: {"; ".join(deps[:10])}.')
+    if notes:
+        print(json.dumps({'hookSpecificOutput': {'hookEventName': 'PostToolUse', 'additionalContext': ' '.join(notes)}}))
 
 
 POST_EDIT[5] = backlog_check
@@ -1327,7 +1334,7 @@ HANDLERS['subagent-stop'] = subagent_stop
 
 # ---- piece 8: script allow ------------------------------------------------------------------------
 
-SCRIPTS = ('gate-lock.sh', 'wt-setup.sh', 'review.sh', 'bk.py', 'hooks.py', 'batches.py')
+SCRIPTS = ('gate-lock.sh', 'wt-setup.sh', 'review.sh', 'bk.py', 'hooks.py', 'batches.py', 'backlog.py')
 OWN_OPTS = ('--', '--check', '--spec', '--dry-run')
 BAD_TEXT = re.compile(r'[\n\r`<>]|\$\(|\$\{')
 BAD_ARG = re.compile(r'[\'"$`\\;|&<>\x00-\x1f\x7f]')
@@ -1362,6 +1369,19 @@ def script_args_ok(name, args, repo, h, cwd):
     if name == 'batches.py':   # the orchestrator's state writes: a known command, every argument one plain word
         return (not h.agent and bool(args) and args[0] in BATCH_VERBS
                 and all(plain(a) or a in ('--json', '--session') for a in args))
+    if name == 'backlog.py':   # the picker, read-only: `ready <repo> [--tag x] [--no-high] [--done ids] [--limit n] [--json]`
+        if len(args) < 2 or args[0] != 'ready' or not plain(args[1]):
+            return False
+        rest, i = args[2:], 0
+        while i < len(rest):
+            if rest[i] in ('--no-high', '--json'):
+                i += 1
+            elif rest[i] in ('--tag', '--done', '--limit') and i + 1 < len(rest) and plain(rest[i + 1]) \
+                    and not rest[i + 1].startswith('-'):
+                i += 2
+            else:
+                return False
+        return True
     if not all(plain(a) for a in args):
         return False
     if name == 'wt-setup.sh':

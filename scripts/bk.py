@@ -25,6 +25,8 @@ adds `pr`):
   new row never takes an id an unmerged UI PR already uses.
 - A new row must have exactly 5 ` | ` separators (a stray pipe shifts the table's columns)
   and no newline (rows stay single-line).
+- A `**Depends on:** IB-n` marker in a row must name rows that exist, aren't cancelled and don't form a
+  cycle. The report is refused only for dependency problems it introduces; ones already in the file don't block it.
 - A rule note applies only when `old` matches exactly once; anything else is reported.
 - Every problem is collected; if there is any, nothing is written (exit 1). --dry-run
   prints the plan and writes nothing either way.
@@ -66,6 +68,7 @@ def main():
 
     path = os.path.join(repo, BACKLOG)
     lines = open(path).read().split('\n')
+    deps_before = set(backlog.dep_problems(backlog.parse('\n'.join(lines), P)))
     ids = [int(m.group(1)) for l in lines for m in [ROW.match(l)] if m]
     if '--no-fetch' not in sys.argv:
         try:  # best effort: a prompt or a stalled remote must not hang the loop's bookkeeping
@@ -175,6 +178,8 @@ def main():
         rule_notes.extend((p, rn) for rn in rep.get('rule_notes', []))
 
     lines[anchor + 1:anchor + 1] = new_rows
+    # Only problems this report introduces count: one already-bad row must not block bookkeeping for merged code.
+    problems += [f'{x}' for x in backlog.dep_problems(backlog.parse('\n'.join(lines), P)) if x not in deps_before]
 
     edits = {}
     for p, rn in rule_notes:
