@@ -164,7 +164,11 @@ exec rtk hook claude <<<"$input"
   foreman installs it when the `claude-plugins-official` marketplace is added
   (`claude plugin marketplace add anthropics/claude-plugins-official`). Without that marketplace the install
   succeeds with a warning and foreman does not load until superpowers is installed; adding the marketplace
-  afterwards installs it automatically.
+  afterwards installs it automatically. Only prose steps use it (`brainstorming`, `writing-plans`,
+  `test-driven-development`, `requesting-code-review`), and each falls back to foreman's own text when the skill
+  is unavailable. Tested with superpowers 6.4.1. Step 2 and the worker spec phase override the skills' human
+  gates and execution handoff, so `tests/run.sh` checks the installed `brainstorming` and `writing-plans` still
+  name what those overrides refer to (it skips when superpowers isn't installed).
 - `git`, `gh` (signed in), `python3` 3.8+, `perl`.
 - At least one reviewer CLI from the table below, signed in, for the cross-model review.
 - For browser verification: the Claude in Chrome extension.
