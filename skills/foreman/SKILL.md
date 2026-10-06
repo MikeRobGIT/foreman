@@ -23,7 +23,7 @@ cron cloud agent); bare `/foreman --auto-merge` already loops on its own.
 
 This command is **project-agnostic**. It **orchestrates** existing assets — it does not reimplement
 them. It reuses the user-global superpowers process skills (`brainstorming`, `writing-plans`,
-`test-driven-development`, `requesting-code-review`, `finishing-a-development-branch`), this plugin's
+`test-driven-development`, `requesting-code-review`; each only if available, and foreman's own text is the fallback), this plugin's
 `/foreman:pr-address-comments` command, `graphify`, and the auto-memory system. All project-specific bindings
 (backlog path, gate command, merge tool, dev URL, review bots, reviewer chain, E2E) come from a
 per-project config — see **Step 0.5**. With no config it falls back to sensible defaults; `/foreman init`
@@ -546,6 +546,8 @@ You run steps 2-8 on your batch in your own worktree, with these overrides:
   `Co-Authored-By`); temp files go in the scratchpad under your batch name.
 - Never merge. Poll for new bot comments after your last push, and stop pushing once you send your final report
   (`SPEC READY` is not one).
+- Don't invoke `finishing-a-development-branch`, `subagent-driven-development`, `executing-plans` or
+  `using-git-worktrees`: their merge menu, execution handoff and worktree prompt contradict this contract.
 - During a run, hooks enforce part of this contract: a push needs a gate receipt for the pushed tree; no merge,
   no force-push, no rebase, no backlog, rules or config edits; no forbidden trailer lines; before a spec-phase
   batch's release, no edit or commit outside `{{design_spec_dir}}`, no push, and a stop without `SPEC READY` is
@@ -570,7 +572,8 @@ You are in it when your prompt's first line ends in ` spec-phase`.
    function, column, status or file the change touches; for each write, find which client or credentials
    perform it, which roles or permissions reach that path, and why row-level security or permissions allow it;
    note which rules entries apply.
-3. Invoke `superpowers:brainstorming` for its exploration and design discipline, with these overrides, which
+3. Invoke `superpowers:brainstorming` if available, for its exploration and design discipline (without it, do
+   that exploration yourself), with these overrides, which
    win over the skill's own text: always write the spec file from the template, whatever path the skill would
    classify the batch as (a "bounded" batch still gets a spec); no visual companion, no per-section approval
    and no questions to the user (a question the code can't answer goes under **Open questions**); the
@@ -778,13 +781,15 @@ Read `.claude/foreman.config.md`, or the legacy `.claude/improve-next.config.md`
 - Echo the chosen `id`, `title`, and `acceptance` back to the user.
 
 ### 2. Plan (non-trivial only)
-- Anything beyond a typo/one-liner → invoke `brainstorming` then `writing-plans`. Trivial → skip to step 3.
+- Anything beyond a typo/one-liner → invoke `superpowers:brainstorming` then `superpowers:writing-plans` if available; without them, write a short plan yourself (files to change, tests, risks). Trivial → skip to step 3. These overrides win over the skills' own text:
+  - **Autonomous mode** (`loop`/`--auto-merge`): no human gates and no question to the user. Your own check of the plan against the row's `acceptance` is the skill's HARD-GATE approval; a question the code can't answer goes in the PR body. **Manual mode:** ask the human only about a product call the code can't settle.
+  - Stop once the plan is written. Don't take `writing-plans`' Execution Handoff, and never invoke `subagent-driven-development`, `executing-plans`, `using-git-worktrees` or `finishing-a-development-branch`: implementation is step 3, in this checkout, and merging is steps 11-12.
 
 ### 3. Implement
 - **Row procedure:** if the row's `acceptance` names `Procedure <path>`, read that file now and follow it as this pass's implement/verify procedure (it may add preflight, verify and stop rules on top of this command's, including ending the pass with the row `blocked — <reason>`).
 - **Pre-flight self-review FIRST:** read every file matched by `{{rules_glob}}` and recent `feedback_*` memory — the mistake registry. Check your intended change against every relevant entry so you don't reintroduce a known defect (this is what makes the loop compound).
 - **Behavior-preserving** (decomposition/refactor): the existing golden-master test MUST stay green with ZERO edits — that green run IS the proof. Only ADD tests for newly-extracted units. Decline behavior-CHANGING ideas; log them as new backlog rows.
-- **New behavior / bugfix:** use `test-driven-development` (red → green).
+- **New behavior / bugfix:** use `superpowers:test-driven-development` if available (otherwise write the failing test first yourself): red → green.
 - Delegate mechanical/parallelizable work to subagents (Task tool). Follow the rules for the touched area.
 
 ### 4. Gate
@@ -799,7 +804,7 @@ Read `.claude/foreman.config.md`, or the legacy `.claude/improve-next.config.md`
 - Merge-tool "create branch + commit" with `"type(scope): <message>"` → "submit as draft". Record the PR number.
 
 ### 6. Request review — independent local reviewers
-- Invoke `requesting-code-review` (a Claude `general-purpose` subagent reviewer).
+- Invoke `superpowers:requesting-code-review` if available (a Claude `general-purpose` subagent reviewer); without it, dispatch that subagent yourself with the diff, the row's `acceptance` and the Critical/Important/Minor labels the merge gates read.
 - **Also run the reviewer chain**: `$FOREMAN/review.sh <base> <log>` (base = the PR's base branch, e.g. `main`) — a cross-model second opinion (a different model family catches different defects). Run it in the background; each reviewer is bounded by `reviewer_timeout_seconds` and the stall watchdog, and the chain moves to the next reviewer on quota, credits, auth, an unknown model, a stall or a timeout.
   - Exit 0 = a real review is in `<log>`, and `<log>.reviewer` names the reviewer; read and triage it. Exit 1 = the chain is exhausted (`<log>.attempts` says why each fell through): say on the PR that no cross-model review ran and rely on the Claude reviewer. Never treat a missing review as a pass, and never `2>/dev/null` the run.
   - The chain sends the diff (or the repo, for reviewers that read it) to every provider it tries.

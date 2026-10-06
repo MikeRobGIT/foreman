@@ -645,6 +645,37 @@ check "seed is in the argument hint and the token list" test "$(grep -c -F 'seed
 check "plugin version 0.6.0" grep -qF '"version": "0.6.0"' "$root/.claude-plugin/plugin.json"
 check "marketplace version 0.6.0" test "$(python3 -c "import json,sys; print(json.load(open(sys.argv[1]))['plugins'][0]['version'])" "$root/.claude-plugin/marketplace.json")" = 0.6.0
 
+echo "## SKILL.md: superpowers overrides (step 2) and the soft dependency"
+step2=$(awk '/^### 2\. Plan/{f=1;next} /^### 3\. /{f=0} f' "$sk")
+contract=$(awk '/^### Worker contract$/{f=1;next} /^### /{f=0} f' "$sk")
+specphase=$(awk '/^### Worker spec phase$/{f=1;next} /^## /{f=0} f' "$sk")
+check "step 2 stops before writing-plans' Execution Handoff" grep -qF 'Execution Handoff' <<<"$step2"
+check "step 2 forbids subagent-driven-development" grep -qF 'never invoke `subagent-driven-development`' <<<"$step2"
+check "step 2 replaces the HARD-GATE approval in autonomous mode" grep -qF 'HARD-GATE' <<<"$step2"
+check "step 2 falls back when superpowers is missing" grep -qF 'if available' <<<"$step2"
+check "the spec phase falls back when superpowers is missing" grep -qF 'if available' <<<"$specphase"
+check "step 3 names test-driven-development with a fallback" grep -qE 'test-driven-development.*if available|if available.*test-driven-development' "$sk"
+check "step 6 names requesting-code-review with a fallback" grep -qE 'requesting-code-review.*if available|if available.*requesting-code-review' "$sk"
+check "finishing-a-development-branch is not on the reuses list" bash -c "! grep -qF '\`requesting-code-review\`, \`finishing-a-development-branch\`' '$sk'"
+check "the Worker contract bars finishing-a-development-branch" grep -qF 'finishing-a-development-branch' <<<"$contract"
+sp=$(python3 -c "
+import json, os
+try:
+    d = json.load(open(os.path.expanduser('~/.claude/plugins/installed_plugins.json')))
+    es = d.get('plugins', d).get('superpowers@claude-plugins-official') or []
+    print(es[0]['installPath'] if es else '')
+except Exception:
+    print('')
+" 2>/dev/null)
+if [ -n "$sp" ] && [ -f "$sp/skills/brainstorming/SKILL.md" ] && [ -f "$sp/skills/writing-plans/SKILL.md" ]; then
+  while IFS='|' read -r f term; do check "installed superpowers $f still names '$term', which SKILL.md overrides" grep -qiF -- "$term" "$sp/skills/$f/SKILL.md"; done <<'EOF'
+brainstorming|HARD-GATE
+brainstorming|visual companion
+brainstorming|bounded
+writing-plans|Execution Handoff
+EOF
+else echo "SKIP superpowers not installed (drift check)"; fi
+
 echo "## review.sh .entry and cfg.chain(use_env=False)"
 cd "$R"
 chain 60 30 200 quota good >"$T/chain.md"; rv
