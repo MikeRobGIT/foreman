@@ -1517,6 +1517,18 @@ class MergeDisciplineTest(Case):
         self.assertIn('no gt merge during a run', self.fx.bash('gt merge'))
         self.assertIsNone(self.fx.bash('gt merge', sid='S2'))
 
+    def test_a_gh_api_merge_is_denied_during_a_run(self):
+        for cmd in ('gh api -X PUT repos/o/r/pulls/5/merge -f sha=abc1234',
+                    "gh api graphql -f query='mutation { mergePullRequest(input:{pullRequestId:\"x\"}) { clientMutationId } }'"):
+            why = self.fx.bash(cmd)
+            self.assertIn('no gh api merge during a run', why, cmd)
+            self.assertIn('--match-head-commit <sha>', why, cmd)
+            self.assertIsNone(self.fx.bash(cmd, sid='S2'), cmd)   # no run, no check
+
+    def test_gh_api_reads_and_main_session_graphql_from_a_file_are_not_merges(self):
+        for cmd in ('gh api repos/o/r/pulls/5/merge', 'gh api graphql --input q.json'):
+            self.assertIsNone(self.fx.bash(cmd), cmd)
+
     def test_a_subagent_merge_is_decided_locally(self):
         why = self.fx.bash('gh pr merge 5 --squash -d', agent='a1')
         self.assertIn('workers never merge', why)

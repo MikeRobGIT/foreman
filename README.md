@@ -95,7 +95,7 @@ and logout leave a run another live session may still own; a marker no session h
 |---|---|---|
 | `gate_before_push` | run, everyone | `git push`, `gh pr create` and `gt submit` need a gate receipt for the pushed tree. `gate-lock.sh <owner> -- '<gate>'`, run with the exact configured `gate`, mints one. A branch whose diff touches only `gate_exempt`, the backlog and the rules files needs none. A push after a commit or merge in the same call is denied: push in its own call. |
 | `worker_guard` | run, subagents | no merge (`gh pr merge`, `gt merge`, merging `gh api` calls), force-push, push to the default branch, rebase, `gt modify` once pushed, or edits of the backlog, the rules files or the foreman config |
-| `merge_discipline` | run, everyone | `gh pr merge` needs `--match-head-commit <sha>`; `--delete-branch` is refused while another worktree holds the branch; no `gt merge` |
+| `merge_discipline` | run, everyone | `gh pr merge` needs `--match-head-commit <sha>`; `--delete-branch` is refused while another worktree holds the branch; no `gt merge`; no merging `gh api` call (`PUT …/pulls/<n>/merge`, a `mergePullRequest` mutation), which skipped the SHA pin before 0.7.0 |
 | `trailer_guard` | foreman repo | `forbid_trailers` lines are refused in commit, PR and comment messages, and in a `gh pr merge` that would keep them |
 | `backlog_check` | foreman repo | after an Edit/Write of the backlog, problem rows (wrong `\|` count, duplicate ids) are reported back |
 | `worker_briefing` | tagged workers | a subagent whose prompt starts `foreman-worker: <batch>` gets the Worker contract, rendered |

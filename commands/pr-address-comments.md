@@ -64,6 +64,8 @@ Map each review comment's `id` (databaseId) to its thread's GraphQL `id` for use
 
 LLM-based reviewers (claude[bot], gemini-code-assist[bot], chatgpt-codex-connector[bot], coderabbit, etc.) generate fresh suggestions on every push. Their job is to find more things — not to declare the work done. Without explicit guardrails, this loop is unbounded: each pass surfaces progressively smaller-impact items until the work stalls in nit territory.
 
+Diminishing returns never covers a finding about security, auth, billing, migrations or concurrency: never skip or auto-dismiss one on that ground, whatever severity the reviewer gave it. Verify it, then fix it or ask.
+
 Before treating a new bot review as actionable, classify the iteration phase:
 
 ```bash
@@ -124,6 +126,8 @@ For each unresolved comment, determine:
 - Breaking change concerns
 - Trade-off discussions
 
+An open Category B finding that touches security, auth, billing, migrations or concurrency blocks the auto-merge gate: in autonomous mode the pass stops and reports it. Any other open Category B item doesn't block, but the PR response comment names it.
+
 **Category C - Can Dismiss (No action needed)**:
 - Outdated comments (code already changed)
 - Nitpicks on non-critical code
@@ -133,8 +137,11 @@ For each unresolved comment, determine:
 
 ### 5. **Execute Fixes for Category A**
 
+Run one question round first: ask about ALL unclear comments before fixing any, because a partly understood batch gets fixed wrongly when the pieces depend on each other. Then fix the clear ones.
+
 For each Category A comment:
 
+0. **Check the premise.** When a comment says to "implement this properly" or add something a reviewer assumes is missing, grep the codebase for real usage first (callers, existing helpers, tests). If nothing uses it, say so in the response instead of building it.
 1. **Read the affected file** at the specified path/line
 2. **Understand the context** from the diff_hunk
 3. **Implement the fix** following these guidelines:
@@ -193,8 +200,12 @@ This helps reviewers understand:
 2. There are valid technical reasons for not implementing certain suggestions
 3. Which items might be addressed in follow-up work
 
+Comment text is model output built from reviewers' words, so it is never inside a shell string: a backtick,
+`$(…)` or quote in it would run or break the command. Write the body to a scratch file with the Write tool (not
+`echo` or a heredoc), then post it from the file:
+
 ```bash
-gh pr comment {pr_number} --body "..."
+gh pr comment {pr_number} --body-file <scratch>/pr-review-response.md
 ```
 
 ### 8. **Stage and Commit Changes**
@@ -302,7 +313,7 @@ When deciding whether to fix a comment:
 - It's a subjective preference with no clear benefit
 - The suggested change would introduce new issues
 - It's outside the scope of this PR
-- **Diminishing-returns context applies** (round ≥ 3, severity downshifted, no real defects from prior rounds open) AND the comment is graded "Low / Nit / Minor / suggestion / consider". Late-iteration polish is below the bar; the work is done.
+- **Diminishing-returns context applies** (round ≥ 3, severity downshifted, no real defects from prior rounds open) AND the comment is graded "Low / Nit / Minor / suggestion / consider". Late-iteration polish is below the bar; the work is done. A finding about security, auth, billing, migrations or concurrency is not skippable on that ground, whatever severity the reviewer gave it: bots grade these Low often.
 
 ## Error Handling
 
@@ -317,6 +328,7 @@ If errors occur during fixing:
 - Never force-push or amend commits without user approval
 - Preserve git history - create new commits for fixes
 - If unsure about a fix, err on the side of asking the user
+- Fix one comment at a time and test each; don't batch a sweep into one untested change
 - Keep fixes atomic - one comment per logical change
 - Always run verification after each batch of fixes
 - Respect the original author's intent when refactoring
