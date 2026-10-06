@@ -647,7 +647,7 @@ Start the local backlog UI for this repo and print its URL; do nothing else in t
    isn't there, say so and suggest `/foreman init`; don't start anything.
 2. Run it in the background, then print the URL it outputs (one line; the token is its `#t=` fragment):
    ```bash
-   python3 "${CLAUDE_PLUGIN_ROOT}/scripts/ui.py" --repo "$(git worktree list --porcelain | awk '/^worktree /{print substr($0, 10); exit}')"
+   python3 "${CLAUDE_PLUGIN_ROOT}/scripts/ui.py" --repo "$(git worktree list --porcelain | sed -n '1s/^worktree //p')"
    ```
    `--repo` is the main checkout, so every worktree of the repo shares one pending list.
    A second `/foreman ui` reuses the running server. `/foreman ui stop` runs the same script with `--stop`.
