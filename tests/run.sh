@@ -135,6 +135,45 @@ python3 "$root/scripts/bk.py" "$T/seed4" "$T/seed.json" >/dev/null 2>&1
 check "bk.py (real origin): seeded ids start above the placeholder's id on origin" test "$(grep -E '^\| IB-' "$T/seed4/.claude/improvement-backlog.md" | cut -c1-8 | tr '\n' ' ')" = "| IB-2 | | IB-3 | "
 check "...and only the backlog changed" test "$(git -C "$T/seed4" status --short)" = " M .claude/improvement-backlog.md"
 
+echo "## bk.py: dependency problems"
+mkdir -p "$T/dep/.claude" && printf -- '---\n---\n' >"$T/dep/.claude/foreman.config.md"
+cat >"$T/dep/.claude/improvement-backlog.md" <<'EOF'
+| id | title | risk | status | acceptance | source |
+|----|-------|------|--------|------------|--------|
+| IB-1 | first | low | ready | ok | me |
+| IB-2 | second | low | ready | **Depends on:** IB-1 | me |
+| IB-3 | already bad | low | ready | **Depends on:** IB-99 | me |
+EOF
+cp "$T/dep/.claude/improvement-backlog.md" "$T/dep-before.md"
+echo '{"pr": 0, "new_rows": ["| IB-NEW-a | loops | low | ready | **Depends on:** IB-NEW-b | s |", "| IB-NEW-b | loops back | low | ready | **Depends on:** IB-NEW-a | s |"]}' >"$T/dep-cycle.json"
+python3 "$root/scripts/bk.py" "$T/dep" --no-fetch "$T/dep-cycle.json" >"$T/dep-cycle.out" 2>&1
+check "bk.py refuses a report that introduces a dependency cycle (exit 1)" test $? = 1
+check "...naming the cycle" grep -q 'IB-4: on a dependency cycle' "$T/dep-cycle.out"
+check "...and writes nothing" cmp -s "$T/dep-before.md" "$T/dep/.claude/improvement-backlog.md"
+echo '{"pr": 0, "new_rows": ["| IB-NEW-a | needs a missing row | low | ready | **Depends on:** IB-77 | s |"]}' >"$T/dep-missing.json"
+python3 "$root/scripts/bk.py" "$T/dep" --no-fetch "$T/dep-missing.json" >/dev/null 2>&1
+check "bk.py refuses a new row that depends on a missing id" test $? = 1
+echo '{"pr": 0, "new_rows": ["| IB-NEW-a | builds on IB-NEW-b | low | ready | **Depends on:** IB-NEW-b | s |", "| IB-NEW-b | foundation | low | ready | first | s |"]}' >"$T/dep-ok.json"
+python3 "$root/scripts/bk.py" "$T/dep" --no-fetch "$T/dep-ok.json" >"$T/dep-ok.out" 2>&1
+check "bk.py accepts new rows that depend on each other, renumbered (exit 0) even though IB-3 was already bad" test $? = 0
+check "...the marker follows the renumbering" grep -q '^| IB-4 | builds on IB-5 | low | ready | \*\*Depends on:\*\* IB-5 | s |$' "$T/dep/.claude/improvement-backlog.md"
+
+echo "## backlog.py ready (the picker CLI)"
+bl() { python3 "$root/scripts/backlog.py" "$@"; }
+printf '%s\n' '| id | title | risk | status | acceptance | source |' '|---|---|---|---|---|---|' '| IB-1 | [e2e] a | low | ready | x | s |' '| IB-2 | b | low | ready | **Depends on:** IB-1 | s |' '| IB-3 | c | high | ready | x | s |' '| IB-4 | d | low | ready | **Depends on:** IB-3 | s |' >"$T/dep/.claude/improvement-backlog.md"
+check "ready prints the eligible ids in file order" test "$(bl ready "$T/dep" 2>/dev/null | tr '\n' ' ')" = 'IB-1 IB-3 '
+check "ready --limit 1" test "$(bl ready "$T/dep" --limit 1 2>/dev/null)" = IB-1
+check "ready --done frees a dependent" test "$(bl ready "$T/dep" --done IB-1 2>/dev/null | tr '\n' ' ')" = 'IB-1 IB-2 IB-3 '
+check "ready --no-high drops the high-risk row" test "$(bl ready "$T/dep" --no-high 2>/dev/null | tr '\n' ' ')" = 'IB-1 '
+check "ready --tag e2e" test "$(bl ready "$T/dep" --tag e2e 2>/dev/null | tr '\n' ' ')" = 'IB-1 '
+check "waiting rows go to stderr with the reason" grep -q 'waiting: IB-4: IB-3 is risk: high and waits for a human' <(bl ready "$T/dep" 2>&1 >/dev/null)
+check "ready --json" test "$(bl ready "$T/dep" --json | python3 -c 'import json,sys; print(json.load(sys.stdin)["ready"])')" = "['IB-1', 'IB-3']"
+printf '%s\n' '| IB-1 | a | low | ready | **Depends on:** IB-2 | s |' '| IB-2 | b | low | ready | **Depends on:** IB-1 | s |' >"$T/dep/.claude/improvement-backlog.md"
+bl ready "$T/dep" >"$T/dep-none.out" 2>/dev/null; rc=$?
+check "ready exits 1 with no output when every row waits" test "$rc:$(wc -c <"$T/dep-none.out" | tr -d ' ')" = '1:0'
+bl ready "$T/dep" --bogus >/dev/null 2>&1; check "ready exits 2 on bad arguments" test $? = 2
+bl ready "$T/nowhere" >/dev/null 2>&1; check "ready exits 2 when the backlog file is missing" test $? = 2
+
 echo "## wt-setup.sh"
 mkdir -p "$T/repo" && cd "$T/repo" && git init -q -b main && echo x >f && git add f && git commit -qm init
 printf 'SECRET=1\n' >"$T/repo/.env.local"
@@ -707,6 +746,19 @@ check "the Worker contract asks for root cause before a second gate fix" grep -q
 step6=$(awk '/^### 6\. Request review/{f=1;next} /^### 7\. /{f=0} f' "$sk")
 check "step 6 gives the Claude reviewer a Spec axis, kept apart from defects" grep -qF 'Spec axis' <<<"$step6"
 check "a worker resuming a parked spec adds the template's newer sections" grep -qF 'add any section the current template has' <<<"$specphase"
+
+echo "## SKILL.md: the picker and row dependencies"
+step1=$(awk '/^### 1\. Pick the item/{f=1;next} /^### 2\. /{f=0} f' "$sk")
+seedsec=$(awk '/^## Seed/{f=1;next} /^## Step 0.5/{f=0} f' "$sk")
+check "step 1 picks with backlog.py ready" grep -qF 'backlog.py" ready' <<<"$step1"
+check "step 1 passes --no-high in autonomous mode" grep -qF -- '--no-high' <<<"$step1"
+check "step 1 reports rows that wait instead of 'backlog empty'" grep -qF 'no eligible rows; N waiting' <<<"$step1"
+check "step 1 echoes the unmet dependencies of a row named by id" grep -qF 'unmet dependencies' <<<"$step1"
+check "W2 builds its pool with backlog.py ready --done" grep -qF 'backlog.py" ready' <<<"$(grep -A4 -F '**W2 Pick and batch.**' "$sk")"
+check "SKILL.md documents the Depends on marker" grep -qF '**Depends on:** <id>, <id>' "$sk"
+check "seed writes Depends on for rows it orders foundation-first" grep -qF 'Depends on' <<<"$seedsec"
+check "seed in append mode skips a draft that matches an existing row" grep -qF 'matches an existing row' <<<"$seedsec"
+check "the Arguments list names the picker's exit codes" grep -qF 'exit 1 means none is eligible' "$sk"
 
 echo "## review.sh .entry and cfg.chain(use_env=False)"
 cd "$R"

@@ -298,6 +298,7 @@ class Repo:
             path = os.path.join(wt, self.backlog_path)
             with open(path, encoding='utf-8', newline='') as f:
                 bl = backlog.parse(f.read(), self.prefix)
+            deps_before = set(backlog.dep_problems(bl))
             results = backlog.apply(bl, ops)
             bad = [f'{backlog.describe(o)}: {r["reason"]}' for o, r in zip(ops, results) if r['result'] == 'invalid']
             if bad:
@@ -310,6 +311,9 @@ class Repo:
             floor = backlog.reserved_max_id(self.path, self.backlog_path, self.prefix, self.branch)
             mapping = backlog.assign_ids(bl, [o['tmp'] for o in applied if o['op'] == 'add'], floor)
             text = backlog.serialise(bl)
+            introduced = [x for x in backlog.dep_problems(backlog.parse(text, self.prefix)) if x not in deps_before]
+            if introduced:   # the edits stay pending: fix the marker in the UI, then publish again
+                raise PublishError('these changes would leave a dependency problem: ' + '; '.join(introduced))
             with open(path, 'w', encoding='utf-8', newline='') as f:
                 f.write(text)
             title = self.title_for(applied)

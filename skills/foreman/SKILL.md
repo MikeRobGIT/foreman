@@ -90,7 +90,8 @@ What changes in autonomous mode (everything else is identical):
 - **Step 12 — merge, then loop.** After the merge + post-merge sync, return to **step 1** for the
   next item, in the same invocation.
 - **Termination.** The loop ends when: no eligible `status: ready` item remains (report "backlog
-  empty"); a pass can't reach a green merge (stop, PR left open); or only `risk: high` items remain
+  empty", or "no eligible rows; N waiting: …" when rows wait on a `Depends on` row that isn't done);
+  a pass can't reach a green merge (stop, PR left open); or only `risk: high` items remain
   (report them so the human can run each by id). However it ends, run `python3 $FOREMAN/hooks.py run-end`
   last (see **Hooks**).
 
@@ -114,9 +115,11 @@ W1-W6 to keep them apart from steps 0-12; W6's stop conditions replace the auton
   `git worktree prune`. A parked batch's worktree is removed at parking (W3.6, the one `--force` exception);
   its branch is deleted after W5 commits its spec.
 - **W2 Pick and batch.**
-  - Pool: `status: ready` rows (list them with grep and read only the rows you pick; backlogs get large),
-    filtered by `tag:<x>` if given, minus rows that are `risk: high`, match `parallel_skip`, name a step-3
-    `Procedure`, or are named by an open PR (match the id as a whole word). Admit rows that seem to need a human
+  - Pool: `python3 "$FOREMAN/backlog.py" ready <repo> [--tag x] --no-high --done <ids merged in this run>` prints
+    the eligible rows (`status: ready`, `tag:<x>`, not `risk: high`, every `Depends on` row done; read only the rows
+    you pick; backlogs get large). Pass every row merged earlier in this run to `--done`: the file shows it `ready`
+    until W5's bookkeeping PR merges. Then drop rows that match `parallel_skip`, name a step-3 `Procedure`, or are
+    named by an open PR (match the id as a whole word). Admit rows that seem to need a human
     decision: the spec phase parks them `open question` if they do.
   - Take ~3N. Group them by the files and symbols they touch (`git grep` the symbols and their importers)
     so no two batches share a file (except `parallel_shared_files`) or use a symbol another batch moves,
@@ -687,8 +690,8 @@ never commit, push or open a PR. Not a run: no run marker, no worker.
    (`<repo>` is `git rev-parse --show-toplevel`). If the backlog file doesn't exist, stop and suggest
    `/foreman init`. If it holds a row other than the template's placeholder (the one whose source is
    `setup example, replace me`), stop and say so unless `append` was given. With `append`, keep every existing
-   row; `bk.py` numbers the new ones above every existing id and puts them after the highest-numbered row. The
-   placeholder is dropped either way.
+   row and skip any draft whose title matches an existing row; `bk.py` numbers the new ones above every existing
+   id and puts them after the highest-numbered row. The placeholder is dropped either way.
 2. **Survey.** Read the README and docs, the directory layout, the tests and the `gate`. Grep for
    `TODO|FIXME|HACK`. Look for untested core modules, dead config, stale docs and gate gaps. Build on what exists;
    don't propose what the code already does. Don't run the gate and don't install anything. With a
@@ -696,7 +699,10 @@ never commit, push or open a PR. Not a run: no run marker, no worker.
    that needs a human decision becomes a `deferred` row that says what is unclear.
 3. **Draft rows.** One row = one PR-sized unit:
    - Atomic: one concern each. Order them foundation first (test and tooling gaps before features), because the
-     topmost `ready` row runs first.
+     picker offers `ready` rows in file order.
+   - When a row can't start before another, put `**Depends on:** <prefix>-NEW-a, <prefix>-NEW-b` in its
+     `acceptance` (ids joined by `, `, using the placeholders: `bk.py` numbers them). Only a real prerequisite
+     counts; file order already says "earlier first".
    - The most direct path. No row for speculative or cosmetic work.
    - `acceptance` is verifiable: a test that fails before and passes after, a command's output, a green gate.
      Never "improve X".
@@ -776,9 +782,10 @@ Read `.claude/foreman.config.md`, or the legacy `.claude/improve-next.config.md`
 - Sync to fresh main (merge-tool "sync"). If the working tree is dirty (`git status --porcelain`, **including untracked files**), STOP — never start a pass on uncommitted work. Untracked files count on purpose: step 5's create stages them (`git add -A` semantics), so a stray file would be silently swept into the commit.
 
 ### 1. Pick the item
-- Read `{{backlog_path}}`. Select the topmost `status: ready` row (or the `<item-id>` argument). With `tag:<x>`, only rows whose title contains `[x]` are eligible.
-- If `risk: high`: **manual mode** → STOP and ask the human to confirm; **autonomous mode** → skip it and pick the next non-high `status: ready` row (a high-risk item only ever runs from an explicit `<item-id>`).
-- If no eligible `status: ready` item remains: STOP. In autonomous mode, report "backlog empty" (with `tag:<x>`: "no ready [x] rows") and end the loop.
+- Pick with code, not by eye: `python3 "$FOREMAN/backlog.py" ready <repo> --limit 1` (add `--tag x` for `tag:<x>`, `--no-high` in autonomous mode) prints the first eligible id in the order of `{{backlog_path}}`. A `ready` row is eligible when every row in its `**Depends on:** <id>, <id>` marker (inside its `acceptance`) is `done`; a row with no marker is always eligible. Rows that wait are listed on stderr with the reason. Exit 0 means ids printed, exit 1 means none is eligible, exit 2 is a usage or file error. The `<item-id>` argument runs that row instead.
+- A row named by `<item-id>` runs even when its dependencies aren't done: echo its unmet dependencies; in manual mode ask the human first.
+- If `risk: high`: **manual mode** → STOP and ask the human to confirm; **autonomous mode** → `--no-high` already skips it (a high-risk item only ever runs from an explicit `<item-id>`).
+- If no id is printed: STOP. In autonomous mode, report "no eligible rows; N waiting: <id: reason, …>" when rows wait (a human unblocks them or runs one by id), else "backlog empty" (with `tag:<x>`: "no ready [x] rows"), and end the loop.
 - Echo the chosen `id`, `title`, and `acceptance` back to the user.
 
 ### 2. Plan (non-trivial only)
