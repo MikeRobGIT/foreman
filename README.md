@@ -23,6 +23,7 @@ Then, in a project: `/foreman init`, review the two files it writes, commit them
 | command | what it does |
 |---|---|
 | `/foreman init` | write `.claude/foreman.config.md` and the backlog from the templates, filled with what it can detect (gate command, merge tool, CI checks, PR bots, reviewer CLIs, env files, install command). Never overwrites. |
+| `/foreman seed [<prd-path>] [append]` | draft the first backlog rows from the codebase and an optional PRD or spec: PR-sized, foundation first, each with a checkable acceptance, anything over one PR split. Writes the backlog file only (review the diff, then commit); refuses a backlog that already has real rows unless you say `append`. |
 | `/foreman ui` | start the backlog UI (see **Backlog UI**); `ui stop` stops it. |
 | `/foreman` | one pass on the topmost `ready` row; stops before merge |
 | `/foreman IB-12` | one pass on that row (the only way to run a `risk: high` row) |
@@ -84,7 +85,7 @@ merge command the scan can't read ("couldn't read this command", "couldn't read 
 worker's commit whose contents can't be told.
 
 Run-only pieces act while the session's **run marker** exists: a prompt starting `/foreman` (or `/loop … /foreman`;
-not `ui` or `init`) writes it, the skill runs `hooks.py run-end` when the run ends, `/clear` and logout delete it,
+not `ui`, `init` or `seed`) writes it, the skill runs `hooks.py run-end` when the run ends, `/clear` and logout delete it,
 and it expires after 48 hours. A session moved to the background, forked or resumed gets a new id; it keeps the run
 through an alias file `runs/<new id>.json`, found from the `continued-in` record ending the old transcript. `/clear`
 and logout leave a run another live session may still own; a marker no session holds any more expires by its
@@ -241,7 +242,7 @@ spec mode (`FOREMAN_REVIEW_MODE=spec`; `_lib.sh` makes the others fall through).
 | `scripts/review.sh [--spec <spec path>] <base> <log>` | the reviewer chain; `--spec` reviews a batch spec (exit 0 landed, 1 exhausted, 2 hard error, 143 terminated) |
 | `scripts/gate-lock.sh [--name L] <owner> -- <cmd>` | run a gate holding one of `gate_slots` slots shared by every worktree of the repo (`~/.claude/gate-locks/<repo>`); stale slots (holder dead 90+ min) are reclaimed; exits with the command's code |
 | `scripts/wt-setup.sh <worktree>` / `--check <dir>` | copy env files, install, stale-install check; `--check` with no `stale_check` configured fails |
-| `scripts/bk.py <repo> [--dry-run] <reports...>` | fold worker JSON reports into the backlog and rules files; writes nothing on any mismatch |
+| `scripts/bk.py <repo> [--dry-run] <reports...>` | fold worker JSON reports into the backlog and rules files (also how `/foreman seed` adds rows to an empty table); a `new_rows` entry must be a 6-cell row with a valid risk and status (since 0.6.0 this applies to worker reports too); writes nothing on any mismatch |
 | `scripts/cfg.py <repo> <key> [default]` | read a config key (no PyYAML needed) |
 | `scripts/hooks.py <event>` | the hooks' dispatcher; orchestrator CLIs `run-end` (always exits 0), `release <batch> <sha>`, `stopping <batch>`, `forget <batch>` (these three exit 3 when the hooks are inactive) |
 | `scripts/state.py <path>` | print the repo's state dir (`~/.claude/foreman/<repo-key>`, or under `$FOREMAN_HOME`) |

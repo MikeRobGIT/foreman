@@ -215,7 +215,7 @@ class RunMarkerTest(Case):
 
     def test_prompts_that_do_not(self):
         for i, prompt in enumerate(('please run /foreman later', '/foreman ui', '/foreman init', '/foreman ui stop',
-                                    '/foremanx', '/loop 2h /foreman ui')):
+                                    '/foremanx', '/loop 2h /foreman ui', '/foreman seed', '/foreman seed docs/prd.md append')):
             self.fx.start_run(sid=f'N{i}', prompt=prompt)
             self.assertIsNone(self.fx.marker(f'N{i}'), prompt)
 
@@ -229,11 +229,13 @@ class RunMarkerTest(Case):
         expand('E3', 'other', '')
         expand('E4', 'foreman', '')
         expand('E5', 'foreman:foreman', 'init')
+        expand('E6', 'foreman:foreman', 'seed docs/prd.md')
         self.assertEqual(self.fx.marker('E1')['args'], 'parallel 2')
         self.assertIsNone(self.fx.marker('E2'))
         self.assertIsNone(self.fx.marker('E3'))
         self.assertEqual(self.fx.marker('E4')['args'], '')
         self.assertIsNone(self.fx.marker('E5'))
+        self.assertIsNone(self.fx.marker('E6'))
 
     def test_submit_and_expansion_of_one_prompt_agree(self):
         self.fx.start_run(prompt='/foreman parallel 2')
