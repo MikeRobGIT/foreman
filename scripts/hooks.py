@@ -377,7 +377,7 @@ def session_end(h):
 
 
 def session_start(h):
-    """Export this session's run id to every later Bash call (probe P1): append `export FOREMAN_SESSION=<id>` to
+    """After a compaction in a live run, remind the session where the skill's steps and the batch state are. Export this session's run id to every later Bash call (probe P1): append `export FOREMAN_SESSION=<id>` to
     $CLAUDE_ENV_FILE, which batches.py reads. Nothing is written when the harness sets no env file. A session that
     continues another under a new id (`source` fork or resume) first adopts that session's run (L5). It still exports
     its own id: batches.py resolves it through the alias while the run lasts, and a later run started in this session
@@ -393,6 +393,15 @@ def session_start(h):
             f.seek(0)
             text = f.read()
             f.write(('\n' if text and not text.endswith('\n') else '') + f'export FOREMAN_SESSION={sid}\n')
+    if h.inp.get('source') == 'compact':   # a long wave compacts away the skill's steps: say where they are
+        repo = repo_at(h.cwd)
+        m = marker(repo, h.run_sid(repo)) if repo else None
+        if m:
+            print(json.dumps({'hookSpecificOutput': {'hookEventName': 'SessionStart', 'additionalContext':
+                  f"foreman: this session is in a run (`/foreman {m[1].get('args') or ''}`) and its context was just compacted. "
+                  'Before the next step, re-read the foreman skill: the Steps for a serial pass, and for `parallel` the '
+                  f'Orchestrator W-steps. Batch state is on disk, not in your context: `python3 {HERE}/batches.py show` '
+                  'lists every batch with its status, tasks and remaining time.'}}))
 
 
 HANDLERS['run-start'] = run_start

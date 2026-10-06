@@ -452,6 +452,7 @@ W1-W6 to keep them apart from steps 0-12; W6's stop conditions replace the auton
      begins `foreman-worker: <batch>`, without ` spec-phase` because the spec is already released, names the
      spec path and the release message's Minor findings, and carries W3's copies of the Worker contract and
      Worker spec phase, and its first step is `git switch <local branch>` (the branch the spec phase made).
+     - **Cap the fix loop.** Rounds 1-3 go back to the same worker. Rounds 4-5 go to a fresh worker (`fw-<batch>-2`, then `-3`) with the consolidated scope in one prompt: the original brief, every later finding, the previous worker's report and the branch, because a long resumed thread starts to drop directives. Round 6 stops: leave the PR open, say in the run report which findings are still unresolved, and carry on with the rest of the wave. `batches.py` already counts the rounds (`bump <batch> pr_rounds`); it needs no new state.
   5. **Approve.** Manual mode: present the ready PRs with their evidence, head SHAs and, for spec-phase batches, their deviations with W4.2b's rulings, and stop; the human
      approves a PR at a SHA. This stop is a pause, not the run's end: don't run `run-end` here.
   6. **Merge.** Spec-phase batches merge only at a SHA with a clean W4.2b verdict. Reply to and resolve every thread (step 8's triage), post the merge summary, check the PR's

@@ -693,8 +693,8 @@ check "...and ends before Step 0.5" appears_before "$sk" '## Seed' '## Step 0.5'
 check "Seed dry-runs before it deletes the placeholder" appears_before "$sk" '2. Run `python3 "$FOREMAN/bk.py" <repo> --dry-run <file>`' '3. Only once the dry run is clean'
 check "Seed numbers rows through bk.py" grep -qF 'python3 "$FOREMAN/bk.py" <repo> --dry-run <file>' "$SK"
 check "seed is in the argument hint and the token list" test "$(grep -c -F 'seed [<prd-path>] [append]' "$SK")" = 2
-check "plugin version 0.6.0" grep -qF '"version": "0.6.0"' "$root/.claude-plugin/plugin.json"
-check "marketplace version 0.6.0" test "$(python3 -c "import json,sys; print(json.load(open(sys.argv[1]))['plugins'][0]['version'])" "$root/.claude-plugin/marketplace.json")" = 0.6.0
+check "plugin version 0.7.0" grep -qF '"version": "0.7.0"' "$root/.claude-plugin/plugin.json"
+check "marketplace version 0.7.0" test "$(python3 -c "import json,sys; print(json.load(open(sys.argv[1]))['plugins'][0]['version'])" "$root/.claude-plugin/marketplace.json")" = 0.7.0
 
 echo "## SKILL.md: superpowers overrides (step 2) and the soft dependency"
 step2=$(awk '/^### 2\. Plan/{f=1;next} /^### 3\. /{f=0} f' "$sk")
@@ -772,6 +772,13 @@ check "SKILL.md's Hooks table has the verdict_receipt row" grep -qF '| `verdict_
 check "README's Hooks table has the verdict_receipt row" grep -qF '| `verdict_receipt` |' "$root/README.md"
 check "README says how to turn it off" grep -qF 'hooks_disabled: [verdict_receipt]' "$root/README.md"
 check "the design spec is committed" test -f "$root/docs/superpowers/specs/2026-10-05-verdict-receipt-design.md"
+
+echo "## SKILL.md: the PR fix-round cap and the compaction reminder"
+w44=$(awk '/^  4\. \*\*Findings\*\*/{f=1} f&&/^  5\. \*\*/{f=0} f' "$sk")
+check "W4.4 resumes the worker for rounds 1 to 3" grep -qF 'Rounds 1-3' <<<"$w44"
+check "W4.4 hands rounds 4 and 5 to a fresh worker with the consolidated scope" grep -qF 'Rounds 4-5' <<<"$w44"
+check "W4.4 stops at round 6 and leaves the PR open for the human" grep -qF 'Round 6' <<<"$w44"
+check "README says a compaction in a live run re-injects where the steps are" grep -qF 'compaction' "$root/README.md"
 
 echo "## review.sh .entry and cfg.chain(use_env=False)"
 cd "$R"
