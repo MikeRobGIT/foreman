@@ -693,8 +693,8 @@ check "...and ends before Step 0.5" appears_before "$sk" '## Seed' '## Step 0.5'
 check "Seed dry-runs before it deletes the placeholder" appears_before "$sk" '2. Run `python3 "$FOREMAN/bk.py" <repo> --dry-run <file>`' '3. Only once the dry run is clean'
 check "Seed numbers rows through bk.py" grep -qF 'python3 "$FOREMAN/bk.py" <repo> --dry-run <file>' "$SK"
 check "seed is in the argument hint and the token list" test "$(grep -c -F 'seed [<prd-path>] [append]' "$SK")" = 2
-check "plugin version 0.6.0" grep -qF '"version": "0.6.0"' "$root/.claude-plugin/plugin.json"
-check "marketplace version 0.6.0" test "$(python3 -c "import json,sys; print(json.load(open(sys.argv[1]))['plugins'][0]['version'])" "$root/.claude-plugin/marketplace.json")" = 0.6.0
+check "plugin version 0.7.0" grep -qF '"version": "0.7.0"' "$root/.claude-plugin/plugin.json"
+check "marketplace version 0.7.0" test "$(python3 -c "import json,sys; print(json.load(open(sys.argv[1]))['plugins'][0]['version'])" "$root/.claude-plugin/marketplace.json")" = 0.7.0
 
 echo "## SKILL.md: superpowers overrides (step 2) and the soft dependency"
 step2=$(awk '/^### 2\. Plan/{f=1;next} /^### 3\. /{f=0} f' "$sk")
